@@ -252,13 +252,19 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         right_camera = self.scene["right_camera"]
 
         # Get current action (from action manager if available)
+        action_dim = 12
+        if hasattr(self, "action_manager") and hasattr(self.action_manager, "total_action_dim"):
+            try:
+                action_dim = int(self.action_manager.total_action_dim)
+            except Exception:
+                action_dim = 12
         if hasattr(self, "action_manager") and self.action_manager is not None:
             try:
                 action = self.action_manager.action.squeeze(0)
             except Exception:
-                action = torch.zeros(12, device=self.device)
+                action = torch.zeros(action_dim, device=self.device)
         else:
-            action = torch.zeros(12, device=self.device)
+            action = torch.zeros(action_dim, device=self.device)
 
         left_joint_pos = torch.cat(
             [left_arm.data.joint_pos[:, i].unsqueeze(1) for i in range(6)], dim=-1
@@ -654,6 +660,37 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         rot_w = PoseUtils.matrix_from_quat(quat_w)
         return PoseUtils.make_pose(pos_w, rot_w)
 
+    def _is_native_mimic_ik_action_contract(self) -> bool:
+        """Return True when this env is configured to accept native 16D IK actions."""
+        try:
+            if hasattr(self, "action_manager") and hasattr(self.action_manager, "total_action_dim"):
+                return int(self.action_manager.total_action_dim) == 16
+        except Exception:
+            pass
+        return False
+
+    def _get_arm_world_base_transform_np(self, arm_name: str, env_i: int) -> np.ndarray:
+        """Get world<-base transform for one arm and env as a 4x4 matrix."""
+        arm = self.scene[arm_name]
+        base_pos_w = arm.data.root_pos_w[env_i].detach().cpu().numpy()
+        base_quat_w = arm.data.root_quat_w[env_i].detach().cpu().numpy()
+        T_world_base = np.eye(4, dtype=np.float64)
+        T_world_base[:3, 3] = base_pos_w
+        T_world_base[:3, :3] = PoseUtils.matrix_from_quat(
+            torch.as_tensor(base_quat_w, dtype=torch.float32, device=self.device).unsqueeze(0)
+        )[0].detach().cpu().numpy()
+        return T_world_base
+
+    def _world_pose_to_base_pose_np(self, arm_name: str, env_i: int, T_world_pose: np.ndarray) -> np.ndarray:
+        """Transform one pose from world frame to arm base frame."""
+        T_world_base = self._get_arm_world_base_transform_np(arm_name, env_i)
+        return np.linalg.inv(T_world_base) @ T_world_pose
+
+    def _base_pose_to_world_pose_np(self, arm_name: str, env_i: int, T_base_pose: np.ndarray) -> np.ndarray:
+        """Transform one pose from arm base frame to world frame."""
+        T_world_base = self._get_arm_world_base_transform_np(arm_name, env_i)
+        return T_world_base @ T_base_pose
+
     def _compute_target_pose_from_joint_targets(self, arm_name: str, joint_targets: torch.Tensor) -> torch.Tensor:
         if not self._init_ik_solver_if_needed() or self._ik_solver is None:
             return self.get_robot_eef_pose(arm_name)
@@ -738,6 +775,57 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         left_grip = _normalize_gripper_action(gripper_action_dict.get("left_arm"), num_envs)
         right_grip = _normalize_gripper_action(gripper_action_dict.get("right_arm"), num_envs)
 
+        # Native mimic IK contract: action space is [left(pos+quat+grip=8), right(...=8)].
+        if self._is_native_mimic_ik_action_contract():
+            action = torch.zeros((num_envs, 16), device=self.device, dtype=torch.float32)
+
+            def _fill_arm_native(
+                arm_name: str,
+                target_pose: torch.Tensor | None,
+                gripper: torch.Tensor | None,
+                action_col_offset: int,
+            ) -> None:
+                arm = self.scene[arm_name]
+                if target_pose is None:
+                    target_pose = self.get_robot_eef_pose(arm_name)
+                if target_pose.shape[0] != num_envs:
+                    target_pose = target_pose[:1].expand(num_envs, -1, -1).clone()
+
+                for i in range(num_envs):
+                    env_i = env_id if num_envs == 1 else min(i, self.num_envs - 1)
+                    T_world_target = target_pose[i].detach().cpu().numpy()
+                    T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
+
+                    pos_base = torch.as_tensor(T_base_target[:3, 3], device=self.device, dtype=torch.float32)
+                    rot_base = torch.as_tensor(T_base_target[:3, :3], device=self.device, dtype=torch.float32)
+                    quat_base_wxyz = PoseUtils.quat_from_matrix(rot_base.unsqueeze(0))[0]
+
+                    current_grip = float(arm.data.joint_pos[env_i, 5].item())
+                    grip_val = float(gripper[i].item()) if gripper is not None else current_grip
+                    pose_action = torch.cat([pos_base, quat_base_wxyz], dim=0)
+
+                    # Optional per-subtask action noise support used by MimicGen.
+                    if action_noise_dict is not None and arm_name in action_noise_dict:
+                        noise_scale = torch.as_tensor(
+                            action_noise_dict[arm_name], device=self.device, dtype=torch.float32
+                        ).reshape(-1)
+                        if noise_scale.numel() == 1:
+                            noise = noise_scale.expand(7) * torch.randn(7, device=self.device)
+                        elif noise_scale.numel() >= 7:
+                            noise = noise_scale[:7] * torch.randn(7, device=self.device)
+                        else:
+                            noise = noise_scale[-1:].expand(7) * torch.randn(7, device=self.device)
+                        pose_action = pose_action + noise
+                        quat = pose_action[3:7]
+                        pose_action[3:7] = quat / torch.linalg.norm(quat).clamp_min(1e-12)
+
+                    action[i, action_col_offset : action_col_offset + 7] = pose_action
+                    action[i, action_col_offset + 7] = grip_val
+
+            _fill_arm_native("left_arm", left_target, left_grip, 0)
+            _fill_arm_native("right_arm", right_target, right_grip, 8)
+            return action
+
         # Keep a small non-zero orientation term so IK does not collapse to degenerate
         # position-only solutions that often underuse elbow flexion.
         ik_orientation_weight = float(getattr(self.cfg, "mimic_ik_orientation_weight", 0.01))
@@ -781,17 +869,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             for i in range(num_envs):
                 env_i = env_id if num_envs == 1 else min(i, self.num_envs - 1)
                 current_joints = arm.data.joint_pos[env_i].detach().cpu().numpy()
-                base_pos_w = arm.data.root_pos_w[env_i].detach().cpu().numpy()
-                base_quat_w = arm.data.root_quat_w[env_i].detach().cpu().numpy()
-
-                T_world_base = np.eye(4, dtype=np.float64)
-                T_world_base[:3, 3] = base_pos_w
-                T_world_base[:3, :3] = PoseUtils.matrix_from_quat(
-                    torch.as_tensor(base_quat_w, dtype=torch.float32, device=self.device).unsqueeze(0)
-                )[0].detach().cpu().numpy()
-
                 T_world_target = target_pose[i].detach().cpu().numpy()
-                T_base_target = np.linalg.inv(T_world_base) @ T_world_target
+                T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
                 quat_base_xyzw = mat_to_quat(T_base_target[:3, :3])
                 gripper_val = float(gripper[i].item()) if gripper is not None else float(current_joints[5])
                 ee_pose = np.concatenate([T_base_target[:3, 3], quat_base_xyzw, [gripper_val]], axis=0)
@@ -820,6 +899,29 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         if action.ndim == 1:
             action = action.unsqueeze(0)
         num_envs = action.shape[0]
+        if int(action.shape[-1]) == 16:
+            left_target = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            right_target = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+
+            def _decode_arm_target(arm_name: str, action_col_offset: int) -> torch.Tensor:
+                target_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+                for i in range(num_envs):
+                    env_i = min(i, self.num_envs - 1)
+                    pos_base = action[i, action_col_offset : action_col_offset + 3]
+                    quat_base_wxyz = action[i, action_col_offset + 3 : action_col_offset + 7]
+                    T_base_target = torch.eye(4, device=self.device, dtype=torch.float32)
+                    T_base_target[:3, 3] = pos_base
+                    T_base_target[:3, :3] = PoseUtils.matrix_from_quat(quat_base_wxyz.unsqueeze(0))[0]
+                    T_world_target = self._base_pose_to_world_pose_np(
+                        arm_name, env_i, T_base_target.detach().cpu().numpy()
+                    )
+                    target_pose[i] = torch.as_tensor(T_world_target, device=self.device, dtype=torch.float32)
+                return target_pose
+
+            left_target = _decode_arm_target("left_arm", 0)
+            right_target = _decode_arm_target("right_arm", 8)
+            return {"left_arm": left_target, "right_arm": right_target}
+
         if action.shape[-1] < 12:
             return {
                 "left_arm": self.get_robot_eef_pose("left_arm"),
@@ -1042,3 +1144,15 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             "grasp_right": grasp_right_sleeve,
             "fold_complete": fold_signal,
         }
+
+
+class GarmentFoldMimicEnv(GarmentFoldEnv):
+    """Garment fold env variant that enables native mimic IK action contract."""
+
+    def __init__(self, cfg: GarmentFoldEnvCfg, render_mode: str | None = None, **kwargs):
+        task_type = str(getattr(cfg, "task_type", "bi-so101leader"))
+        mimic_task_type = task_type if task_type.startswith("mimic_") else f"mimic_{task_type}"
+        cfg.use_teleop_device(mimic_task_type)
+        # Keep runtime task type for utility helpers that expect non-mimic labels.
+        cfg.task_type = task_type
+        super().__init__(cfg, render_mode=render_mode, **kwargs)

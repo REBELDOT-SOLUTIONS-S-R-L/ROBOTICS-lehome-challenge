@@ -19,7 +19,7 @@ gym.register(
 
 gym.register(
     id="LeHome-BiSO101-ManagerBased-Garment-Mimic-v0",
-    entry_point=f"{__name__}.garment_fold_env:GarmentFoldEnv",
+    entry_point=f"{__name__}.garment_fold_env:GarmentFoldMimicEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.fold_cloth_bi_arm_mimic_env_cfg:GarmentFoldMimicEnvCfg",

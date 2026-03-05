@@ -1523,7 +1523,18 @@ def replay_episode(
         print(
             f"\tReplay mode: IK actions (dim={actions.shape[1]}, quat_order={args_cli.ik_quat_order}, frame={ik_frame})."
         )
-        if hasattr(env, "_init_ik_solver_if_needed"):
+        native_ik_action_contract = False
+        if hasattr(env, "_is_native_mimic_ik_action_contract"):
+            try:
+                native_ik_action_contract = bool(env._is_native_mimic_ik_action_contract())
+            except Exception:
+                native_ik_action_contract = False
+        if (not native_ik_action_contract) and expected_action_dim is not None:
+            native_ik_action_contract = int(expected_action_dim) == int(args_cli.ik_action_dim)
+
+        if native_ik_action_contract:
+            print("\tIK replay will use native env IK action contract (no Pinocchio pose->joint conversion).")
+        if (not native_ik_action_contract) and hasattr(env, "_init_ik_solver_if_needed"):
             try:
                 if not bool(env._init_ik_solver_if_needed()):
                     raise RuntimeError("environment IK solver initialization returned False")

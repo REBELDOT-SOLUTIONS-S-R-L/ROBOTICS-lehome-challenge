@@ -142,7 +142,7 @@ class GarmentDatagenRecorder(RecorderTerm):
         # 2. Target EEF poses (FK from action targets)
         # ---------------------------------------------------------------
         try:
-            action = env.action_manager.action  # (num_envs, 12)
+            action = env.action_manager.action  # (num_envs, action_dim)
             target_eef_pose = env.action_to_target_eef_pose(action)
         except Exception:
             target_eef_pose = eef_pose  # Fallback
@@ -152,8 +152,11 @@ class GarmentDatagenRecorder(RecorderTerm):
         # ---------------------------------------------------------------
         try:
             action = env.action_manager.action
-            left_gripper = action[:, _GRIPPER_JOINT_IDX:_GRIPPER_JOINT_IDX + 1]
-            right_gripper = action[:, 6 + _GRIPPER_JOINT_IDX:6 + _GRIPPER_JOINT_IDX + 1]
+            # Delegate extraction to env-level API so this recorder stays
+            # compatible with both 12D joint and 16D native IK contracts.
+            gripper_action = env.actions_to_gripper_actions(action)
+            left_gripper = gripper_action["left_arm"]
+            right_gripper = gripper_action["right_arm"]
         except Exception:
             left_gripper = left_joint_pos[:, _GRIPPER_JOINT_IDX:_GRIPPER_JOINT_IDX + 1]
             right_gripper = right_joint_pos[:, _GRIPPER_JOINT_IDX:_GRIPPER_JOINT_IDX + 1]

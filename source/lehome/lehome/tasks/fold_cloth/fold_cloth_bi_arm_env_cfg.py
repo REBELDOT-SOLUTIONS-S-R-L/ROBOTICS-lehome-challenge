@@ -7,6 +7,9 @@ IsaacLab's standard asset types.
 """
 from __future__ import annotations
 
+from typing import Any
+
+import torch
 import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.envs.mdp.actions.actions_cfg import JointPositionActionCfg
@@ -31,6 +34,7 @@ from .mdp import garment_folded
 
 from lehome.assets.robots.lerobot import SO101_FOLLOWER_CFG
 from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_CFG
+from lehome.devices.action_process import init_action_cfg, preprocess_device_action as _preprocess_device_action
 
 ##
 # Scene definition
@@ -161,16 +165,31 @@ class GarmentFoldSceneCfg(InteractiveSceneCfg):
 
 @configclass
 class ActionsCfg:
-    """Action specifications — joint position targets for both arms (12D total)."""
+    """Action specifications for bimanual control.
+
+    Default (non-mimic): 12D joint-space actions
+      [left_arm(5), left_gripper(1), right_arm(5), right_gripper(1)].
+    Mimic mode can override these terms to native IK via ``use_teleop_device``.
+    """
 
     left_arm_action: JointPositionActionCfg = JointPositionActionCfg(
         asset_name="left_arm",
-        joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+        joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+        use_default_offset=False,
+    )
+    left_gripper_action: JointPositionActionCfg = JointPositionActionCfg(
+        asset_name="left_arm",
+        joint_names=["gripper"],
         use_default_offset=False,
     )
     right_arm_action: JointPositionActionCfg = JointPositionActionCfg(
         asset_name="right_arm",
-        joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"],
+        joint_names=["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"],
+        use_default_offset=False,
+    )
+    right_gripper_action: JointPositionActionCfg = JointPositionActionCfg(
+        asset_name="right_arm",
+        joint_names=["gripper"],
         use_default_offset=False,
     )
 
@@ -276,6 +295,8 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
 
     # Task description
     task_description: str = "Fold the garment on the table."
+    # Teleop / action contract name (updated by scripts)
+    task_type: str = "bi-so101leader"
 
     def __post_init__(self):
         """Post initialization."""
@@ -286,3 +307,12 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
 
         self.viewer.eye = (0, -1.2, 1.3)
         self.viewer.lookat = (0, 6.4, -2.8)
+
+    def use_teleop_device(self, teleop_device: str) -> None:
+        """Switch action-term contract based on teleop/mimic device mode."""
+        self.task_type = teleop_device
+        self.actions = init_action_cfg(self.actions, device=teleop_device)
+
+    def preprocess_device_action(self, action: dict[str, Any], teleop_device) -> torch.Tensor:
+        """Convert incoming teleop payload to env action tensor."""
+        return _preprocess_device_action(action, teleop_device)

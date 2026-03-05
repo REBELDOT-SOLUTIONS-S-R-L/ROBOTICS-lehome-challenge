@@ -67,7 +67,13 @@ def get_task_type(task: str | None, task_type: str | None = None) -> str:
     if task_type is not None:
         return task_type
 
-    if task and "BiArm" in task:
+    task_lower = task.lower() if isinstance(task, str) else ""
+    if task and (
+        "BiArm" in task
+        or "biso101" in task_lower
+        or "bimanual" in task_lower
+        or task_lower.startswith("lehome-bi")
+    ):
         return "bi-so101leader"
     else:
         return "so101leader"

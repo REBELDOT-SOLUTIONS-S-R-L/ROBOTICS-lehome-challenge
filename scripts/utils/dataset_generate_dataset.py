@@ -1210,7 +1210,20 @@ def main():
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
 
-    if hasattr(env, "_init_ik_solver_if_needed"):
+    requires_env_ik_solver = True
+    if hasattr(env, "_is_native_mimic_ik_action_contract"):
+        try:
+            requires_env_ik_solver = not bool(env._is_native_mimic_ik_action_contract())
+        except Exception:
+            requires_env_ik_solver = True
+    if requires_env_ik_solver and hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
+        try:
+            requires_env_ik_solver = int(env.action_manager.total_action_dim) != 16
+        except Exception:
+            pass
+    if not requires_env_ik_solver:
+        print("Using native env IK action contract for generation (no Pinocchio pose->joint conversion).")
+    if requires_env_ik_solver and hasattr(env, "_init_ik_solver_if_needed"):
         try:
             if not bool(env._init_ik_solver_if_needed()):
                 raise RuntimeError("environment IK solver initialization returned False")
