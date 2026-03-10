@@ -9,6 +9,7 @@ Script to add mimic annotations to demos to be used as source demos for mimic da
 
 import argparse
 import json
+import sys
 import time
 from pathlib import Path
 
@@ -728,7 +729,7 @@ def _load_garment_info(garment_info_path: str | None) -> dict | None:
 
 
 def _load_garment_info_from_hdf5(input_file: str) -> dict | None:
-    """Load merged garment_info from /data/demo_*/meta/(garment_info|garment_info.json)."""
+    """Load merged garment_info from /data/demo_*/meta or initial_state/garment."""
     if h5py is None:
         return None
 
@@ -750,6 +751,12 @@ def _load_garment_info_from_hdf5(input_file: str) -> dict | None:
             for episode_idx, payload in episodes.items():
                 dst[garment_name][str(episode_idx)] = payload
 
+    def _demo_index_from_name(demo_name: str) -> str | None:
+        if not demo_name.startswith("demo_"):
+            return None
+        suffix = demo_name.split("_", maxsplit=1)[1]
+        return suffix if suffix.isdigit() else None
+
     merged: dict = {}
     try:
         with h5py.File(input_file, "r") as file:
@@ -761,26 +768,55 @@ def _load_garment_info_from_hdf5(input_file: str) -> dict | None:
                 if not demo_name.startswith("demo_"):
                     continue
                 demo_group = data_group[demo_name]
-                if "meta" not in demo_group:
-                    continue
-                meta_group = demo_group["meta"]
+                if "meta" in demo_group:
+                    meta_group = demo_group["meta"]
 
-                for key in ("garment_info", "garment_info.json"):
-                    if key not in meta_group:
-                        continue
-                    raw = _normalize_scalar(meta_group[key][()])
-                    if isinstance(raw, str):
-                        try:
-                            parsed = json.loads(raw)
-                        except json.JSONDecodeError:
+                    for key in ("garment_info", "garment_info.json"):
+                        if key not in meta_group:
                             continue
-                    elif isinstance(raw, dict):
-                        parsed = raw
-                    else:
+                        raw = _normalize_scalar(meta_group[key][()])
+                        if isinstance(raw, str):
+                            try:
+                                parsed = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                        elif isinstance(raw, dict):
+                            parsed = raw
+                        else:
+                            continue
+
+                        if isinstance(parsed, dict):
+                            _merge(merged, parsed)
+
+                initial_state_group = demo_group.get("initial_state")
+                garment_group = None if initial_state_group is None else initial_state_group.get("garment")
+                demo_index = _demo_index_from_name(demo_name)
+                if garment_group is None or demo_index is None:
+                    continue
+
+                for garment_name in garment_group.keys():
+                    garment_entry = garment_group[garment_name]
+                    if "initial_pose" not in garment_entry:
                         continue
 
-                    if isinstance(parsed, dict):
-                        _merge(merged, parsed)
+                    pose = _normalize_scalar(garment_entry["initial_pose"][()])
+                    if hasattr(pose, "tolist"):
+                        pose = pose.tolist()
+                    if isinstance(pose, list) and len(pose) == 1 and isinstance(pose[0], list):
+                        pose = pose[0]
+                    if not isinstance(pose, list):
+                        continue
+
+                    payload = {"object_initial_pose": pose}
+                    if "scale" in garment_entry:
+                        scale = _normalize_scalar(garment_entry["scale"][()])
+                        if hasattr(scale, "tolist"):
+                            scale = scale.tolist()
+                        if isinstance(scale, list) and len(scale) == 1 and isinstance(scale[0], list):
+                            scale = scale[0]
+                        payload["scale"] = scale
+
+                    merged.setdefault(str(garment_name), {})[demo_index] = payload
     except Exception as e:
         print(f"Warning: failed to read garment info from HDF5 metadata: {e}")
         return None
@@ -817,6 +853,28 @@ def _load_actions_frame_from_hdf5(input_file: str) -> str | None:
                 raw = raw.decode("utf-8")
             value = str(raw).strip().lower()
             if value in {"base", "world"}:
+                return value
+    except Exception:
+        return None
+    return None
+
+
+def _load_ik_quat_order_from_hdf5(input_file: str) -> str | None:
+    """Read optional /data attrs['ik_quat_order'] hint."""
+    if h5py is None:
+        return None
+    try:
+        with h5py.File(input_file, "r") as file:
+            data_group = file.get("data", None)
+            if data_group is None:
+                return None
+            raw = data_group.attrs.get("ik_quat_order", None)
+            if raw is None:
+                return None
+            if isinstance(raw, bytes):
+                raw = raw.decode("utf-8")
+            value = str(raw).strip().lower()
+            if value in {"xyzw", "wxyz"}:
                 return value
     except Exception:
         return None
@@ -1236,7 +1294,7 @@ def main():
 
     garment_info = _load_garment_info_from_hdf5(args_cli.input_file)
     if garment_info is not None:
-        print("Using garment initial poses from HDF5 demo metadata (/data/demo_*/meta).")
+        print("Using garment initial poses from HDF5 demo data (/data/demo_*/meta or initial_state/garment).")
     else:
         garment_info_path = args_cli.garment_info_json
         if garment_info_path is None:
@@ -1250,6 +1308,19 @@ def main():
     source_actions_frame_hint = _load_actions_frame_from_hdf5(args_cli.input_file)
     if source_actions_frame_hint is not None:
         print(f"Source actions frame hint from dataset: {source_actions_frame_hint}")
+
+    source_ik_quat_order_hint = _load_ik_quat_order_from_hdf5(args_cli.input_file)
+    explicit_ik_quat_order = any(
+        arg == "--ik_quat_order" or arg.startswith("--ik_quat_order=") for arg in sys.argv
+    )
+    if source_ik_quat_order_hint is not None and not explicit_ik_quat_order:
+        args_cli.ik_quat_order = source_ik_quat_order_hint
+        print(f"Source IK quaternion order from dataset: {source_ik_quat_order_hint}")
+    elif source_ik_quat_order_hint is not None:
+        print(
+            "Ignoring dataset IK quaternion order "
+            f"({source_ik_quat_order_hint}) because --ik_quat_order was set explicitly."
+        )
 
     if episode_count == 0:
         print("No episodes found in the dataset.")

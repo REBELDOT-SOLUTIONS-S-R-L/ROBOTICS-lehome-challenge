@@ -92,6 +92,25 @@ def _build_ik_actions_from_demo(src_demo: h5py.Group) -> np.ndarray:
     )
 
 
+def _infer_output_ik_quat_order(
+    src_demo: h5py.Group,
+    preserve_existing: bool,
+    source_quat_order: str | None,
+) -> str:
+    """Infer quaternion order for rewritten IK actions."""
+    if preserve_existing:
+        return source_quat_order if source_quat_order in {"xyzw", "wxyz"} else "xyzw"
+
+    obs_group = src_demo["obs"]
+    if "left_ee_frame_state" in obs_group and "right_ee_frame_state" in obs_group:
+        return "wxyz"
+    if "ee_frame_state" in obs_group:
+        return "wxyz"
+    if "ee_pose" in obs_group:
+        return source_quat_order if source_quat_order in {"xyzw", "wxyz"} else "xyzw"
+    return "xyzw"
+
+
 def _build_joint_actions_from_demo(src_demo: h5py.Group) -> np.ndarray:
     """Recover joint actions from obs/actions."""
     if "obs" not in src_demo or "actions" not in src_demo["obs"]:
@@ -153,6 +172,9 @@ def main() -> None:
             raise ValueError("No demo_* groups found under /data.")
 
         source_actions_mode = str(dst_data.attrs.get("actions_mode", "")).strip().lower()
+        raw_source_quat_order = dst_data.attrs.get("ik_quat_order")
+        source_ik_quat_order = str(raw_source_quat_order).strip().lower() if raw_source_quat_order is not None else None
+        output_ik_quat_order: str | None = None
 
         for demo_name in demo_names:
             src_demo = src_data[demo_name]
@@ -173,6 +195,18 @@ def main() -> None:
                     )
                 else:
                     new_actions = _build_ik_actions_from_demo(src_demo)
+                demo_quat_order = _infer_output_ik_quat_order(
+                    src_demo,
+                    preserve_existing=preserve_existing,
+                    source_quat_order=source_ik_quat_order,
+                )
+                if output_ik_quat_order is None:
+                    output_ik_quat_order = demo_quat_order
+                elif output_ik_quat_order != demo_quat_order:
+                    raise ValueError(
+                        "Inconsistent IK quaternion order inferred across demos: "
+                        f"{output_ik_quat_order} vs {demo_quat_order}."
+                    )
             else:
                 new_actions = _build_joint_actions_from_demo(src_demo)
 
@@ -183,7 +217,7 @@ def main() -> None:
         if args.to_ik:
             # IK actions built from ee_frame_state / observation.ee_pose are base-frame by construction.
             dst_data.attrs["actions_frame"] = "base"
-            dst_data.attrs["ik_quat_order"] = "xyzw"
+            dst_data.attrs["ik_quat_order"] = output_ik_quat_order or "xyzw"
         else:
             if "actions_frame" in dst_data.attrs:
                 del dst_data.attrs["actions_frame"]

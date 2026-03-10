@@ -173,13 +173,40 @@ class HDF5ReplaySource:
         return {}
 
     def get_episode_meta(self, episode_index: int) -> Dict[str, Any]:
-        """Read demo-level metadata from /data/demo_*/meta when present."""
+        """Read demo-level metadata from /data/demo_*/meta or synthesize it from initial_state."""
         demo = self.get_demo_group(episode_index)
-        if "meta" not in demo:
-            return {}
-        meta_node = demo["meta"]
-        parsed = _read_hdf5_node(meta_node)
-        return parsed if isinstance(parsed, dict) else {}
+        parsed: Dict[str, Any] = {}
+        if "meta" in demo:
+            meta_node = demo["meta"]
+            meta_value = _read_hdf5_node(meta_node)
+            if isinstance(meta_value, dict):
+                parsed.update(meta_value)
+
+        initial_state = demo.get("initial_state")
+        garment_group = None if initial_state is None else initial_state.get("garment")
+        if garment_group is None:
+            return parsed
+
+        for garment_name in garment_group.keys():
+            garment_entry = garment_group[garment_name]
+            garment_meta: Dict[str, Any] = {}
+
+            if "initial_pose" in garment_entry:
+                pose_value = _to_python_scalar_or_list(garment_entry["initial_pose"][()])
+                if isinstance(pose_value, list) and len(pose_value) == 1 and isinstance(pose_value[0], list):
+                    pose_value = pose_value[0]
+                garment_meta["initial_pose"] = _parse_json_if_possible(pose_value)
+
+            if "scale" in garment_entry:
+                scale_value = _to_python_scalar_or_list(garment_entry["scale"][()])
+                if isinstance(scale_value, list) and len(scale_value) == 1 and isinstance(scale_value[0], list):
+                    scale_value = scale_value[0]
+                garment_meta["scale"] = _parse_json_if_possible(scale_value)
+
+            if garment_meta:
+                parsed.setdefault(str(garment_name), {}).update(garment_meta)
+
+        return parsed
 
     def get_garment_name_from_env_args(self) -> Optional[str]:
         env_args = self.get_env_args()
@@ -481,6 +508,7 @@ def find_garment_info_json(hdf5_path: Path) -> Optional[Path]:
     candidates = [
         hdf5_path.parent / f"{hdf5_path.stem}.garment_info.json",
         hdf5_path.parent / "garment_info.json",
+        hdf5_path.parent / "meta" / "garment_info.json",
         hdf5_path.parent / hdf5_path.stem / "meta" / "garment_info.json",
         hdf5_path.parent / "record" / hdf5_path.stem / "meta" / "garment_info.json",
     ]
@@ -790,7 +818,7 @@ def replay(args: argparse.Namespace) -> None:
         if first_episode_meta:
             garment_name = _extract_garment_name_from_episode_meta(first_episode_meta)
             if garment_name is not None:
-                logger.info("Using garment name from /data/demo_0/meta")
+                logger.info("Using garment name from /data/demo_0/meta or initial_state/garment")
 
         if garment_name is None:
             garment_name = dataset.get_garment_name_from_env_args()
