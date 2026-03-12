@@ -228,6 +228,9 @@ from lehome.utils.env_utils import (
 )
 from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
 from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
+from lehome.tasks.fold_cloth.checkpoint_mappings import (
+    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+)
 
 is_paused = False
 current_action_index = 0
@@ -253,26 +256,8 @@ def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
 
 
 def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-    """Map garment check points to semantic virtual object positions."""
-    left_top = kp_positions[0]
-    left_bottom = kp_positions[1]
-    left_sleeve = kp_positions[2]
-    right_sleeve = kp_positions[3]
-    right_top = kp_positions[4]
-    right_bottom = kp_positions[5]
-    return {
-        "garment_left_sleeve": left_sleeve,
-        "garment_right_sleeve": right_sleeve,
-        "garment_left_bottom": left_bottom,
-        "garment_right_bottom": right_bottom,
-        "garment_left_top": left_top,
-        "garment_right_top": right_top,
-        "garment_top_center": np.mean(np.stack([left_top, right_top], axis=0), axis=0),
-        "garment_bottom_center": np.mean(np.stack([left_bottom, right_bottom], axis=0), axis=0),
-        "garment_kp_left": np.mean(kp_positions[:3], axis=0),
-        "garment_kp_right": np.mean(kp_positions[3:], axis=0),
-        "garment_center": np.mean(kp_positions, axis=0),
-    }
+    """Map garment checkpoints to semantic virtual object positions."""
+    return map_semantic_keypoints_from_positions(kp_positions)
 
 
 def _orthonormalize_rotations(pose: torch.Tensor) -> torch.Tensor:

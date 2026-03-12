@@ -36,6 +36,9 @@ from lehome.devices.action_process import preprocess_device_action
 from lehome.utils import RobotKinematics, compute_joints_from_ee_pose, mat_to_quat
 from lehome.utils.logger import get_logger
 
+from .checkpoint_mappings import (
+    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+)
 from .fold_cloth_bi_arm_env_cfg import GarmentFoldEnvCfg
 
 logger = get_logger(__name__)
@@ -971,26 +974,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             num_envs = len(env_ids)
 
         def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-            # Checkpoint convention inferred from challenge success checker.
-            left_top = kp_positions[0]
-            left_bottom = kp_positions[1]
-            left_sleeve = kp_positions[2]
-            right_sleeve = kp_positions[3]
-            right_top = kp_positions[4]
-            right_bottom = kp_positions[5]
-            return {
-                "garment_left_sleeve": left_sleeve,
-                "garment_right_sleeve": right_sleeve,
-                "garment_left_bottom": left_bottom,
-                "garment_right_bottom": right_bottom,
-                "garment_left_top": left_top,
-                "garment_right_top": right_top,
-                "garment_top_center": np.mean(np.stack([left_top, right_top], axis=0), axis=0),
-                "garment_bottom_center": np.mean(np.stack([left_bottom, right_bottom], axis=0), axis=0),
-                "garment_kp_left": np.mean(kp_positions[:3], axis=0),
-                "garment_kp_right": np.mean(kp_positions[3:], axis=0),
-                "garment_center": np.mean(kp_positions, axis=0),
-            }
+            return map_semantic_keypoints_from_positions(kp_positions)
 
         def _identity_poses():
             identity = torch.eye(4, device=self.device).unsqueeze(0).expand(num_envs, -1, -1)
@@ -1094,17 +1078,20 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                         )
 
                     kp_positions = mesh_points[check_points]  # [p0, p1, p2, p3, p4, p5]
-                    left_top = kp_positions[0]
-                    left_bottom = kp_positions[1]
-                    left_sleeve = kp_positions[2]
-                    right_sleeve = kp_positions[3]
-                    right_top = kp_positions[4]
-                    right_bottom = kp_positions[5]
+                    sem = map_semantic_keypoints_from_positions(kp_positions)
 
-                    left_sleeve_bottom_dist = float(np.linalg.norm(left_sleeve - left_bottom))
-                    right_sleeve_bottom_dist = float(np.linalg.norm(right_sleeve - right_bottom))
-                    left_bottom_top_dist = float(np.linalg.norm(left_bottom - left_top))
-                    right_bottom_top_dist = float(np.linalg.norm(right_bottom - right_top))
+                    left_sleeve_bottom_dist = float(
+                        np.linalg.norm(sem["garment_left_sleeve"] - sem["garment_left_bottom"])
+                    )
+                    right_sleeve_bottom_dist = float(
+                        np.linalg.norm(sem["garment_right_sleeve"] - sem["garment_right_bottom"])
+                    )
+                    left_bottom_top_dist = float(
+                        np.linalg.norm(sem["garment_left_bottom"] - sem["garment_left_top"])
+                    )
+                    right_bottom_top_dist = float(
+                        np.linalg.norm(sem["garment_right_bottom"] - sem["garment_right_top"])
+                    )
 
                     if left_sleeve_bottom_dist <= _SLEEVE_TO_BOTTOM_THRESHOLD_M:
                         left_sleeve_to_bottom = torch.ones(num_envs, 1, device=self.device)

@@ -29,11 +29,18 @@ from lehome.utils.record import (
     append_episode_initial_pose,
 )
 from lehome.utils.logger import get_logger
+from lehome.tasks.fold_cloth.checkpoint_mappings import (
+    ARM_KEYPOINT_GROUPS,
+    CHECKPOINT_LABELS,
+)
 
 from .common import stabilize_garment_after_reset
 
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
+DEBUG_POSE_LOG_INTERVAL = 50
+GARMENT_CHECKPOINT_LABELS = CHECKPOINT_LABELS
+ARM_KEYPOINT_DISTANCE_LABELS = ARM_KEYPOINT_GROUPS
 
 try:
     import h5py
@@ -145,6 +152,283 @@ def _log_success_result(
     success = bool(result.get("success", False))
     logger.info(f"{prefix} [Success Check] Final result: {'Success ✓' if success else 'Failed ✗'}")
     return success
+
+
+def _get_scene_articulation(env: DirectRLEnv, name: str) -> Optional[Any]:
+    scene = getattr(env, "scene", None)
+    if scene is None:
+        return None
+
+    try:
+        return scene[name]
+    except Exception:
+        pass
+
+    articulations = getattr(scene, "articulations", None)
+    if articulations is None:
+        return None
+
+    try:
+        return articulations.get(name)
+    except Exception:
+        pass
+
+    try:
+        if name in articulations:
+            return articulations[name]
+    except Exception:
+        pass
+
+    return None
+
+
+def _get_single_arm_candidates(env: DirectRLEnv) -> list[str]:
+    scene = getattr(env, "scene", None)
+    articulations = getattr(scene, "articulations", None) if scene is not None else None
+
+    names: list[str] = []
+    if articulations is not None:
+        try:
+            names.extend(str(name) for name in articulations.keys())
+        except Exception:
+            pass
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for name in ("robot", "arm", "left_arm", "right_arm"):
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    for name in names:
+        if name not in seen:
+            ordered.append(name)
+            seen.add(name)
+    return ordered
+
+
+def _resolve_eef_body_idx(
+    env: DirectRLEnv,
+    arm_name: str,
+    arm: Any,
+    eef_body_idx_cache: Dict[str, int],
+) -> Optional[int]:
+    if arm_name in eef_body_idx_cache:
+        return eef_body_idx_cache[arm_name]
+
+    candidate_patterns = (
+        "^gripper_frame_link$",
+        "^gripper_link$",
+        ".*gripper_frame.*",
+        ".*gripper.*",
+        ".*wrist.*",
+    )
+    for pattern in candidate_patterns:
+        try:
+            body_ids, _ = arm.find_bodies(pattern, preserve_order=True)
+            body_ids = _as_numpy(body_ids, dtype=np.int64).reshape(-1)
+            if body_ids.size > 0:
+                body_idx = int(body_ids[0])
+                eef_body_idx_cache[arm_name] = body_idx
+                return body_idx
+        except Exception:
+            continue
+
+    body_positions = getattr(arm.data, "body_link_pos_w", None)
+    if body_positions is None:
+        body_positions = getattr(arm.data, "body_pos_w", None)
+    if body_positions is None:
+        return None
+
+    body_idx = int(body_positions.shape[1] - 1)
+    eef_body_idx_cache[arm_name] = body_idx
+    return body_idx
+
+
+def _get_arm_eef_world_position_cm(
+    env: DirectRLEnv,
+    arm_name: str,
+    eef_body_idx_cache: Dict[str, int],
+) -> Optional[np.ndarray]:
+    arm = _get_scene_articulation(env, arm_name)
+    if arm is None:
+        return None
+
+    eef_body_idx = _resolve_eef_body_idx(env, arm_name, arm, eef_body_idx_cache)
+    if eef_body_idx is None:
+        return None
+
+    body_pos_w = getattr(arm.data, "body_link_pos_w", None)
+    if body_pos_w is None:
+        body_pos_w = getattr(arm.data, "body_pos_w", None)
+    if body_pos_w is None:
+        return None
+
+    return (
+        _as_numpy(body_pos_w[0, eef_body_idx], dtype=np.float32).reshape(-1) * 100.0
+    )
+
+
+def _get_debug_arm_names(env: DirectRLEnv) -> list[str]:
+    left_arm = _get_scene_articulation(env, "left_arm")
+    right_arm = _get_scene_articulation(env, "right_arm")
+    if left_arm is not None or right_arm is not None:
+        names = []
+        if left_arm is not None:
+            names.append("left_arm")
+        if right_arm is not None:
+            names.append("right_arm")
+        return names
+
+    for arm_name in _get_single_arm_candidates(env):
+        if _get_scene_articulation(env, arm_name) is not None:
+            return [arm_name]
+    return []
+
+
+def _get_garment_checkpoint_positions_world_cm(
+    particle_object: Any,
+    check_points: Sequence[int],
+) -> Optional[list[list[float]]]:
+    try:
+        world_points, _, _, _ = particle_object.get_current_mesh_points()
+        world_points = _as_numpy(world_points, dtype=np.float32)
+        return (world_points[check_points] * 100.0).tolist()
+    except Exception:
+        pass
+
+    try:
+        world_points = (
+            particle_object._cloth_prim_view.get_world_positions()
+            .squeeze(0)
+            .detach()
+            .cpu()
+            .numpy()
+        )
+        world_points = _as_numpy(world_points, dtype=np.float32)
+        return (world_points[check_points] * 100.0).tolist()
+    except Exception:
+        return None
+
+
+def _log_debug_pose_snapshot(
+    env: DirectRLEnv,
+    step_count: int,
+    eef_body_idx_cache: Dict[str, int],
+) -> None:
+    prefix = f"[Debug Pose][step {step_count}]"
+
+    arm_names = _get_debug_arm_names(env)
+    eef_positions_by_arm: Dict[str, np.ndarray] = {}
+    if arm_names:
+        logger.info(f"{prefix} EEF world positions (cm):")
+        for arm_name in arm_names:
+            eef_pos_cm = _get_arm_eef_world_position_cm(env, arm_name, eef_body_idx_cache)
+            if eef_pos_cm is None or eef_pos_cm.size < 3:
+                logger.info(f"{prefix}   {arm_name}: unavailable")
+                continue
+            eef_positions_by_arm[arm_name] = eef_pos_cm
+            logger.info(
+                f"{prefix}   {arm_name}: "
+                f"[{eef_pos_cm[0]:.2f}, {eef_pos_cm[1]:.2f}, {eef_pos_cm[2]:.2f}]"
+            )
+    else:
+        logger.warning(f"{prefix} Could not resolve any robot arm articulation for EEF logging.")
+
+    particle_object = getattr(env, "object", None)
+    check_points = getattr(particle_object, "check_points", None)
+    if particle_object is None or check_points is None:
+        logger.warning(f"{prefix} Garment checkpoints unavailable.")
+        return
+
+    garment_type = None
+    if hasattr(env, "garment_loader") and hasattr(env, "cfg") and hasattr(env.cfg, "garment_name"):
+        try:
+            garment_type = env.garment_loader.get_garment_type(env.cfg.garment_name)
+        except Exception:
+            garment_type = None
+
+    from lehome.utils.success_checker_chanllege import get_object_particle_position
+
+    garment_positions_cm = get_object_particle_position(particle_object, check_points)
+    if garment_positions_cm is None:
+        logger.warning(f"{prefix} Failed to fetch garment checkpoint positions.")
+        return
+    garment_world_positions_cm = _get_garment_checkpoint_positions_world_cm(
+        particle_object, check_points
+    )
+
+    if garment_type is not None:
+        logger.info(
+            f"{prefix} Garment checkpoints used by success checker (cm) "
+            f"for garment_type={garment_type}:"
+        )
+    else:
+        logger.info(f"{prefix} Garment checkpoints used by success checker (cm):")
+    garment_positions_by_label: Dict[str, np.ndarray] = {}
+    for point_idx, (mesh_idx, point_pos_cm) in enumerate(zip(check_points, garment_positions_cm)):
+        point_arr = _as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
+        checkpoint_name = (
+            GARMENT_CHECKPOINT_LABELS[point_idx]
+            if point_idx < len(GARMENT_CHECKPOINT_LABELS)
+            else f"checkpoint_{point_idx}"
+        )
+        if point_arr.size < 3:
+            logger.info(
+                f"{prefix}   p[{point_idx}] {checkpoint_name} mesh_idx={mesh_idx}: unavailable"
+            )
+            continue
+        garment_positions_by_label[checkpoint_name] = point_arr
+        logger.info(
+            f"{prefix}   p[{point_idx}] {checkpoint_name} mesh_idx={mesh_idx}: "
+            f"[{point_arr[0]:.2f}, {point_arr[1]:.2f}, {point_arr[2]:.2f}]"
+        )
+
+    if eef_positions_by_arm:
+        garment_world_positions_by_label: Dict[str, np.ndarray] = {}
+        if garment_world_positions_cm is not None:
+            for point_idx, point_pos_cm in enumerate(garment_world_positions_cm):
+                checkpoint_name = (
+                    GARMENT_CHECKPOINT_LABELS[point_idx]
+                    if point_idx < len(GARMENT_CHECKPOINT_LABELS)
+                    else f"checkpoint_{point_idx}"
+                )
+                point_arr = _as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
+                if point_arr.size >= 3:
+                    garment_world_positions_by_label[checkpoint_name] = point_arr
+
+        logger.info(
+            f"{prefix} Same-side EEF to garment checkpoint distances "
+            "(world frame, cm):"
+        )
+        for arm_name, keypoint_names in ARM_KEYPOINT_DISTANCE_LABELS.items():
+            eef_pos_cm = eef_positions_by_arm.get(arm_name)
+            if eef_pos_cm is None:
+                continue
+            for keypoint_name in keypoint_names:
+                keypoint_pos_cm = garment_world_positions_by_label.get(keypoint_name)
+                if keypoint_pos_cm is None or keypoint_pos_cm.size < 3:
+                    logger.info(f"{prefix}   {arm_name} -> {keypoint_name}: unavailable")
+                    continue
+                distance_cm = float(np.linalg.norm(eef_pos_cm[:3] - keypoint_pos_cm[:3]))
+                logger.info(
+                    f"{prefix}   {arm_name} -> {keypoint_name}: {distance_cm:.2f} cm"
+                )
+
+
+def _maybe_log_debug_pose_snapshot(
+    env: DirectRLEnv,
+    args: argparse.Namespace,
+    debug_pose_state: Dict[str, Any],
+) -> None:
+    if not getattr(args, "debugging_log_pose", False):
+        return
+
+    step_count = int(debug_pose_state.get("step_count", 0))
+    if step_count == 0 or step_count % DEBUG_POSE_LOG_INTERVAL == 0:
+        eef_body_idx_cache = debug_pose_state.setdefault("eef_body_idx_cache", {})
+        _log_debug_pose_snapshot(env, step_count, eef_body_idx_cache)
+
+    debug_pose_state["step_count"] = step_count + 1
 
 
 class DirectHDF5Recorder:
@@ -929,6 +1213,7 @@ def run_idle_phase(
     teleop_interface: Any,
     args: argparse.Namespace,
     count_render: int,
+    debug_pose_state: Dict[str, Any],
 ) -> Tuple[Optional[Dict[str, Any]], int]:
     """Run idle phase before recording starts.
 
@@ -983,6 +1268,8 @@ def run_idle_phase(
 
     if object_initial_pose is None:
         object_initial_pose = env.get_all_pose()
+
+    _maybe_log_debug_pose_snapshot(env, args, debug_pose_state)
 
     return object_initial_pose, count_render
 
@@ -1245,6 +1532,7 @@ def run_live_control_without_record(
     env: DirectRLEnv,
     teleop_interface: Any,
     args: argparse.Namespace,
+    debug_pose_state: Dict[str, Any],
 ) -> None:
     """Run live teleoperation control without recording.
 
@@ -1280,6 +1568,8 @@ def run_live_control_without_record(
         env.render()
     else:
         env.step(actions)
+
+    _maybe_log_debug_pose_snapshot(env, args, debug_pose_state)
 
     if args.log_success:
         _ = env._get_success()
@@ -1320,6 +1610,13 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     printed_instructions = False
     idle_frame_counter = 0
     object_initial_pose: Optional[Dict[str, Any]] = None
+    debug_pose_state: Dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
+
+    if getattr(args, "debugging_log_pose", False):
+        logger.info(
+            "[Debug Pose] Enabled. Logging EEF and garment checkpoint positions in cm "
+            f"at step 0 and every {DEBUG_POSE_LOG_INTERVAL} sim steps."
+        )
 
     try:
         while simulation_app.is_running():
@@ -1330,6 +1627,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         teleop_interface,
                         args,
                         count_render,
+                        debug_pose_state,
                     )
                     if pose is not None:
                         object_initial_pose = pose
@@ -1357,7 +1655,12 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     )
                     break
                 else:
-                    run_live_control_without_record(env, teleop_interface, args)
+                    run_live_control_without_record(
+                        env,
+                        teleop_interface,
+                        args,
+                        debug_pose_state,
+                    )
     except KeyboardInterrupt:
         logger.warning("\n[Ctrl+C] Interrupt signal detected")
         # If Ctrl+C is pressed during recording, clear the current buffer

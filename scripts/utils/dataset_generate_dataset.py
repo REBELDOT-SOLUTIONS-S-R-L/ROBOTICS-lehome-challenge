@@ -246,6 +246,11 @@ import lehome.tasks  # noqa: F401
 
 from lehome.utils.env_utils import get_task_type
 from lehome.utils.logger import get_logger
+from lehome.tasks.fold_cloth.checkpoint_mappings import (
+    ARM_KEYPOINT_GROUPS,
+    CSV_TRACE_KEYPOINT_NAMES,
+    SUCCESS_DISTANCE_SPECS,
+)
 
 try:
     import h5py
@@ -262,24 +267,12 @@ DUAL_ARM_SETTLE_ACTION = np.array(
     dtype=np.float32,
 )
 TRACE_EEF_NAMES = ("left_arm", "right_arm")
-TRACE_KEYPOINT_NAMES = (
-    "garment_left_sleeve",
-    "garment_left_bottom",
-    "garment_left_top",
-    "garment_right_sleeve",
-    "garment_right_bottom",
-    "garment_right_top",
-)
-TRACE_EEF_KEYPOINT_GROUPS = {
-    "left_arm": ("garment_left_sleeve", "garment_left_bottom", "garment_left_top"),
-    "right_arm": ("garment_right_sleeve", "garment_right_bottom", "garment_right_top"),
-}
-TRACE_SUCCESS_DISTANCE_SPECS = (
-    ("left_sleeve_to_bottom", "garment_left_sleeve", "garment_left_bottom", 0.10),
-    ("right_sleeve_to_bottom", "garment_right_sleeve", "garment_right_bottom", 0.10),
-    ("left_bottom_to_top", "garment_left_bottom", "garment_left_top", 0.12),
-    ("right_bottom_to_top", "garment_right_bottom", "garment_right_top", 0.12),
-)
+# CSV trace columns stay grouped semantically by arm. The raw garment checkpoint
+# convention is defined centrally in checkpoint_mappings.json:
+# p0=left_top, p1=right_top, p2=left_sleeve, p3=right_sleeve, p4=left_bottom, p5=right_bottom.
+TRACE_KEYPOINT_NAMES = CSV_TRACE_KEYPOINT_NAMES
+TRACE_EEF_KEYPOINT_GROUPS = ARM_KEYPOINT_GROUPS
+TRACE_SUCCESS_DISTANCE_SPECS = SUCCESS_DISTANCE_SPECS
 SUCCESS_LOG_INTERVAL = 50
 
 logger = get_logger(__name__)

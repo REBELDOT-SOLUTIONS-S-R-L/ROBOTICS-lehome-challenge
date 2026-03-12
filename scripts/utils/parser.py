@@ -94,6 +94,12 @@ def setup_record_parser(
         default=False,
         help="Log success information.",
     )
+    parser.add_argument(
+        "--debugging_log_pose",
+        action="store_true",
+        default=False,
+        help="Print EEF and garment checkpoint positions during teleoperation.",
+    )
     # Recording Parameters
     parser.add_argument(
         "--enable_record",

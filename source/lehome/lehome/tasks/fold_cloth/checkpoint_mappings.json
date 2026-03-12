@@ -1,0 +1,1048 @@
+{
+  "checkpoint_names_by_index": [
+    "garment_left_top",
+    "garment_right_top",
+    "garment_left_sleeve",
+    "garment_right_sleeve",
+    "garment_left_bottom",
+    "garment_right_bottom"
+  ],
+  "arm_keypoint_groups": {
+    "left_arm": [
+      "garment_left_top",
+      "garment_left_bottom",
+      "garment_left_sleeve"
+    ],
+    "right_arm": [
+      "garment_right_top",
+      "garment_right_bottom",
+      "garment_right_sleeve"
+    ]
+  },
+  "csv_trace_keypoint_names": [
+    "garment_left_sleeve",
+    "garment_left_bottom",
+    "garment_left_top",
+    "garment_right_sleeve",
+    "garment_right_bottom",
+    "garment_right_top"
+  ],
+  "center_groups": {
+    "garment_top_center": [
+      "garment_left_top",
+      "garment_right_top"
+    ],
+    "garment_bottom_center": [
+      "garment_left_bottom",
+      "garment_right_bottom"
+    ],
+    "garment_kp_left": [
+      "garment_left_top",
+      "garment_left_sleeve",
+      "garment_left_bottom"
+    ],
+    "garment_kp_right": [
+      "garment_right_top",
+      "garment_right_sleeve",
+      "garment_right_bottom"
+    ],
+    "garment_center": [
+      "garment_left_top",
+      "garment_right_top",
+      "garment_left_sleeve",
+      "garment_right_sleeve",
+      "garment_left_bottom",
+      "garment_right_bottom"
+    ]
+  },
+  "success_distance_specs": [
+    {
+      "name": "left_sleeve_to_bottom",
+      "src": "garment_left_sleeve",
+      "dst": "garment_left_bottom",
+      "threshold_m": 0.1
+    },
+    {
+      "name": "right_sleeve_to_bottom",
+      "src": "garment_right_sleeve",
+      "dst": "garment_right_bottom",
+      "threshold_m": 0.1
+    },
+    {
+      "name": "left_bottom_to_top",
+      "src": "garment_left_bottom",
+      "dst": "garment_left_top",
+      "threshold_m": 0.12
+    },
+    {
+      "name": "right_bottom_to_top",
+      "src": "garment_right_bottom",
+      "dst": "garment_right_top",
+      "threshold_m": 0.12
+    }
+  ],
+  "garments": {
+    "Release": {
+      "Pant_Long_Seen_0": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_0/PL_019_obj_exp.json",
+        "checkpoint_indices": [
+          106,
+          116,
+          2734,
+          4957,
+          430,
+          538
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 106,
+          "garment_right_top": 116,
+          "garment_left_sleeve": 2734,
+          "garment_right_sleeve": 4957,
+          "garment_left_bottom": 430,
+          "garment_right_bottom": 538
+        }
+      },
+      "Pant_Long_Seen_1": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_1/PL_022_obj_exp.json",
+        "checkpoint_indices": [
+          122,
+          115,
+          2582,
+          4768,
+          1308,
+          3138
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 122,
+          "garment_right_top": 115,
+          "garment_left_sleeve": 2582,
+          "garment_right_sleeve": 4768,
+          "garment_left_bottom": 1308,
+          "garment_right_bottom": 3138
+        }
+      },
+      "Pant_Long_Seen_2": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_2/PL_030_obj_exp.json",
+        "checkpoint_indices": [
+          9329,
+          9361,
+          1672,
+          3894,
+          250,
+          3158
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9329,
+          "garment_right_top": 9361,
+          "garment_left_sleeve": 1672,
+          "garment_right_sleeve": 3894,
+          "garment_left_bottom": 250,
+          "garment_right_bottom": 3158
+        }
+      },
+      "Pant_Long_Seen_3": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_3/PL_046_obj_exp.json",
+        "checkpoint_indices": [
+          864,
+          788,
+          6706,
+          8634,
+          5769,
+          7815
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 864,
+          "garment_right_top": 788,
+          "garment_left_sleeve": 6706,
+          "garment_right_sleeve": 8634,
+          "garment_left_bottom": 5769,
+          "garment_right_bottom": 7815
+        }
+      },
+      "Pant_Long_Seen_4": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_4/PL_053_obj_exp.json",
+        "checkpoint_indices": [
+          244,
+          288,
+          3148,
+          4882,
+          855,
+          985
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 244,
+          "garment_right_top": 288,
+          "garment_left_sleeve": 3148,
+          "garment_right_sleeve": 4882,
+          "garment_left_bottom": 855,
+          "garment_right_bottom": 985
+        }
+      },
+      "Pant_Long_Seen_5": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_5/PL_079_obj_exp.json",
+        "checkpoint_indices": [
+          9058,
+          9137,
+          8424,
+          4674,
+          6839,
+          4614
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9058,
+          "garment_right_top": 9137,
+          "garment_left_sleeve": 8424,
+          "garment_right_sleeve": 4674,
+          "garment_left_bottom": 6839,
+          "garment_right_bottom": 4614
+        }
+      },
+      "Pant_Long_Seen_6": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_6/PL_Pants095_obj_exp.json",
+        "checkpoint_indices": [
+          9896,
+          9969,
+          2247,
+          7295,
+          599,
+          5847
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9896,
+          "garment_right_top": 9969,
+          "garment_left_sleeve": 2247,
+          "garment_right_sleeve": 7295,
+          "garment_left_bottom": 599,
+          "garment_right_bottom": 5847
+        }
+      },
+      "Pant_Long_Seen_7": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_7/PL_Pants100_obj_exp.json",
+        "checkpoint_indices": [
+          9203,
+          9338,
+          4299,
+          8954,
+          2754,
+          8195
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9203,
+          "garment_right_top": 9338,
+          "garment_left_sleeve": 4299,
+          "garment_right_sleeve": 8954,
+          "garment_left_bottom": 2754,
+          "garment_right_bottom": 8195
+        }
+      },
+      "Pant_Long_Seen_8": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_8/PL_Pants106_obj_exp.json",
+        "checkpoint_indices": [
+          1337,
+          647,
+          6347,
+          9097,
+          17738,
+          18067
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 1337,
+          "garment_right_top": 647,
+          "garment_left_sleeve": 6347,
+          "garment_right_sleeve": 9097,
+          "garment_left_bottom": 17738,
+          "garment_right_bottom": 18067
+        }
+      },
+      "Pant_Long_Seen_9": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Seen_9/PL_Pants107_obj_exp.json",
+        "checkpoint_indices": [
+          1349,
+          2866,
+          5539,
+          10409,
+          4197,
+          9809
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 1349,
+          "garment_right_top": 2866,
+          "garment_left_sleeve": 5539,
+          "garment_right_sleeve": 10409,
+          "garment_left_bottom": 4197,
+          "garment_right_bottom": 9809
+        }
+      },
+      "Pant_Long_Unseen_0": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Unseen_0/PL_Pants109_obj_exp.json",
+        "checkpoint_indices": [
+          226,
+          239,
+          4507,
+          6960,
+          9244,
+          9357
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 226,
+          "garment_right_top": 239,
+          "garment_left_sleeve": 4507,
+          "garment_right_sleeve": 6960,
+          "garment_left_bottom": 9244,
+          "garment_right_bottom": 9357
+        }
+      },
+      "Pant_Long_Unseen_1": {
+        "garment_type_dir": "Pant_Long",
+        "config_path": "Release/Pant_Long/Pant_Long_Unseen_1/PL_Pants121_obj_exp.json",
+        "checkpoint_indices": [
+          2462,
+          2404,
+          10758,
+          12086,
+          8587,
+          12645
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2462,
+          "garment_right_top": 2404,
+          "garment_left_sleeve": 10758,
+          "garment_right_sleeve": 12086,
+          "garment_left_bottom": 8587,
+          "garment_right_bottom": 12645
+        }
+      },
+      "Pant_Short_Seen_0": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_0/PS_049_obj_exp.json",
+        "checkpoint_indices": [
+          3524,
+          1758,
+          1940,
+          742,
+          2188,
+          653
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 3524,
+          "garment_right_top": 1758,
+          "garment_left_sleeve": 1940,
+          "garment_right_sleeve": 742,
+          "garment_left_bottom": 2188,
+          "garment_right_bottom": 653
+        }
+      },
+      "Pant_Short_Seen_1": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_1/PS_049_obj_exp.json",
+        "checkpoint_indices": [
+          3524,
+          1758,
+          1940,
+          742,
+          2188,
+          653
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 3524,
+          "garment_right_top": 1758,
+          "garment_left_sleeve": 1940,
+          "garment_right_sleeve": 742,
+          "garment_left_bottom": 2188,
+          "garment_right_bottom": 653
+        }
+      },
+      "Pant_Short_Seen_2": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_2/PS_049_obj_exp.json",
+        "checkpoint_indices": [
+          3524,
+          1758,
+          1940,
+          742,
+          2188,
+          653
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 3524,
+          "garment_right_top": 1758,
+          "garment_left_sleeve": 1940,
+          "garment_right_sleeve": 742,
+          "garment_left_bottom": 2188,
+          "garment_right_bottom": 653
+        }
+      },
+      "Pant_Short_Seen_3": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_3/PS_050_obj_exp.json",
+        "checkpoint_indices": [
+          9158,
+          8114,
+          2834,
+          1154,
+          1922,
+          539
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9158,
+          "garment_right_top": 8114,
+          "garment_left_sleeve": 2834,
+          "garment_right_sleeve": 1154,
+          "garment_left_bottom": 1922,
+          "garment_right_bottom": 539
+        }
+      },
+      "Pant_Short_Seen_4": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_4/PS_050_obj_exp.json",
+        "checkpoint_indices": [
+          9158,
+          8114,
+          2834,
+          1154,
+          1922,
+          539
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9158,
+          "garment_right_top": 8114,
+          "garment_left_sleeve": 2834,
+          "garment_right_sleeve": 1154,
+          "garment_left_bottom": 1922,
+          "garment_right_bottom": 539
+        }
+      },
+      "Pant_Short_Seen_5": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_5/PS_050_obj_exp.json",
+        "checkpoint_indices": [
+          9158,
+          8114,
+          2834,
+          1154,
+          1922,
+          539
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9158,
+          "garment_right_top": 8114,
+          "garment_left_sleeve": 2834,
+          "garment_right_sleeve": 1154,
+          "garment_left_bottom": 1922,
+          "garment_right_bottom": 539
+        }
+      },
+      "Pant_Short_Seen_6": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_6/PS_M1_089_obj_exp.json",
+        "checkpoint_indices": [
+          2525,
+          13907,
+          2054,
+          4549,
+          2088,
+          4897
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2525,
+          "garment_right_top": 13907,
+          "garment_left_sleeve": 2054,
+          "garment_right_sleeve": 4549,
+          "garment_left_bottom": 2088,
+          "garment_right_bottom": 4897
+        }
+      },
+      "Pant_Short_Seen_7": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_7/PS_M1_089_obj_exp.json",
+        "checkpoint_indices": [
+          2525,
+          13907,
+          2054,
+          4549,
+          2088,
+          4897
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2525,
+          "garment_right_top": 13907,
+          "garment_left_sleeve": 2054,
+          "garment_right_sleeve": 4549,
+          "garment_left_bottom": 2088,
+          "garment_right_bottom": 4897
+        }
+      },
+      "Pant_Short_Seen_8": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_8/PS_Short047_obj_exp.json",
+        "checkpoint_indices": [
+          974,
+          829,
+          6684,
+          4603,
+          5875,
+          3148
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 974,
+          "garment_right_top": 829,
+          "garment_left_sleeve": 6684,
+          "garment_right_sleeve": 4603,
+          "garment_left_bottom": 5875,
+          "garment_right_bottom": 3148
+        }
+      },
+      "Pant_Short_Seen_9": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Seen_9/PS_Short047_obj_exp.json",
+        "checkpoint_indices": [
+          974,
+          829,
+          6684,
+          4603,
+          5875,
+          3148
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 974,
+          "garment_right_top": 829,
+          "garment_left_sleeve": 6684,
+          "garment_right_sleeve": 4603,
+          "garment_left_bottom": 5875,
+          "garment_right_bottom": 3148
+        }
+      },
+      "Pant_Short_Unseen_0": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Unseen_0/PS_Short130_obj_exp.json",
+        "checkpoint_indices": [
+          1336,
+          647,
+          4393,
+          5831,
+          3947,
+          5500
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 1336,
+          "garment_right_top": 647,
+          "garment_left_sleeve": 4393,
+          "garment_right_sleeve": 5831,
+          "garment_left_bottom": 3947,
+          "garment_right_bottom": 5500
+        }
+      },
+      "Pant_Short_Unseen_1": {
+        "garment_type_dir": "Pant_Short",
+        "config_path": "Release/Pant_Short/Pant_Short_Unseen_1/PS_M1_089_obj_exp.json",
+        "checkpoint_indices": [
+          2525,
+          13907,
+          2054,
+          4549,
+          2088,
+          4897
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2525,
+          "garment_right_top": 13907,
+          "garment_left_sleeve": 2054,
+          "garment_right_sleeve": 4549,
+          "garment_left_bottom": 2088,
+          "garment_right_bottom": 4897
+        }
+      },
+      "Top_Long_Seen_0": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_0/TCLC_002_obj_exp.json",
+        "checkpoint_indices": [
+          8077,
+          1711,
+          2578,
+          3942,
+          8738,
+          588
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 8077,
+          "garment_right_top": 1711,
+          "garment_left_sleeve": 2578,
+          "garment_right_sleeve": 3942,
+          "garment_left_bottom": 8738,
+          "garment_right_bottom": 588
+        }
+      },
+      "Top_Long_Seen_1": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_1/TCLC_015_obj_exp.json",
+        "checkpoint_indices": [
+          2890,
+          4253,
+          5220,
+          6484,
+          207,
+          1564
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2890,
+          "garment_right_top": 4253,
+          "garment_left_sleeve": 5220,
+          "garment_right_sleeve": 6484,
+          "garment_left_bottom": 207,
+          "garment_right_bottom": 1564
+        }
+      },
+      "Top_Long_Seen_2": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_2/TCLC_028_obj_exp.json",
+        "checkpoint_indices": [
+          1065,
+          570,
+          1784,
+          3829,
+          8940,
+          9332
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 1065,
+          "garment_right_top": 570,
+          "garment_left_sleeve": 1784,
+          "garment_right_sleeve": 3829,
+          "garment_left_bottom": 8940,
+          "garment_right_bottom": 9332
+        }
+      },
+      "Top_Long_Seen_3": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_3/TCLO_001_obj_exp.json",
+        "checkpoint_indices": [
+          8093,
+          1070,
+          1991,
+          3391,
+          8289,
+          419
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 8093,
+          "garment_right_top": 1070,
+          "garment_left_sleeve": 1991,
+          "garment_right_sleeve": 3391,
+          "garment_left_bottom": 8289,
+          "garment_right_bottom": 419
+        }
+      },
+      "Top_Long_Seen_4": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_4/TCLO_073_obj_exp.json",
+        "checkpoint_indices": [
+          9215,
+          9285,
+          9105,
+          8906,
+          5650,
+          4564
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9215,
+          "garment_right_top": 9285,
+          "garment_left_sleeve": 9105,
+          "garment_right_sleeve": 8906,
+          "garment_left_bottom": 5650,
+          "garment_right_bottom": 4564
+        }
+      },
+      "Top_Long_Seen_5": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_5/TCLO_027_obj_exp.json",
+        "checkpoint_indices": [
+          1101,
+          300,
+          1920,
+          3735,
+          8769,
+          9571
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 1101,
+          "garment_right_top": 300,
+          "garment_left_sleeve": 1920,
+          "garment_right_sleeve": 3735,
+          "garment_left_bottom": 8769,
+          "garment_right_bottom": 9571
+        }
+      },
+      "Top_Long_Seen_6": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_6/TNLC_010_obj_exp.json",
+        "checkpoint_indices": [
+          4281,
+          5209,
+          230,
+          2124,
+          3614,
+          5176
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4281,
+          "garment_right_top": 5209,
+          "garment_left_sleeve": 230,
+          "garment_right_sleeve": 2124,
+          "garment_left_bottom": 3614,
+          "garment_right_bottom": 5176
+        }
+      },
+      "Top_Long_Seen_7": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_7/TNLC_033_obj_exp.json",
+        "checkpoint_indices": [
+          4527,
+          5778,
+          8460,
+          6787,
+          3545,
+          5072
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4527,
+          "garment_right_top": 5778,
+          "garment_left_sleeve": 8460,
+          "garment_right_sleeve": 6787,
+          "garment_left_bottom": 3545,
+          "garment_right_bottom": 5072
+        }
+      },
+      "Top_Long_Seen_8": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_8/TNLO_008_obj_exp.json",
+        "checkpoint_indices": [
+          4047,
+          4775,
+          1394,
+          1887,
+          3628,
+          5067
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4047,
+          "garment_right_top": 4775,
+          "garment_left_sleeve": 1394,
+          "garment_right_sleeve": 1887,
+          "garment_left_bottom": 3628,
+          "garment_right_bottom": 5067
+        }
+      },
+      "Top_Long_Seen_9": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Seen_9/TNLO_034__obj_exp.json",
+        "checkpoint_indices": [
+          4506,
+          5520,
+          8193,
+          6323,
+          3669,
+          5497
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4506,
+          "garment_right_top": 5520,
+          "garment_left_sleeve": 8193,
+          "garment_right_sleeve": 6323,
+          "garment_left_bottom": 3669,
+          "garment_right_bottom": 5497
+        }
+      },
+      "Top_Long_Unseen_0": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Unseen_0/TCLC_018_obj_exp.json",
+        "checkpoint_indices": [
+          6569,
+          6530,
+          4987,
+          5687,
+          6793,
+          6874
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 6569,
+          "garment_right_top": 6530,
+          "garment_left_sleeve": 4987,
+          "garment_right_sleeve": 5687,
+          "garment_left_bottom": 6793,
+          "garment_right_bottom": 6874
+        }
+      },
+      "Top_Long_Unseen_1": {
+        "garment_type_dir": "Top_Long",
+        "config_path": "Release/Top_Long/Top_Long_Unseen_1/TCLC_015_obj_exp.json",
+        "checkpoint_indices": [
+          2890,
+          4253,
+          5220,
+          6484,
+          207,
+          1564
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 2890,
+          "garment_right_top": 4253,
+          "garment_left_sleeve": 5220,
+          "garment_right_sleeve": 6484,
+          "garment_left_bottom": 207,
+          "garment_right_bottom": 1564
+        }
+      },
+      "Top_Short_Seen_0": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_0/TCSC_067_obj_exp.json",
+        "checkpoint_indices": [
+          964,
+          6466,
+          8185,
+          9499,
+          1354,
+          7374
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 964,
+          "garment_right_top": 6466,
+          "garment_left_sleeve": 8185,
+          "garment_right_sleeve": 9499,
+          "garment_left_bottom": 1354,
+          "garment_right_bottom": 7374
+        }
+      },
+      "Top_Short_Seen_1": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_1/TCSC_067_obj_exp.json",
+        "checkpoint_indices": [
+          964,
+          6466,
+          8185,
+          9499,
+          1354,
+          7374
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 964,
+          "garment_right_top": 6466,
+          "garment_left_sleeve": 8185,
+          "garment_right_sleeve": 9499,
+          "garment_left_bottom": 1354,
+          "garment_right_bottom": 7374
+        }
+      },
+      "Top_Short_Seen_2": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_2/TCSC_067_obj_exp.json",
+        "checkpoint_indices": [
+          964,
+          6466,
+          8185,
+          9499,
+          1354,
+          7374
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 964,
+          "garment_right_top": 6466,
+          "garment_left_sleeve": 8185,
+          "garment_right_sleeve": 9499,
+          "garment_left_bottom": 1354,
+          "garment_right_bottom": 7374
+        }
+      },
+      "Top_Short_Seen_3": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_3/TCSC_Top004_1_obj_exp.json",
+        "checkpoint_indices": [
+          10309,
+          11029,
+          7217,
+          4539,
+          11266,
+          11378
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 10309,
+          "garment_right_top": 11029,
+          "garment_left_sleeve": 7217,
+          "garment_right_sleeve": 4539,
+          "garment_left_bottom": 11266,
+          "garment_right_bottom": 11378
+        }
+      },
+      "Top_Short_Seen_4": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_4/TCSC_Top004_1_obj_exp.json",
+        "checkpoint_indices": [
+          10309,
+          11029,
+          7217,
+          4539,
+          11266,
+          11378
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 10309,
+          "garment_right_top": 11029,
+          "garment_left_sleeve": 7217,
+          "garment_right_sleeve": 4539,
+          "garment_left_bottom": 11266,
+          "garment_right_bottom": 11378
+        }
+      },
+      "Top_Short_Seen_5": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_5/TCSO_Baggy_Shirt_obj_exp.json",
+        "checkpoint_indices": [
+          7176,
+          6227,
+          8395,
+          4661,
+          7105,
+          4968
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 7176,
+          "garment_right_top": 6227,
+          "garment_left_sleeve": 8395,
+          "garment_right_sleeve": 4661,
+          "garment_left_bottom": 7105,
+          "garment_right_bottom": 4968
+        }
+      },
+      "Top_Short_Seen_6": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_6/TCSO_Baggy_Shirt_obj_exp.json",
+        "checkpoint_indices": [
+          7176,
+          6227,
+          8395,
+          4661,
+          7105,
+          4968
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 7176,
+          "garment_right_top": 6227,
+          "garment_left_sleeve": 8395,
+          "garment_right_sleeve": 4661,
+          "garment_left_bottom": 7105,
+          "garment_right_bottom": 4968
+        }
+      },
+      "Top_Short_Seen_7": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_7/TCSO_Baggy_Shirt_obj_exp.json",
+        "checkpoint_indices": [
+          7176,
+          6227,
+          8395,
+          4661,
+          7105,
+          4968
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 7176,
+          "garment_right_top": 6227,
+          "garment_left_sleeve": 8395,
+          "garment_right_sleeve": 4661,
+          "garment_left_bottom": 7105,
+          "garment_right_bottom": 4968
+        }
+      },
+      "Top_Short_Seen_8": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_8/TNSC_Tshirt3_obj_exp.json",
+        "checkpoint_indices": [
+          4221,
+          241,
+          8795,
+          2679,
+          5019,
+          996
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4221,
+          "garment_right_top": 241,
+          "garment_left_sleeve": 8795,
+          "garment_right_sleeve": 2679,
+          "garment_left_bottom": 5019,
+          "garment_right_bottom": 996
+        }
+      },
+      "Top_Short_Seen_9": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Seen_9/TNSC_Tshirt3_obj_exp.json",
+        "checkpoint_indices": [
+          4221,
+          241,
+          8795,
+          2679,
+          5019,
+          996
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 4221,
+          "garment_right_top": 241,
+          "garment_left_sleeve": 8795,
+          "garment_right_sleeve": 2679,
+          "garment_left_bottom": 5019,
+          "garment_right_bottom": 996
+        }
+      },
+      "Top_Short_Unseen_0": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Unseen_0/TNSC_Top231_obj_exp.json",
+        "checkpoint_indices": [
+          9469,
+          8129,
+          9297,
+          7784,
+          6672,
+          6205
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 9469,
+          "garment_right_top": 8129,
+          "garment_left_sleeve": 9297,
+          "garment_right_sleeve": 7784,
+          "garment_left_bottom": 6672,
+          "garment_right_bottom": 6205
+        }
+      },
+      "Top_Short_Unseen_1": {
+        "garment_type_dir": "Top_Short",
+        "config_path": "Release/Top_Short/Top_Short_Unseen_1/TCSC_Top004_1_obj_exp.json",
+        "checkpoint_indices": [
+          10309,
+          11029,
+          7217,
+          4539,
+          11266,
+          11378
+        ],
+        "checkpoint_name_to_index": {
+          "garment_left_top": 10309,
+          "garment_right_top": 11029,
+          "garment_left_sleeve": 7217,
+          "garment_right_sleeve": 4539,
+          "garment_left_bottom": 11266,
+          "garment_right_bottom": 11378
+        }
+      }
+    }
+  }
+}

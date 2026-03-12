@@ -23,6 +23,9 @@ import numpy as np
 import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
+from ..checkpoint_mappings import (
+    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+)
 
 if TYPE_CHECKING:
     from isaaclab.managers.manager_term_cfg import RecorderTermCfg
@@ -71,32 +74,8 @@ def _identity_object_poses(device: torch.device, num_envs: int) -> dict[str, tor
 
 
 def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-    """Map six garment checkpoints to semantic cloth parts.
-
-    Convention inferred from challenge success checks:
-    p0/p1/p2 are left-side points, p3/p4/p5 are right-side points, where
-    p2 and p3 are sleeve-like side points, and p0/p1 and p4/p5 are top/bottom-like pairs.
-    """
-    left_top = kp_positions[0]
-    left_bottom = kp_positions[1]
-    left_sleeve = kp_positions[2]
-    right_sleeve = kp_positions[3]
-    right_top = kp_positions[4]
-    right_bottom = kp_positions[5]
-
-    return {
-        "garment_left_sleeve": left_sleeve,
-        "garment_right_sleeve": right_sleeve,
-        "garment_left_bottom": left_bottom,
-        "garment_right_bottom": right_bottom,
-        "garment_left_top": left_top,
-        "garment_right_top": right_top,
-        "garment_top_center": np.mean(np.stack([left_top, right_top], axis=0), axis=0),
-        "garment_bottom_center": np.mean(np.stack([left_bottom, right_bottom], axis=0), axis=0),
-        "garment_kp_left": np.mean(kp_positions[:3], axis=0),
-        "garment_kp_right": np.mean(kp_positions[3:], axis=0),
-        "garment_center": np.mean(kp_positions, axis=0),
-    }
+    """Map six garment checkpoints using checkpoint_mappings.json."""
+    return map_semantic_keypoints_from_positions(kp_positions)
 
 
 class GarmentDatagenRecorder(RecorderTerm):
@@ -196,8 +175,8 @@ class GarmentDatagenRecorder(RecorderTerm):
         """Compute virtual 4×4 object poses from garment keypoints.
 
         Groups the 6 check_points into:
-          - garment_kp_left:  centroid of first 3 keypoints
-          - garment_kp_right: centroid of last 3 keypoints
+          - garment_kp_left:  centroid of left top, left sleeve, left bottom
+          - garment_kp_right: centroid of right top, right sleeve, right bottom
           - garment_center:   centroid of all 6
 
         Returns:
