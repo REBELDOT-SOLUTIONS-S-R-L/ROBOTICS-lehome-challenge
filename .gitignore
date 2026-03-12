@@ -65,6 +65,8 @@ _build
 /.pretrained_checkpoints/
 
 # Teleop Recorded Dataset
+/Datasets/
+/datasets/
 
 # Tests
 tests/
