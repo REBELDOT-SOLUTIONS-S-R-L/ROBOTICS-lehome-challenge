@@ -33,13 +33,13 @@ def setup_record_parser(
     parser.add_argument(
         "--left_arm_port",
         type=str,
-        default="/dev/ttyACM0",
+        default="/dev/ttyUSB0",
         help="Port for the left teleop device:bi-so101leader, default is /dev/ttyACM0",
     )
     parser.add_argument(
         "--right_arm_port",
         type=str,
-        default="/dev/ttyACM1",
+        default="/dev/ttyUSB1",
         help="Port for the right teleop device:bi-so101leader, default is /dev/ttyACM1",
     )
     parser.add_argument(

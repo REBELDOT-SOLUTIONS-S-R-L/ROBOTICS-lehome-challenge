@@ -12,6 +12,7 @@ if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
 
 import argparse
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -43,12 +44,16 @@ def main():
 
     try:
         import lehome.tasks.bedroom
-        from .utils import dataset_record, dataset_replay
+        from .utils import dataset_record, dataset_replay, dataset_replay_hdf5
 
         if args.command == "record":
             dataset_record.record_dataset(args, simulation_app)
         elif args.command == "replay":
-            dataset_replay.replay(args)
+            dataset_path = Path(args.dataset_root)
+            if dataset_path.suffix.lower() in {".hdf5", ".h5"}:
+                dataset_replay_hdf5.replay(args)
+            else:
+                dataset_replay.replay(args)
     except Exception as e:
         logger.error(f"Error during dataset {args.command}: {e}", exc_info=True)
         raise
