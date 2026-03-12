@@ -502,13 +502,54 @@ def _set_arm_joint_state_from_initial_state(env: ManagerBasedRLMimicEnv, initial
 
 def _as_2d_tensor(data) -> torch.Tensor | None:
     """Convert array-like input to a 2D tensor, or return None if unavailable."""
-    if data is None:
+    tensor = _as_tensor(data, squeeze_second_dim=True)
+    if tensor is None:
         return None
-    tensor = data if torch.is_tensor(data) else torch.tensor(data)
     if tensor.ndim == 1:
         tensor = tensor.unsqueeze(0)
     if tensor.ndim != 2:
         return None
+    return tensor
+
+
+def _as_tensor(data, squeeze_second_dim: bool = False) -> torch.Tensor | None:
+    """Convert arrays or recorder list[tensor] buffers into a dense tensor."""
+    if data is None:
+        return None
+
+    if torch.is_tensor(data):
+        tensor = data
+    elif isinstance(data, np.ndarray):
+        tensor = torch.from_numpy(data)
+    elif isinstance(data, (list, tuple)):
+        if len(data) == 0:
+            return None
+
+        # IsaacLab EpisodeData stores recorder leaves as list[tensor] until pre_export().
+        if any(torch.is_tensor(item) or isinstance(item, np.ndarray) for item in data):
+            elems = []
+            for item in data:
+                if item is None:
+                    return None
+                elem = item if torch.is_tensor(item) else torch.as_tensor(item)
+                elems.append(elem)
+            try:
+                tensor = torch.stack(elems, dim=0)
+            except RuntimeError:
+                return None
+        else:
+            try:
+                tensor = torch.as_tensor(data)
+            except (TypeError, ValueError):
+                return None
+    else:
+        try:
+            tensor = torch.as_tensor(data)
+        except (TypeError, ValueError):
+            return None
+
+    if squeeze_second_dim and tensor.ndim >= 3 and tensor.shape[1] == 1:
+        tensor = tensor.squeeze(1)
     return tensor
 
 
@@ -654,7 +695,9 @@ def _first_pose_translation_mean(pose_dict: dict[str, torch.Tensor], max_steps: 
         return None
     xyz_list = []
     for pose in pose_dict.values():
-        pose_t = torch.as_tensor(pose)
+        pose_t = _as_tensor(pose, squeeze_second_dim=True)
+        if pose_t is None:
+            continue
         if pose_t.ndim != 3 or tuple(pose_t.shape[-2:]) != (4, 4):
             continue
         n = min(int(max_steps), int(pose_t.shape[0]))
@@ -684,7 +727,12 @@ def _validate_recorded_datagen_pose_contract(
         if not isinstance(pose_dict, dict) or len(pose_dict) == 0:
             raise ValueError(f"obs/datagen_info/{section_name} is empty or invalid.")
         for pose_name, pose_value in pose_dict.items():
-            pose = torch.as_tensor(pose_value)
+            pose = _as_tensor(pose_value, squeeze_second_dim=True)
+            if pose is None:
+                raise ValueError(
+                    f"Invalid pose value for {section_name}/{pose_name}: "
+                    f"unsupported type {type(pose_value)}."
+                )
             if pose.ndim != 3 or tuple(pose.shape[-2:]) != (4, 4):
                 raise ValueError(
                     f"Invalid pose shape for {section_name}/{pose_name}: expected [T,4,4], got {tuple(pose.shape)}."

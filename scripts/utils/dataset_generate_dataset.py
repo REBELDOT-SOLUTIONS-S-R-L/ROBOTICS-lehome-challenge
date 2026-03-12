@@ -9,8 +9,10 @@
 """Launch Isaac Sim Simulator first."""
 
 import argparse
+import csv
 import contextlib
 import json
+from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
@@ -59,22 +61,59 @@ parser.add_argument(
     help="pause after every subtask during generation for debugging - only useful with render flag",
 )
 parser.add_argument(
+    "--garment_settle_steps",
+    type=int,
+    default=20,
+    help=(
+        "Number of post-reset hold-action steps used to let garment cloth settle before "
+        "Mimic samples runtime object poses."
+    ),
+)
+parser.add_argument(
     "--enable_pinocchio",
     action="store_true",
     default=False,
     help="Enable Pinocchio.",
 )
 parser.add_argument(
-    "--pose_output_interval",
+    "--logging_interval",
     type=int,
     default=1,
-    help="Pose print interval in env steps (used only with --print_poses). Set <=0 to disable.",
+    help="CSV logging interval in env steps. Must be > 0.",
+)
+parser.add_argument(
+    "--pose_output_interval",
+    dest="logging_interval",
+    type=int,
+    default=argparse.SUPPRESS,
+    help=argparse.SUPPRESS,
 )
 parser.add_argument(
     "--print_poses",
     action="store_true",
     default=False,
-    help="Print EEF and keypoint positions during generation.",
+    help=argparse.SUPPRESS,
+)
+parser.add_argument(
+    "--save_pose_trace",
+    action="store_true",
+    default=False,
+    help=argparse.SUPPRESS,
+)
+parser.add_argument(
+    "--pose_output_file",
+    type=str,
+    default=None,
+    help=(
+        "Optional CSV path for pose trace output. "
+        "Defaults to <output_file stem>_pose_trace.csv."
+    ),
+)
+parser.add_argument(
+    "--log_success",
+    action="store_true",
+    default=False,
+    help="Log garment success-term distances for env 0 at episode start and every 50 env steps.",
 )
 parser.add_argument(
     "--use_eef_pose_as_target",
@@ -186,6 +225,9 @@ from typing import Any
 import omni
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
+from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
+from isaaclab.managers import RecorderTerm, RecorderTermCfg, TerminationTermCfg
+from isaaclab.utils import configclass
 
 import isaaclab_mimic.envs  # noqa: F401
 
@@ -203,11 +245,87 @@ from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 import lehome.tasks  # noqa: F401
 
 from lehome.utils.env_utils import get_task_type
+from lehome.utils.logger import get_logger
 
 try:
     import h5py
 except ImportError:
     h5py = None
+
+
+SINGLE_ARM_SETTLE_ACTION = np.array(
+    [-1.0363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176],
+    dtype=np.float32,
+)
+DUAL_ARM_SETTLE_ACTION = np.array(
+    [-1.2363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176, 1.2363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176],
+    dtype=np.float32,
+)
+TRACE_EEF_NAMES = ("left_arm", "right_arm")
+TRACE_KEYPOINT_NAMES = (
+    "garment_left_sleeve",
+    "garment_left_bottom",
+    "garment_left_top",
+    "garment_right_sleeve",
+    "garment_right_bottom",
+    "garment_right_top",
+)
+TRACE_EEF_KEYPOINT_GROUPS = {
+    "left_arm": ("garment_left_sleeve", "garment_left_bottom", "garment_left_top"),
+    "right_arm": ("garment_right_sleeve", "garment_right_bottom", "garment_right_top"),
+}
+TRACE_SUCCESS_DISTANCE_SPECS = (
+    ("left_sleeve_to_bottom", "garment_left_sleeve", "garment_left_bottom", 0.10),
+    ("right_sleeve_to_bottom", "garment_right_sleeve", "garment_right_bottom", 0.10),
+    ("left_bottom_to_top", "garment_left_bottom", "garment_left_top", 0.12),
+    ("right_bottom_to_top", "garment_right_bottom", "garment_right_top", 0.12),
+)
+SUCCESS_LOG_INTERVAL = 50
+
+logger = get_logger(__name__)
+
+
+class PreStepCameraObservationsRecorder(RecorderTerm):
+    """Record camera observations into the generated HDF5 obs group."""
+
+    def record_pre_step(self):
+        camera_obs: dict[str, torch.Tensor] = {}
+
+        def _maybe_add(sensor_name: str, target_key: str) -> None:
+            try:
+                sensor = self._env.scene[sensor_name]
+                rgb = sensor.data.output["rgb"]
+            except Exception:
+                return
+
+            if rgb is None or rgb.ndim != 4:
+                return
+            if rgb.shape[-1] == 4:
+                rgb = rgb[..., :3]
+            camera_obs[target_key] = rgb.clone()
+
+        _maybe_add("top_camera", "top")
+        _maybe_add("left_camera", "left_wrist")
+        _maybe_add("right_camera", "right_wrist")
+        _maybe_add("wrist_camera", "wrist")
+
+        if not camera_obs:
+            return None, None
+        return "obs", camera_obs
+
+
+@configclass
+class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
+    """Configuration for camera observation recording during generation export."""
+
+    class_type: type[RecorderTerm] = PreStepCameraObservationsRecorder
+
+
+@configclass
+class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
+    """Default action/state recorder plus camera observations."""
+
+    record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
 
 
 def _decode_attr(value: Any) -> Any:
@@ -219,6 +337,37 @@ def _decode_attr(value: Any) -> Any:
     if isinstance(value, np.generic):
         return value.item()
     return value
+
+
+def _build_post_reset_hold_action(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
+    """Build a safe per-env hold action used while garment cloth settles after reset."""
+    if hasattr(env, "single_action_space") and hasattr(env.single_action_space, "shape"):
+        action_dim = int(env.single_action_space.shape[0])
+    else:
+        action_dim = int(env.action_space.shape[-1])
+
+    if action_dim == int(DUAL_ARM_SETTLE_ACTION.shape[0]):
+        values = DUAL_ARM_SETTLE_ACTION
+    elif action_dim == int(SINGLE_ARM_SETTLE_ACTION.shape[0]):
+        values = SINGLE_ARM_SETTLE_ACTION
+    else:
+        values = np.zeros(action_dim, dtype=np.float32)
+
+    return torch.tensor(values, dtype=torch.float32, device=env.device)
+
+
+def _stabilize_after_initial_reset(
+    env: ManagerBasedRLMimicEnv,
+    hold_action: torch.Tensor,
+    num_steps: int,
+) -> None:
+    """Let cloth settle once before preflight checks and generation startup."""
+    if num_steps <= 0 or not hasattr(env, "object"):
+        return
+
+    batched_action = hold_action.reshape(1, -1).repeat(env.num_envs, 1)
+    for _ in range(int(num_steps)):
+        env.step(batched_action)
 
 
 def _load_dataset_env_args(input_file: str) -> dict[str, Any]:
@@ -943,6 +1092,8 @@ def setup_async_generation_compat(
     align_object_pose_to_runtime: bool = False,
     align_object_pose_mode: str = "object_only",
     pause_subtask: bool = False,
+    post_reset_settle_steps: int = 0,
+    post_reset_hold_action: torch.Tensor | None = None,
     motion_planners: Any = None,
 ) -> dict[str, Any]:
     """Setup async generation with robust HDF5 datagen pool loading."""
@@ -969,7 +1120,12 @@ def setup_async_generation_compat(
     if align_object_pose_to_runtime:
         print(f"Applying source object-pose runtime alignment in mode: {align_object_pose_mode}")
 
-    data_generator = DataGenerator(env=env, src_demo_datagen_info_pool=shared_datagen_info_pool)
+    data_generator = DataGenerator(
+        env=env,
+        src_demo_datagen_info_pool=shared_datagen_info_pool,
+        post_reset_settle_steps=post_reset_settle_steps,
+        post_reset_hold_action=post_reset_hold_action,
+    )
     data_generator_asyncio_tasks = []
     for i in range(num_envs):
         env_motion_planner = motion_planners[i] if motion_planners else None
@@ -1017,18 +1173,35 @@ def _extract_first_xyz(pose: Any) -> list[float] | None:
     return [round(float(v), 6) for v in xyz.detach().cpu().tolist()]
 
 
-def _print_pose_snapshot(env: Any, step_count: int, env_id: int = 0) -> None:
-    """Print positions for EEFs and garment keypoints."""
+def _distance_xyz(a: list[float] | None, b: list[float] | None) -> float | None:
+    """Compute Euclidean distance between two xyz points."""
+    if a is None or b is None:
+        return None
+    return round(float(np.linalg.norm(np.asarray(a, dtype=np.float32) - np.asarray(b, dtype=np.float32))), 6)
+
+
+def _resolve_pose_output_path(output_file: str, pose_output_file: str | None) -> Path:
+    """Resolve CSV path for pose trace output."""
+    if pose_output_file:
+        return Path(pose_output_file).expanduser()
+    output_path = Path(output_file).expanduser()
+    return output_path.with_name(f"{output_path.stem}_pose_trace.csv")
+
+
+def _build_pose_snapshot(
+    env: Any,
+    step_count: int,
+    env_id: int = 0,
+    episode_index: int | None = None,
+    episode_step: int | None = None,
+    completed_attempts: int | None = None,
+    completed_successes: int | None = None,
+) -> dict[str, Any]:
+    """Build a flat pose snapshot row suitable for CSV logging."""
     eef_positions: dict[str, list[float]] = {}
     keypoint_positions: dict[str, list[float]] = {}
 
-    subtask_cfgs = getattr(env.cfg, "subtask_configs", {})
-    if isinstance(subtask_cfgs, dict) and len(subtask_cfgs) > 0:
-        eef_names = list(subtask_cfgs.keys())
-    else:
-        eef_names = ["left_arm", "right_arm"]
-
-    for eef_name in eef_names:
+    for eef_name in TRACE_EEF_NAMES:
         try:
             eef_pose = env.get_robot_eef_pose(eef_name=eef_name, env_ids=[env_id])
         except Exception:
@@ -1047,18 +1220,134 @@ def _print_pose_snapshot(env: Any, step_count: int, env_id: int = 0) -> None:
     except Exception as e:
         print(f"[pose] step={step_count} failed to read object poses: {e}")
 
-    def _fmt_xyz(xyz: list[float]) -> str:
-        return f"x={xyz[0]: .4f}  y={xyz[1]: .4f}  z={xyz[2]: .4f}"
+    row: dict[str, Any] = {
+        "step": int(step_count),
+        "env_id": int(env_id),
+        "episode_index": episode_index,
+        "episode_step": episode_step,
+        "completed_attempts": completed_attempts,
+        "completed_successes": completed_successes,
+    }
+    for eef_name in TRACE_EEF_NAMES:
+        xyz = eef_positions.get(eef_name)
+        row[f"eef_{eef_name}_x"] = None if xyz is None else xyz[0]
+        row[f"eef_{eef_name}_y"] = None if xyz is None else xyz[1]
+        row[f"eef_{eef_name}_z"] = None if xyz is None else xyz[2]
+    for keypoint_name in TRACE_KEYPOINT_NAMES:
+        xyz = keypoint_positions.get(keypoint_name)
+        row[f"keypoint_{keypoint_name}_x"] = None if xyz is None else xyz[0]
+        row[f"keypoint_{keypoint_name}_y"] = None if xyz is None else xyz[1]
+        row[f"keypoint_{keypoint_name}_z"] = None if xyz is None else xyz[2]
 
-    print(f"[pose] step={step_count}")
-    if eef_positions:
-        print("  eef:")
-        for name in sorted(eef_positions.keys()):
-            print(f"    - {name:<20} {_fmt_xyz(eef_positions[name])}")
-    if keypoint_positions:
-        print("  keypoints:")
-        for name in sorted(keypoint_positions.keys()):
-            print(f"    - {name:<20} {_fmt_xyz(keypoint_positions[name])}")
+    for eef_name, keypoint_names in TRACE_EEF_KEYPOINT_GROUPS.items():
+        eef_xyz = eef_positions.get(eef_name)
+        for keypoint_name in keypoint_names:
+            row[f"dist_{eef_name}_to_{keypoint_name}_m"] = _distance_xyz(
+                eef_xyz, keypoint_positions.get(keypoint_name)
+            )
+
+    for metric_name, src_name, dst_name, threshold in TRACE_SUCCESS_DISTANCE_SPECS:
+        distance = _distance_xyz(keypoint_positions.get(src_name), keypoint_positions.get(dst_name))
+        row[f"dist_{metric_name}_m"] = distance
+        row[f"threshold_{metric_name}_m"] = threshold
+        row[f"pass_{metric_name}"] = None if distance is None else int(distance <= threshold)
+
+    return row
+
+
+class PoseTraceCsvWriter:
+    """Append flat pose snapshots to CSV for later plotting."""
+
+    def __init__(self, path: Path):
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = self.path.open("w", newline="", encoding="utf-8")
+        self._writer: csv.DictWriter | None = None
+
+    def write(self, row: dict[str, Any]) -> None:
+        if self._writer is None:
+            self._writer = csv.DictWriter(self._file, fieldnames=list(row.keys()))
+            self._writer.writeheader()
+        self._writer.writerow(row)
+        self._file.flush()
+
+    def close(self) -> None:
+        self._file.close()
+
+
+def _write_pose_snapshot(
+    env: Any,
+    step_count: int,
+    env_id: int = 0,
+    pose_writer: PoseTraceCsvWriter | None = None,
+    episode_index: int | None = None,
+    episode_step: int | None = None,
+    completed_attempts: int | None = None,
+    completed_successes: int | None = None,
+) -> dict[str, Any]:
+    """Persist one pose snapshot row to the CSV trace and return it."""
+    row = _build_pose_snapshot(
+        env,
+        step_count=step_count,
+        env_id=env_id,
+        episode_index=episode_index,
+        episode_step=episode_step,
+        completed_attempts=completed_attempts,
+        completed_successes=completed_successes,
+    )
+    if pose_writer is not None:
+        pose_writer.write(row)
+    return row
+
+
+def _evaluate_generation_success_result(env: ManagerBasedRLMimicEnv) -> dict[str, Any] | None:
+    """Evaluate success using the same garment checker used by direct recording."""
+    if (
+        hasattr(env, "object")
+        and env.object is not None
+        and hasattr(env.object, "_cloth_prim_view")
+        and hasattr(env, "garment_loader")
+        and hasattr(env, "cfg")
+        and hasattr(env.cfg, "garment_name")
+    ):
+        from lehome.utils.success_checker_chanllege import evaluate_garment_fold_success
+
+        garment_type = env.garment_loader.get_garment_type(env.cfg.garment_name)
+        return evaluate_garment_fold_success(env.object, garment_type)
+    return None
+
+
+def _recording_style_success_tensor(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
+    """Return the same garment-only success signal used by direct recording."""
+    result = _evaluate_generation_success_result(env)
+    success = bool(result.get("success", False)) if result is not None else False
+    return torch.full((int(env.num_envs),), success, dtype=torch.bool, device=env.device)
+
+
+def _log_success_snapshot(env: ManagerBasedRLMimicEnv, row: dict[str, Any]) -> bool:
+    """Log garment success using the same checker and thresholds as recording."""
+    prefix = (
+        f"[Generation][Episode {row.get('episode_index', 'N/A')}]"
+        f"[step {row.get('episode_step', row.get('step', 'N/A'))}]"
+    )
+    result = _evaluate_generation_success_result(env)
+
+    if result is None:
+        logger.warning(f"{prefix} [Success Check] Success evaluation unavailable.")
+        return False
+
+    logger.info(
+        f"{prefix} [Success Check] Garment type: {result.get('garment_type', 'unknown')}, "
+        f"Thresholds: {result.get('thresholds', [])}"
+    )
+    details = result.get("details", {})
+    for condition_info in details.values():
+        status = "✓" if condition_info.get("passed", False) else "✗"
+        logger.info(f"{prefix}   {condition_info.get('description', '')} -> {status}")
+
+    success = bool(result.get("success", False))
+    logger.info(f"{prefix} [Success Check] Final result: {'Success ✓' if success else 'Failed ✗'}")
+    return success
 
 
 def env_loop_with_pose_output(
@@ -1066,76 +1355,124 @@ def env_loop_with_pose_output(
     env_reset_queue: asyncio.Queue,
     env_action_queue: asyncio.Queue,
     asyncio_event_loop: asyncio.AbstractEventLoop,
-    print_poses: bool = False,
-    pose_output_interval: int = 1,
+    logging_interval: int = 1,
+    log_success: bool = False,
 ) -> None:
-    """Main async loop for generation with optional pose output."""
+    """Main async loop for generation with CSV logging and optional success logging."""
     env_id_tensor = torch.tensor([0], dtype=torch.int64, device=env.device)
     prev_num_attempts = 0
     step_count = 0
     action_dim = int(env.single_action_space.shape[0])
+    pose_output_path = _resolve_pose_output_path(args_cli.output_file, args_cli.pose_output_file)
+    pose_writer = PoseTraceCsvWriter(pose_output_path)
+    episode_indices = {env_id: -1 for env_id in range(int(env.num_envs))}
+    episode_steps = {env_id: -1 for env_id in range(int(env.num_envs))}
+    print(f"Pose trace CSV: {pose_output_path}")
 
-    if print_poses and pose_output_interval > 0:
-        _print_pose_snapshot(env, step_count=0, env_id=0)
+    try:
+        with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
+            while True:
+                while env_action_queue.qsize() != env.num_envs:
+                    asyncio_event_loop.run_until_complete(asyncio.sleep(0))
+                    while not env_reset_queue.empty():
+                        reset_env_id = int(env_reset_queue.get_nowait())
+                        env_id_tensor[0] = reset_env_id
+                        env.reset(env_ids=env_id_tensor)
+                        episode_indices[reset_env_id] += 1
+                        episode_steps[reset_env_id] = 0
+                        env_reset_queue.task_done()
+                        if reset_env_id == 0:
+                            row = _write_pose_snapshot(
+                                env,
+                                step_count=step_count,
+                                env_id=0,
+                                pose_writer=pose_writer,
+                                episode_index=episode_indices[0],
+                                episode_step=episode_steps[0],
+                                completed_attempts=int(mimic_generation.num_attempts),
+                                completed_successes=int(mimic_generation.num_success),
+                            )
+                            if log_success:
+                                _log_success_snapshot(env, row)
 
-    with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
-        while True:
-            while env_action_queue.qsize() != env.num_envs:
-                asyncio_event_loop.run_until_complete(asyncio.sleep(0))
-                while not env_reset_queue.empty():
-                    env_id_tensor[0] = env_reset_queue.get_nowait()
-                    env.reset(env_ids=env_id_tensor)
-                    env_reset_queue.task_done()
+                # Keep action tensor shape explicit as [num_envs, action_dim].
+                actions = torch.zeros((env.num_envs, action_dim), device=env.device)
+                for _ in range(env.num_envs):
+                    env_id, action = asyncio_event_loop.run_until_complete(env_action_queue.get())
+                    action_tensor = torch.as_tensor(action, device=env.device).reshape(-1)
+                    if action_tensor.numel() != action_dim:
+                        raise ValueError(
+                            "Invalid action size from generator: "
+                            f"expected {action_dim}, received {action_tensor.numel()}."
+                        )
+                    actions[env_id] = action_tensor
 
-            # Keep action tensor shape explicit as [num_envs, action_dim].
-            actions = torch.zeros((env.num_envs, action_dim), device=env.device)
-            for _ in range(env.num_envs):
-                env_id, action = asyncio_event_loop.run_until_complete(env_action_queue.get())
-                action_tensor = torch.as_tensor(action, device=env.device).reshape(-1)
-                if action_tensor.numel() != action_dim:
-                    raise ValueError(
-                        "Invalid action size from generator: "
-                        f"expected {action_dim}, received {action_tensor.numel()}."
+                env.step(actions)
+                for _ in range(env.num_envs):
+                    env_action_queue.task_done()
+
+                step_count += 1
+                for env_id in range(int(env.num_envs)):
+                    if episode_steps[env_id] >= 0:
+                        episode_steps[env_id] += 1
+                row: dict[str, Any] | None = None
+                if step_count % logging_interval == 0:
+                    row = _write_pose_snapshot(
+                        env,
+                        step_count=step_count,
+                        env_id=0,
+                        pose_writer=pose_writer,
+                        episode_index=episode_indices.get(0),
+                        episode_step=episode_steps.get(0),
+                        completed_attempts=int(mimic_generation.num_attempts),
+                        completed_successes=int(mimic_generation.num_success),
                     )
-                actions[env_id] = action_tensor
+                if log_success and step_count % SUCCESS_LOG_INTERVAL == 0:
+                    if row is None:
+                        row = _build_pose_snapshot(
+                            env,
+                            step_count=step_count,
+                            env_id=0,
+                            episode_index=episode_indices.get(0),
+                            episode_step=episode_steps.get(0),
+                            completed_attempts=int(mimic_generation.num_attempts),
+                            completed_successes=int(mimic_generation.num_success),
+                        )
+                    _log_success_snapshot(env, row)
 
-            env.step(actions)
-            for _ in range(env.num_envs):
-                env_action_queue.task_done()
+                if prev_num_attempts != mimic_generation.num_attempts:
+                    prev_num_attempts = mimic_generation.num_attempts
+                    generated_sucess_rate = (
+                        100 * mimic_generation.num_success / mimic_generation.num_attempts
+                        if mimic_generation.num_attempts > 0
+                        else 0.0
+                    )
+                    print("")
+                    print("*" * 50, "\033[K")
+                    print(
+                        f"{mimic_generation.num_success}/{mimic_generation.num_attempts}"
+                        f" ({generated_sucess_rate:.1f}%) successful demos generated by mimic\033[K"
+                    )
+                    print("*" * 50, "\033[K")
 
-            step_count += 1
-            if print_poses and pose_output_interval > 0 and (step_count % pose_output_interval == 0):
-                _print_pose_snapshot(env, step_count=step_count, env_id=0)
+                    generation_guarantee = env.cfg.datagen_config.generation_guarantee
+                    generation_num_trials = env.cfg.datagen_config.generation_num_trials
+                    check_val = mimic_generation.num_success if generation_guarantee else mimic_generation.num_attempts
+                    if check_val >= generation_num_trials:
+                        print(f"Reached {generation_num_trials} successes/attempts. Exiting.")
+                        break
 
-            if prev_num_attempts != mimic_generation.num_attempts:
-                prev_num_attempts = mimic_generation.num_attempts
-                generated_sucess_rate = (
-                    100 * mimic_generation.num_success / mimic_generation.num_attempts
-                    if mimic_generation.num_attempts > 0
-                    else 0.0
-                )
-                print("")
-                print("*" * 50, "\033[K")
-                print(
-                    f"{mimic_generation.num_success}/{mimic_generation.num_attempts}"
-                    f" ({generated_sucess_rate:.1f}%) successful demos generated by mimic\033[K"
-                )
-                print("*" * 50, "\033[K")
-
-                generation_guarantee = env.cfg.datagen_config.generation_guarantee
-                generation_num_trials = env.cfg.datagen_config.generation_num_trials
-                check_val = mimic_generation.num_success if generation_guarantee else mimic_generation.num_attempts
-                if check_val >= generation_num_trials:
-                    print(f"Reached {generation_num_trials} successes/attempts. Exiting.")
+                if env.sim.is_stopped():
                     break
-
-            if env.sim.is_stopped():
-                break
-
-    env.close()
+    finally:
+        pose_writer.close()
+        env.close()
 
 
 def main():
+    if int(args_cli.logging_interval) <= 0:
+        raise ValueError("--logging_interval must be > 0.")
+
     num_envs = args_cli.num_envs
 
     # Setup output paths and get env name
@@ -1155,6 +1492,12 @@ def main():
         device=args_cli.device,
         generation_num_trials=args_cli.generation_num_trials,
     )
+    if bool(args_cli.enable_cameras):
+        dataset_export_mode = env_cfg.recorders.dataset_export_mode
+        env_cfg.recorders = GenerationRecorderManagerCfg()
+        env_cfg.recorders.dataset_export_dir_path = output_dir
+        env_cfg.recorders.dataset_filename = output_file_name
+        env_cfg.recorders.dataset_export_mode = dataset_export_mode
     # Use env_name if task_name is None (env_name is guaranteed to have a value)
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, args_cli.task_type))
@@ -1210,6 +1553,10 @@ def main():
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
 
+    if hasattr(env, "garment_loader") and hasattr(env, "cfg") and hasattr(env.cfg, "garment_name"):
+        success_term = TerminationTermCfg(func=_recording_style_success_tensor, params={}, time_out=False)
+        print("Using recording-style garment success checker for generation.")
+
     requires_env_ik_solver = True
     if hasattr(env, "_is_native_mimic_ik_action_contract"):
         try:
@@ -1252,6 +1599,12 @@ def main():
             env.initialize_obs()
         except Exception as e:
             print(f"Warning: initialize_obs failed during generation reset: {e}")
+    post_reset_hold_action = _build_post_reset_hold_action(env)
+    _stabilize_after_initial_reset(
+        env,
+        hold_action=post_reset_hold_action,
+        num_steps=int(args_cli.garment_settle_steps),
+    )
 
     if bool(args_cli.strict_preflight):
         _validate_source_dataset_contract(
@@ -1300,6 +1653,8 @@ def main():
             align_object_pose_to_runtime=(explicit_object_alignment or auto_object_alignment),
             align_object_pose_mode=object_alignment_mode,
             pause_subtask=args_cli.pause_subtask,
+            post_reset_settle_steps=int(args_cli.garment_settle_steps),
+            post_reset_hold_action=post_reset_hold_action,
         )
     else:
         async_components = mimic_generation.setup_async_generation(
@@ -1308,6 +1663,8 @@ def main():
             input_file=args_cli.input_file,
             success_term=success_term,
             pause_subtask=args_cli.pause_subtask,
+            post_reset_settle_steps=int(args_cli.garment_settle_steps),
+            post_reset_hold_action=post_reset_hold_action,
         )
 
     try:
@@ -1315,23 +1672,14 @@ def main():
         mimic_generation.num_failures = 0
         mimic_generation.num_attempts = 0
         asyncio.ensure_future(asyncio.gather(*async_components["tasks"]))
-        if args_cli.print_poses:
-            env_loop_with_pose_output(
-                env,
-                async_components["reset_queue"],
-                async_components["action_queue"],
-                async_components["event_loop"],
-                print_poses=True,
-                pose_output_interval=args_cli.pose_output_interval,
-            )
-        else:
-            mimic_generation.env_loop(
-                env,
-                async_components["reset_queue"],
-                async_components["action_queue"],
-                async_components["info_pool"],
-                async_components["event_loop"],
-            )
+        env_loop_with_pose_output(
+            env,
+            async_components["reset_queue"],
+            async_components["action_queue"],
+            async_components["event_loop"],
+            logging_interval=int(args_cli.logging_interval),
+            log_success=bool(args_cli.log_success),
+        )
     except asyncio.CancelledError:
         print("Tasks were cancelled.")
 

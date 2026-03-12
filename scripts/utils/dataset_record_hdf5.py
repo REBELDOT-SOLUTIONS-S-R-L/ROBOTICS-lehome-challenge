@@ -33,6 +33,7 @@ from lehome.utils.logger import get_logger
 from .common import stabilize_garment_after_reset
 
 logger = get_logger(__name__)
+SUCCESS_LOG_INTERVAL = 50
 
 try:
     import h5py
@@ -79,6 +80,71 @@ def _to_json_compatible(value: Any) -> Any:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
         return [_to_json_compatible(v) for v in value]
     return value
+
+
+def _evaluate_success_result(env: DirectRLEnv) -> Optional[Dict[str, Any]]:
+    """Evaluate garment success without relying on the environment's internal log throttle."""
+    if (
+        hasattr(env, "object")
+        and env.object is not None
+        and hasattr(env.object, "_cloth_prim_view")
+        and hasattr(env, "garment_loader")
+        and hasattr(env, "cfg")
+        and hasattr(env.cfg, "garment_name")
+    ):
+        from lehome.utils.success_checker_chanllege import evaluate_garment_fold_success
+
+        garment_type = env.garment_loader.get_garment_type(env.cfg.garment_name)
+        return evaluate_garment_fold_success(env.object, garment_type)
+
+    if not hasattr(env, "_get_success"):
+        return None
+
+    success_value = env._get_success()
+    if torch.is_tensor(success_value):
+        success = bool(success_value.reshape(-1)[0].item()) if success_value.numel() > 0 else False
+    else:
+        success = bool(success_value)
+    return {"success": success, "garment_type": "unknown", "thresholds": [], "details": {}}
+
+
+def _log_success_result(
+    env: DirectRLEnv,
+    episode_index: int,
+    step_in_episode: Optional[int] = None,
+    context: str = "progress",
+) -> Optional[bool]:
+    """Log a deterministic success breakdown from the recorder."""
+    try:
+        result = _evaluate_success_result(env)
+    except Exception as e:
+        logger.warning(
+            f"[Recording][Episode {episode_index}] Failed to evaluate success during {context}: {e}"
+        )
+        return None
+
+    if result is None:
+        logger.warning(
+            f"[Recording][Episode {episode_index}] Success evaluation unavailable during {context}."
+        )
+        return None
+
+    prefix = f"[Recording][Episode {episode_index}]"
+    if step_in_episode is not None:
+        prefix += f"[step {step_in_episode}]"
+
+    logger.info(
+        f"{prefix} [Success Check] Garment type: {result.get('garment_type', 'unknown')}, "
+        f"Thresholds: {result.get('thresholds', [])}"
+    )
+    details = result.get("details", {})
+    for condition_info in details.values():
+        status = "✓" if condition_info.get("passed", False) else "✗"
+        logger.info(f"{prefix}   {condition_info.get('description', '')} -> {status}")
+
+    success = bool(result.get("success", False))
+    logger.info(f"{prefix} [Success Check] Final result: {'Success ✓' if success else 'Failed ✗'}")
+    return success
 
 
 class DirectHDF5Recorder:
@@ -968,6 +1034,15 @@ def run_recording_phase(
 
         flags["success"] = False
         flags["remove"] = False
+        episode_step_count = 0
+
+        if args.log_success:
+            _log_success_result(
+                env,
+                episode_index=episode_index,
+                step_in_episode=episode_step_count,
+                context="episode_start",
+            )
 
         # Loop within a single episode
         while not flags["success"]:
@@ -991,8 +1066,14 @@ def run_recording_phase(
             else:
                 env.step(actions)
 
-            if args.log_success:
-                success = env._get_success()
+            episode_step_count += 1
+            if args.log_success and episode_step_count % SUCCESS_LOG_INTERVAL == 0:
+                _log_success_result(
+                    env,
+                    episode_index=episode_index,
+                    step_in_episode=episode_step_count,
+                    context="periodic_check",
+                )
 
             observations = env._get_observations()
             if (
@@ -1071,6 +1152,8 @@ def run_recording_phase(
                 flags["remove"] = False
                 continue
 
+        _log_episode_success_snapshot(env, episode_index, episode_step_count)
+
         save_start_time = time.time()
         logger.info(f"[Recording] Saving episode {episode_index}...")
         try:
@@ -1136,6 +1219,26 @@ def run_recording_phase(
     dataset.finalize()
     logger.info(f"All {args.num_episode} episodes recording completed!")
     return object_initial_pose
+
+
+def _log_episode_success_snapshot(
+    env: DirectRLEnv,
+    episode_index: int,
+    episode_step_count: Optional[int] = None,
+) -> None:
+    """Emit one explicit success summary for the current episode state."""
+    success = _log_success_result(
+        env,
+        episode_index=episode_index,
+        step_in_episode=episode_step_count,
+        context="episode_end",
+    )
+    if success is None:
+        return
+    logger.info(
+        f"[Recording] Episode {episode_index} success snapshot: "
+        f"{'Success ✓' if success else 'Failed ✗'}"
+    )
 
 
 def run_live_control_without_record(
