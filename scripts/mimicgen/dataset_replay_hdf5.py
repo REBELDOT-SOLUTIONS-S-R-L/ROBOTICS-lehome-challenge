@@ -17,7 +17,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 from lehome.utils.record import RateLimiter
 from lehome.utils.logger import get_logger
 
-from .common import stabilize_garment_after_reset
+from ..utils.common import stabilize_garment_after_reset
 
 logger = get_logger(__name__)
 

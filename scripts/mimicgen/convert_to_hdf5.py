@@ -1,6 +1,6 @@
 """
 Convert a local LeRobot dataset folder (v3.0 parquet-based layout) to a single HDF5 file
-with the full IsaacLab recorder structure expected by annotate_demos.py.
+with the full IsaacLab recorder structure expected by `scripts/mimicgen/annotate_demos.py`.
 
 Output HDF5 structure:
     data/
@@ -45,18 +45,18 @@ Output HDF5 structure:
         demo_N.success (bool)
 
 Usage:
-    python scripts/utils/convert_to_hdf5.py \\
+    python scripts/mimicgen/convert_to_hdf5.py \\
         --lerobot_dir Datasets/record/001 \\
         --output_hdf5 Datasets/hdf5/001.hdf5
 
     # With custom scene config
-    python scripts/utils/convert_to_hdf5.py \\
+    python scripts/mimicgen/convert_to_hdf5.py \\
         --lerobot_dir Datasets/record/001 \\
         --output_hdf5 Datasets/hdf5/001.hdf5 \\
         --scene_config my_scene.json
 
     # Copy the reference structure from an existing HDF5
-    python scripts/utils/convert_to_hdf5.py \\
+    python scripts/mimicgen/convert_to_hdf5.py \\
         --lerobot_dir Datasets/record/001 \\
         --output_hdf5 Datasets/hdf5/001.hdf5 \\
         --reference_hdf5 Datasets/dataset.hdf5
@@ -837,7 +837,7 @@ def main():
         "--task",
         type=str,
         default="",
-        help="Task/env name to embed in HDF5 (for annotate_demos.py).",
+        help="Task/env name to embed in HDF5 (for scripts/mimicgen/annotate_demos.py).",
     )
     parser.add_argument(
         "--reference_hdf5",

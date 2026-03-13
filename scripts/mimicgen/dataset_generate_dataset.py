@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Main mimic data generation script with LeHome HDF5 compatibility."""
+"""Main MimicGen data generation script with LeHome HDF5 compatibility."""
 
 
 """Launch Isaac Sim Simulator first."""
@@ -584,7 +584,7 @@ def _validate_source_dataset_contract(
         raise ValueError(
             "Strict preflight failed: unexpected source action dimension. "
             f"Expected {expected_action_dim}, found {action_dim}. "
-            "Run scripts/utils/eef_action_process.py --to_ik before annotation/generation."
+            "Run scripts/mimicgen/eef_action_process.py --to_ik before annotation/generation."
         )
 
     required_mode = (required_actions_mode or "").strip()

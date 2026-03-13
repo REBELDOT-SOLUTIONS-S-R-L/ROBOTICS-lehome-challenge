@@ -34,7 +34,7 @@ from lehome.tasks.fold_cloth.checkpoint_mappings import (
     CHECKPOINT_LABELS,
 )
 
-from .common import stabilize_garment_after_reset
+from ..utils.common import stabilize_garment_after_reset
 
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50

@@ -1,6 +1,6 @@
 """Convert top-level HDF5 actions between joint and IK pose formats.
 
-This is the cloth-task counterpart of LeIsaac's mimic/eef_action_process.py.
+This is the cloth-task counterpart of LeIsaac's MimicGen eef_action_process.py.
 It rewrites only /data/demo_*/actions and updates /data attrs["actions_mode"].
 """
 

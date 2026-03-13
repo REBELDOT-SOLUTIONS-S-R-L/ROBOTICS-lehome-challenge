@@ -44,7 +44,8 @@ def main():
 
     try:
         import lehome.tasks.bedroom
-        from .utils import dataset_record, dataset_replay, dataset_replay_hdf5
+        from .utils import dataset_record, dataset_replay
+        from .mimicgen import dataset_replay_hdf5
 
         if args.command == "record":
             dataset_record.record_dataset(args, simulation_app)

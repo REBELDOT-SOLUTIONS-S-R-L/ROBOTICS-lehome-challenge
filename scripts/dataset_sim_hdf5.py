@@ -41,7 +41,8 @@ def main():
 
     try:
         import lehome.tasks.fold_cloth  # noqa: F401
-        from .utils import dataset_record_hdf5, dataset_replay, dataset_replay_hdf5
+        from .utils import dataset_replay
+        from .mimicgen import dataset_record_hdf5, dataset_replay_hdf5
 
         if args.command == "record":
             dataset_record_hdf5.record_dataset(args, simulation_app)

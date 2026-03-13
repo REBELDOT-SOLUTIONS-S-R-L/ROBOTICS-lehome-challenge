@@ -1,6 +1,6 @@
 """Offline visualization for generation pose traces.
 
-Reads the CSV emitted by scripts/utils/dataset_generate_dataset.py and plots one
+Reads the CSV emitted by scripts/mimicgen/dataset_generate_dataset.py and plots one
 episode at a time after generation, including a 3D trajectory view for EEFs and
 garment keypoints.
 """

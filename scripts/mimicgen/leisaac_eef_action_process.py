@@ -1,4 +1,4 @@
-"""Script to run eef action process for mimic recorded demos."""
+"""Script to run EEF action processing for MimicGen recorded demos."""
 
 """Launch Isaac Sim Simulator first."""
 import multiprocessing
@@ -9,9 +9,9 @@ import argparse
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="eef action process for mimic recorded demos.")
-parser.add_argument("--input_file", type=str, default="./datasets/mimic-lift-cube-example.hdf5", help="File path to load mimic recorded demos.")
-parser.add_argument("--output_file", type=str, default="./datasets/processed_mimic-lift-cube-example.hdf5", help="File path to save processed mimic recorded demos.")
+parser = argparse.ArgumentParser(description="eef action process for MimicGen recorded demos.")
+parser.add_argument("--input_file", type=str, default="./datasets/mimic-lift-cube-example.hdf5", help="File path to load MimicGen recorded demos.")
+parser.add_argument("--output_file", type=str, default="./datasets/processed_mimic-lift-cube-example.hdf5", help="File path to save processed MimicGen recorded demos.")
 parser.add_argument("--to_ik", action="store_true", help="Whether to convert the action to ik action.")
 parser.add_argument("--to_joint", action="store_true", help="Whether to convert the action to joint action.")
 parser.add_argument("--gr00t_format", action="store_true", help="When converting to joint action, convert to GR00T format (degrees + sign flips for shoulder_lift and wrist_roll).")
@@ -273,7 +273,7 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
 
 
 def main():
-    """Process the eef action of the mimic annotated recorded demos."""
+    """Process the EEF action stream of MimicGen annotated recorded demos."""
     # check arguments
     if args_cli.to_ik and args_cli.to_joint:
         raise ValueError("Cannot convert to both ik and joint action at the same time.")
