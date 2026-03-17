@@ -231,7 +231,10 @@ from lehome.utils.env_utils import (
 from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
 from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
 from lehome.tasks.fold_cloth.checkpoint_mappings import (
+    ClothObjectPoseUnavailableError,
+    ClothObjectPoseValidationError,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+    validate_semantic_object_pose_dict,
 )
 
 is_paused = False
@@ -247,6 +250,11 @@ MARK_MIN_ACTION_GAP = 3
 active_mark_eef_name = None
 active_mark_signal_names = []
 source_actions_frame_hint = None
+OBJECT_POSE_CAPTURE_MAX_ATTEMPTS = 3
+
+
+class DatagenObjectPoseCaptureError(RuntimeError):
+    """Raised when annotation cannot capture valid garment object poses for a replay attempt."""
 
 
 @dataclass
@@ -385,6 +393,38 @@ def _get_cloth_keypoint_object_poses_world(env: ManagerBasedRLMimicEnv) -> dict[
         pos = torch.tensor(point, dtype=torch.float32, device=env.device).unsqueeze(0).expand(num_envs, -1)
         object_poses[name] = _pos_to_4x4(pos)
     return object_poses
+
+
+def _resolve_valid_annotation_object_pose(env: ManagerBasedRLMimicEnv) -> dict[str, torch.Tensor]:
+    """Resolve garment object poses for annotation, with mesh fallback and strict validation."""
+    errors: list[str] = []
+
+    try:
+        object_pose = env.get_object_poses()
+        validate_semantic_object_pose_dict(
+            object_pose,
+            context="annotation env.get_object_poses()",
+        )
+        return object_pose
+    except (ClothObjectPoseUnavailableError, ClothObjectPoseValidationError) as exc:
+        errors.append(f"env.get_object_poses failed: {exc}")
+    except Exception as exc:
+        errors.append(f"env.get_object_poses raised unexpected error: {exc}")
+
+    object_pose = _get_cloth_keypoint_object_poses_world(env)
+    if object_pose is not None:
+        try:
+            validate_semantic_object_pose_dict(
+                object_pose,
+                context="annotation cloth mesh fallback",
+            )
+            return object_pose
+        except ClothObjectPoseValidationError as exc:
+            errors.append(f"cloth mesh fallback returned invalid poses: {exc}")
+    else:
+        errors.append("cloth mesh fallback returned no object poses")
+
+    raise DatagenObjectPoseCaptureError("; ".join(errors))
 
 
 def _get_robot_eef_pose_world(env: ManagerBasedRLMimicEnv, eef_name: str) -> torch.Tensor | None:
@@ -1341,6 +1381,35 @@ def mark_subtask_cb():
         print(f"Marked a subtask signal at action index: {current_action_index}")
 
 
+def _reset_annotation_attempt_state() -> None:
+    """Clear transient replay/marking globals before retrying an annotation attempt."""
+    global is_paused, current_action_index, marked_subtask_action_indices, skip_episode
+    global expected_subtask_mark_count, last_marked_action_index, last_mark_wall_time
+    global active_mark_eef_name, active_mark_signal_names
+
+    is_paused = False
+    current_action_index = 0
+    marked_subtask_action_indices = []
+    skip_episode = False
+    expected_subtask_mark_count = None
+    last_marked_action_index = -10**9
+    last_mark_wall_time = 0.0
+    active_mark_eef_name = None
+    active_mark_signal_names = []
+
+
+def _recover_from_object_pose_capture_failure(env: ManagerBasedRLMimicEnv) -> None:
+    """Clear replay state and reset the environment before retrying an annotation attempt."""
+    _reset_annotation_attempt_state()
+    with contextlib.suppress(Exception):
+        env.recorder_manager.reset()
+    with contextlib.suppress(Exception):
+        env.reset()
+        if hasattr(env, "initialize_obs"):
+            env.initialize_obs()
+            stabilize_garment_after_reset_for_annotation(env)
+
+
 class PreStepDatagenInfoRecorder(RecorderTerm):
     """Recorder term that records the datagen info data in each step."""
 
@@ -1354,13 +1423,7 @@ class PreStepDatagenInfoRecorder(RecorderTerm):
                 eef_pose = _get_robot_eef_pose_world(self._env, eef_name)
             eef_pose_dict[eef_name] = eef_pose
 
-        try:
-            # Prefer env API output so annotation and generation consume identical object frames.
-            object_pose = self._env.get_object_poses()
-        except Exception:
-            object_pose = None
-        if not isinstance(object_pose, dict) or len(object_pose) == 0:
-            object_pose = _get_cloth_keypoint_object_poses_world(self._env)
+        object_pose = _resolve_valid_annotation_object_pose(self._env)
 
         sanitize_poses = bool(getattr(args_cli, "sanitize_datagen_poses", False))
         if sanitize_poses:
@@ -1626,14 +1689,35 @@ def main():
                 )
 
                 is_episode_annotated_successfully = False
-                if args_cli.auto:
-                    is_episode_annotated_successfully = annotate_episode_in_auto_mode(
-                        env, episode, replay_plan, replay_runtime, success_term
-                    )
-                else:
-                    is_episode_annotated_successfully = annotate_episode_in_manual_mode(
-                        env, episode, replay_plan, replay_runtime, success_term, subtask_term_signal_names
-                    )
+                object_pose_failure = None
+                for attempt_index in range(OBJECT_POSE_CAPTURE_MAX_ATTEMPTS):
+                    _reset_annotation_attempt_state()
+                    try:
+                        if args_cli.auto:
+                            is_episode_annotated_successfully = annotate_episode_in_auto_mode(
+                                env, episode, replay_plan, replay_runtime, success_term
+                            )
+                        else:
+                            is_episode_annotated_successfully = annotate_episode_in_manual_mode(
+                                env, episode, replay_plan, replay_runtime, success_term, subtask_term_signal_names
+                            )
+                        object_pose_failure = None
+                        break
+                    except DatagenObjectPoseCaptureError as exc:
+                        object_pose_failure = exc
+                        print(
+                            "\tAnnotation object-pose capture failed on "
+                            f"attempt {attempt_index + 1}/{OBJECT_POSE_CAPTURE_MAX_ATTEMPTS}: {exc}"
+                        )
+                        _recover_from_object_pose_capture_failure(env)
+                        if attempt_index + 1 < OBJECT_POSE_CAPTURE_MAX_ATTEMPTS:
+                            print("\tReset complete. Replaying the episode again from the start.")
+
+                if object_pose_failure is not None:
+                    raise RuntimeError(
+                        "Aborting annotation after repeated invalid garment object-pose capture for "
+                        f"{episode_name}: {object_pose_failure}"
+                    ) from object_pose_failure
 
                 if is_episode_annotated_successfully and not skip_episode:
                     # set success to the recorded episode data and export to file

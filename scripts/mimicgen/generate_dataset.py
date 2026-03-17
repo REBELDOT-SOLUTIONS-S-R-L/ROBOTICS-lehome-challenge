@@ -12,6 +12,8 @@ import argparse
 import csv
 import contextlib
 import json
+import sys
+import traceback
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
@@ -248,8 +250,11 @@ from lehome.utils.env_utils import get_task_type
 from lehome.utils.logger import get_logger
 from lehome.tasks.fold_cloth.checkpoint_mappings import (
     ARM_KEYPOINT_GROUPS,
+    ClothObjectPoseUnavailableError,
+    ClothObjectPoseValidationError,
     CSV_TRACE_KEYPOINT_NAMES,
     SUCCESS_DISTANCE_SPECS,
+    validate_semantic_object_pose_dict,
 )
 
 try:
@@ -498,7 +503,7 @@ def _get_first_demo_garment_name(input_file: str) -> str | None:
 
 
 def _get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
-    """Read first demo datagen object_pose keys from source HDF5, if available."""
+    """Read union of source datagen object_pose keys across available demos."""
     if h5py is None:
         return None
     try:
@@ -510,6 +515,7 @@ def _get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
                 [name for name in data_group.keys() if name.startswith("demo_")],
                 key=_demo_sort_key,
             )
+            all_keys: set[str] = set()
             for demo_name in demo_names:
                 demo_group = data_group[demo_name]
                 obs_group = demo_group.get("obs")
@@ -521,7 +527,9 @@ def _get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
                 object_pose_group = datagen_group.get("object_pose")
                 if object_pose_group is None:
                     continue
-                return set(object_pose_group.keys())
+                all_keys.update(object_pose_group.keys())
+            if all_keys:
+                return all_keys
     except Exception:
         return None
     return None
@@ -682,6 +690,13 @@ def _get_runtime_object_center(env: Any) -> torch.Tensor | None:
         object_poses = env.get_object_poses(env_ids=[0])
     except Exception:
         return None
+    try:
+        validate_semantic_object_pose_dict(
+            object_poses,
+            context="generation runtime object poses",
+        )
+    except ClothObjectPoseValidationError:
+        return None
     return _pose_dict_first_center_cpu(object_poses)
 
 
@@ -792,6 +807,10 @@ def _validate_subtask_object_refs(env: Any, input_file: str) -> None:
     try:
         runtime_object_poses = env.get_object_poses(env_ids=[0])
         if isinstance(runtime_object_poses, dict):
+            validate_semantic_object_pose_dict(
+                runtime_object_poses,
+                context="generation runtime object_ref validation",
+            )
             runtime_keys = set(runtime_object_poses.keys())
     except Exception as e:
         raise ValueError(f"Failed to query runtime object poses for mimic validation: {e}") from e
@@ -940,12 +959,20 @@ class RobustDataGenInfoPool(DataGenInfoPool):
                 "Expected one of: object_only, all_poses."
             )
         self._runtime_object_center = self._get_runtime_object_center()
+        self.invalid_episode_names: list[str] = []
 
     def _get_runtime_object_center(self) -> torch.Tensor | None:
         """Get current env object center from runtime world-frame object poses."""
         try:
             object_poses = self.env.get_object_poses(env_ids=[0])
         except Exception:
+            return None
+        try:
+            validate_semantic_object_pose_dict(
+                object_poses,
+                context="generation runtime object poses",
+            )
+        except ClothObjectPoseValidationError:
             return None
         return self._pose_dict_first_center(object_poses)
 
@@ -1059,6 +1086,16 @@ class RobustDataGenInfoPool(DataGenInfoPool):
         except Exception:
             return
 
+    def _validate_episode_object_pose(self, episode: EpisodeData, episode_name: str) -> None:
+        """Validate recorded semantic garment object poses before loading an episode into Mimic."""
+        obs = episode.data.get("obs", {})
+        datagen = obs.get("datagen_info", {})
+        object_pose = datagen.get("object_pose")
+        validate_semantic_object_pose_dict(
+            object_pose,
+            context=f"source episode {episode_name} datagen_info.object_pose",
+        )
+
     def load_from_dataset_file(self, file_path, select_demo_keys: str | None = None):
         dataset_file_handler = HDF5DatasetFileHandler()
         dataset_file_handler.open(file_path)
@@ -1067,12 +1104,61 @@ class RobustDataGenInfoPool(DataGenInfoPool):
             for episode_name in episode_names:
                 if select_demo_keys is not None and episode_name not in select_demo_keys:
                     continue
-                episode = _load_episode_compat(dataset_file_handler, file_path, episode_name, self.device)
-                self._maybe_override_target_eef_pose(episode)
-                self._maybe_align_object_pose_to_runtime(episode, episode_name)
-                self._add_episode(episode)
+                try:
+                    episode = _load_episode_compat(dataset_file_handler, file_path, episode_name, self.device)
+                    self._maybe_override_target_eef_pose(episode)
+                    self._maybe_align_object_pose_to_runtime(episode, episode_name)
+                    self._validate_episode_object_pose(episode, episode_name)
+                    self._add_episode(episode)
+                except ClothObjectPoseValidationError as exc:
+                    self.invalid_episode_names.append(episode_name)
+                    print(f"Warning: skipping source episode {episode_name} due to invalid object_pose: {exc}")
         finally:
             dataset_file_handler.close()
+        if self.num_datagen_infos == 0:
+            raise ValueError(
+                "No valid source episodes remain after cloth object-pose validation."
+            )
+
+
+async def run_data_generator_with_object_pose_failures(
+    env: ManagerBasedRLMimicEnv,
+    env_id: int,
+    env_reset_queue: asyncio.Queue,
+    env_action_queue: asyncio.Queue,
+    data_generator: DataGenerator,
+    success_term: TerminationTermCfg,
+    pause_subtask: bool = False,
+    motion_planner: Any = None,
+):
+    """Run Mimic generation while treating cloth object-pose failures as failed trials."""
+    while True:
+        try:
+            results = await data_generator.generate(
+                env_id=env_id,
+                success_term=success_term,
+                env_reset_queue=env_reset_queue,
+                env_action_queue=env_action_queue,
+                pause_subtask=pause_subtask,
+                motion_planner=motion_planner,
+            )
+        except (ClothObjectPoseUnavailableError, ClothObjectPoseValidationError) as exc:
+            mimic_generation.num_failures += 1
+            mimic_generation.num_attempts += 1
+            print(
+                f"Warning: generation trial for env {env_id} failed due to invalid cloth object poses: {exc}"
+            )
+            continue
+        except Exception as exc:
+            sys.stderr.write(traceback.format_exc())
+            sys.stderr.flush()
+            raise exc
+
+        if bool(results["success"]):
+            mimic_generation.num_success += 1
+        else:
+            mimic_generation.num_failures += 1
+        mimic_generation.num_attempts += 1
 
 
 def setup_async_generation_compat(
@@ -1106,6 +1192,11 @@ def setup_async_generation_compat(
     )
     shared_datagen_info_pool.load_from_dataset_file(input_file)
     print(f"Loaded {shared_datagen_info_pool.num_datagen_infos} to datagen info pool")
+    if shared_datagen_info_pool.invalid_episode_names:
+        print(
+            "Skipped invalid source episodes due to cloth object-pose validation: "
+            f"{shared_datagen_info_pool.invalid_episode_names}"
+        )
     if prefer_eef_pose_as_target:
         print("Using measured datagen_info.eef_pose as source target trajectory (override enabled).")
     if abs(source_target_z_offset) > 1e-9:
@@ -1123,7 +1214,7 @@ def setup_async_generation_compat(
     for i in range(num_envs):
         env_motion_planner = motion_planners[i] if motion_planners else None
         task = asyncio_event_loop.create_task(
-            mimic_generation.run_data_generator(
+            run_data_generator_with_object_pose_failures(
                 env,
                 i,
                 env_reset_queue,
@@ -1626,8 +1717,6 @@ def main():
                 "Auto-enabling object-only source object alignment."
             )
 
-    # Keep default generation path identical to LeIsaac unless explicit source-pose
-    # overrides are requested or mixed-frame source data requires compatibility correction.
     use_pose_overrides = (
         bool(args_cli.use_eef_pose_as_target)
         or abs(float(args_cli.source_target_z_offset)) > 1e-9
@@ -1636,29 +1725,21 @@ def main():
     )
     if use_pose_overrides:
         print("Using compatibility datagen pipeline with source pose overrides.")
-        async_components = setup_async_generation_compat(
-            env=env,
-            num_envs=args_cli.num_envs,
-            input_file=args_cli.input_file,
-            success_term=success_term,
-            prefer_eef_pose_as_target=bool(args_cli.use_eef_pose_as_target),
-            source_target_z_offset=args_cli.source_target_z_offset,
-            align_object_pose_to_runtime=(explicit_object_alignment or auto_object_alignment),
-            align_object_pose_mode=object_alignment_mode,
-            pause_subtask=args_cli.pause_subtask,
-            post_reset_settle_steps=int(args_cli.garment_settle_steps),
-            post_reset_hold_action=post_reset_hold_action,
-        )
     else:
-        async_components = mimic_generation.setup_async_generation(
-            env=env,
-            num_envs=args_cli.num_envs,
-            input_file=args_cli.input_file,
-            success_term=success_term,
-            pause_subtask=args_cli.pause_subtask,
-            post_reset_settle_steps=int(args_cli.garment_settle_steps),
-            post_reset_hold_action=post_reset_hold_action,
-        )
+        print("Using compatibility datagen pipeline with strict cloth object-pose validation.")
+    async_components = setup_async_generation_compat(
+        env=env,
+        num_envs=args_cli.num_envs,
+        input_file=args_cli.input_file,
+        success_term=success_term,
+        prefer_eef_pose_as_target=bool(args_cli.use_eef_pose_as_target),
+        source_target_z_offset=args_cli.source_target_z_offset,
+        align_object_pose_to_runtime=(explicit_object_alignment or auto_object_alignment),
+        align_object_pose_mode=object_alignment_mode,
+        pause_subtask=args_cli.pause_subtask,
+        post_reset_settle_steps=int(args_cli.garment_settle_steps),
+        post_reset_hold_action=post_reset_hold_action,
+    )
 
     try:
         mimic_generation.num_success = 0

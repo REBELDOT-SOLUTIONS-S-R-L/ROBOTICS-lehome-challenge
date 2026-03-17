@@ -24,7 +24,9 @@ import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
 from ..checkpoint_mappings import (
+    ClothObjectPoseUnavailableError,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+    validate_semantic_object_pose_dict,
 )
 
 if TYPE_CHECKING:
@@ -54,23 +56,6 @@ def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
     T = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
     T[..., :3, 3] = pos
     return T
-
-
-def _identity_object_poses(device: torch.device, num_envs: int) -> dict[str, torch.Tensor]:
-    identity = torch.eye(4, device=device).unsqueeze(0).expand(num_envs, -1, -1)
-    return {
-        "garment_left_sleeve": identity.clone(),
-        "garment_right_sleeve": identity.clone(),
-        "garment_left_bottom": identity.clone(),
-        "garment_right_bottom": identity.clone(),
-        "garment_left_top": identity.clone(),
-        "garment_right_top": identity.clone(),
-        "garment_top_center": identity.clone(),
-        "garment_bottom_center": identity.clone(),
-        "garment_kp_left": identity.clone(),
-        "garment_kp_right": identity.clone(),
-        "garment_center": identity.clone(),
-    }
 
 
 def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
@@ -182,19 +167,24 @@ class GarmentDatagenRecorder(RecorderTerm):
         Returns:
             Dict mapping object names to (num_envs, 4, 4) tensors.
         """
+        def _raise_unavailable(reason: str) -> None:
+            raise ClothObjectPoseUnavailableError(
+                f"GarmentDatagenRecorder could not capture cloth object poses: {reason}"
+            )
+
         garment_obj = getattr(env, "object", None)
         if garment_obj is None or not hasattr(garment_obj, "check_points"):
-            return _identity_object_poses(device, num_envs)
+            _raise_unavailable("garment object is missing or has no check_points.")
 
         check_points = garment_obj.check_points
         if not check_points or len(check_points) < 6:
-            return _identity_object_poses(device, num_envs)
+            _raise_unavailable("garment check_points are missing or incomplete.")
 
         # Get particle positions
         try:
             mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
             mesh_points = mesh_points_world
-        except Exception:
+        except Exception as primary_exc:
             try:
                 mesh_points = (
                     garment_obj._cloth_prim_view.get_world_positions()
@@ -203,8 +193,11 @@ class GarmentDatagenRecorder(RecorderTerm):
                     .cpu()
                     .numpy()
                 )
-            except Exception:
-                return _identity_object_poses(device, num_envs)
+            except Exception as fallback_exc:
+                _raise_unavailable(
+                    "unable to read garment mesh points from either GarmentObject or cloth_prim_view "
+                    f"({primary_exc}; {fallback_exc})."
+                )
 
         # Extract keypoint positions (in meters)
         kp_positions = mesh_points[check_points]  # (6, 3)
@@ -213,6 +206,10 @@ class GarmentDatagenRecorder(RecorderTerm):
         for name, point in semantic_points.items():
             pos = torch.tensor(point, dtype=torch.float32, device=device).unsqueeze(0).expand(num_envs, -1)
             object_poses[name] = _pos_to_4x4(pos)
+        validate_semantic_object_pose_dict(
+            object_poses,
+            context="GarmentDatagenRecorder._compute_keypoint_object_poses",
+        )
         return object_poses
 
     def _compute_subtask_signals(

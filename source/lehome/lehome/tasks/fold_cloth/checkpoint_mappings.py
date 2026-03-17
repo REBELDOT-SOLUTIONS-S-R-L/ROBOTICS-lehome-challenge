@@ -49,6 +49,22 @@ GARMENT_CHECKPOINT_CONFIGS = {
     }
     for version, garments in _MAPPINGS.get("garments", {}).items()
 }
+REQUIRED_MIMIC_OBJECT_REFS = (
+    "garment_left_sleeve",
+    "garment_right_sleeve",
+    "garment_left_bottom",
+    "garment_right_bottom",
+    "garment_left_top",
+    "garment_right_top",
+)
+
+
+class ClothObjectPoseUnavailableError(RuntimeError):
+    """Raised when live garment object poses cannot be queried from the environment."""
+
+
+class ClothObjectPoseValidationError(ValueError):
+    """Raised when garment object poses exist structurally but are semantically invalid."""
 
 
 def semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
@@ -69,6 +85,77 @@ def semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.
             axis=0,
         )
     return semantic_points
+
+
+def _pose_value_to_numpy(pose_value: Any) -> np.ndarray:
+    """Convert tensor-like pose values into numpy arrays without changing structure."""
+    if hasattr(pose_value, "detach"):
+        pose_value = pose_value.detach()
+    if hasattr(pose_value, "cpu"):
+        pose_value = pose_value.cpu()
+    return np.asarray(pose_value, dtype=np.float32)
+
+
+def validate_semantic_object_pose_dict(
+    pose_dict: Any,
+    *,
+    context: str = "object_pose",
+    required_refs: tuple[str, ...] = REQUIRED_MIMIC_OBJECT_REFS,
+    identity_translation_tol_m: float = 1e-4,
+    collapsed_translation_tol_m: float = 5e-3,
+) -> None:
+    """Validate that semantic garment object poses are present and not degenerate."""
+    if not isinstance(pose_dict, dict) or len(pose_dict) == 0:
+        raise ClothObjectPoseValidationError(f"{context}: expected a non-empty pose dict.")
+
+    missing_refs = [name for name in required_refs if name not in pose_dict]
+    if missing_refs:
+        raise ClothObjectPoseValidationError(
+            f"{context}: missing required garment refs: {missing_refs}."
+        )
+
+    translation_series_by_ref: dict[str, np.ndarray] = {}
+    for ref_name in required_refs:
+        try:
+            pose_array = _pose_value_to_numpy(pose_dict[ref_name])
+        except Exception as exc:
+            raise ClothObjectPoseValidationError(
+                f"{context}: failed to convert pose for {ref_name!r}: {exc}"
+            ) from exc
+
+        if pose_array.ndim == 2 and pose_array.shape == (4, 4):
+            pose_array = pose_array[np.newaxis, ...]
+        if pose_array.ndim != 3 or pose_array.shape[-2:] != (4, 4):
+            raise ClothObjectPoseValidationError(
+                f"{context}: invalid pose shape for {ref_name!r}: {tuple(pose_array.shape)}."
+            )
+        if pose_array.shape[0] == 0:
+            raise ClothObjectPoseValidationError(f"{context}: empty pose horizon for {ref_name!r}.")
+        if not np.all(np.isfinite(pose_array)):
+            raise ClothObjectPoseValidationError(
+                f"{context}: non-finite values detected in pose for {ref_name!r}."
+            )
+        translation_series_by_ref[ref_name] = pose_array[:, :3, 3]
+
+    try:
+        stacked_series = np.stack([translation_series_by_ref[name] for name in required_refs], axis=0)
+    except ValueError as exc:
+        raise ClothObjectPoseValidationError(
+            f"{context}: required garment pose horizons are inconsistent across refs."
+        ) from exc
+    if np.all(np.abs(stacked_series) <= float(identity_translation_tol_m)):
+        raise ClothObjectPoseValidationError(
+            f"{context}: all required garment pose translations are near the origin/identity."
+        )
+
+    first_step_translations = stacked_series[:, 0, :]
+    per_axis_spread = np.ptp(first_step_translations, axis=0)
+    max_spread = float(np.max(per_axis_spread))
+    if max_spread <= float(collapsed_translation_tol_m):
+        raise ClothObjectPoseValidationError(
+            f"{context}: required garment keypoints collapse to the same location "
+            f"(max spread {max_spread:.6f} m)."
+        )
 
 
 def get_garment_checkpoint_config(garment_name: str, version: str = "Release") -> dict[str, Any]:

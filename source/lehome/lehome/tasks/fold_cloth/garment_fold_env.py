@@ -37,7 +37,9 @@ from lehome.utils import RobotKinematics, compute_joints_from_ee_pose, mat_to_qu
 from lehome.utils.logger import get_logger
 
 from .checkpoint_mappings import (
+    ClothObjectPoseUnavailableError,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+    validate_semantic_object_pose_dict,
 )
 from .fold_cloth_bi_arm_env_cfg import GarmentFoldEnvCfg
 
@@ -976,40 +978,29 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
             return map_semantic_keypoints_from_positions(kp_positions)
 
-        def _identity_poses():
-            identity = torch.eye(4, device=self.device).unsqueeze(0).expand(num_envs, -1, -1)
-            return {
-                "garment_left_sleeve": identity.clone(),
-                "garment_right_sleeve": identity.clone(),
-                "garment_left_bottom": identity.clone(),
-                "garment_right_bottom": identity.clone(),
-                "garment_left_top": identity.clone(),
-                "garment_right_top": identity.clone(),
-                "garment_top_center": identity.clone(),
-                "garment_bottom_center": identity.clone(),
-                "garment_kp_left": identity.clone(),
-                "garment_kp_right": identity.clone(),
-                "garment_center": identity.clone(),
-            }
-
         def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
             batch_shape = pos.shape[:-1]
             T = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
             T[..., :3, 3] = pos
             return T
 
+        def _raise_unavailable(reason: str) -> None:
+            raise ClothObjectPoseUnavailableError(
+                f"Failed to query garment object poses for {type(self).__name__}: {reason}"
+            )
+
         garment_obj = getattr(self, "object", None)
         if garment_obj is None or not hasattr(garment_obj, "check_points"):
-            return _identity_poses()
+            _raise_unavailable("garment object is missing or has no check_points.")
 
         check_points = garment_obj.check_points
         if not check_points or len(check_points) < 6:
-            return _identity_poses()
+            _raise_unavailable("garment check_points are missing or incomplete.")
 
         try:
             mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
             mesh_points = mesh_points_world
-        except Exception:
+        except Exception as primary_exc:
             try:
                 mesh_points = (
                     garment_obj._cloth_prim_view.get_world_positions()
@@ -1018,8 +1009,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                     .cpu()
                     .numpy()
                 )
-            except Exception:
-                return _identity_poses()
+            except Exception as fallback_exc:
+                _raise_unavailable(
+                    "unable to read garment mesh points from either GarmentObject or cloth_prim_view "
+                    f"({primary_exc}; {fallback_exc})."
+                )
 
         kp_positions = mesh_points[check_points]  # (6, 3)
         semantic_points = _semantic_keypoints_from_positions(kp_positions)
@@ -1032,6 +1026,10 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             )
             object_poses[name] = _pos_to_4x4(pos)
 
+        validate_semantic_object_pose_dict(
+            object_poses,
+            context=f"{type(self).__name__}.get_object_poses",
+        )
         return object_poses
 
     def get_subtask_start_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
