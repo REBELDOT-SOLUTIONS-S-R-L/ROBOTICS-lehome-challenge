@@ -10,10 +10,13 @@ import gymnasium as gym
 import numpy as np
 import torch
 
+import isaaclab.sim as sim_utils
 from isaaclab.envs import DirectRLEnv
+from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab_tasks.utils import parse_env_cfg
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
+from lehome.tasks.fold_cloth.checkpoint_mappings import semantic_keypoints_from_positions
 from lehome.utils.record import RateLimiter
 from lehome.utils.logger import get_logger
 
@@ -103,6 +106,129 @@ def _demo_sort_key(name: str) -> Tuple[int, str]:
         if suffix.isdigit():
             return int(suffix), name
     return 10**9, name
+
+
+class GarmentKeypointDebugMarkers:
+    """Viewport-only garment keypoint marker overlay for replay debugging."""
+
+    _SEMANTIC_KEYPOINT_NAMES = (
+        "garment_left_sleeve",
+        "garment_right_sleeve",
+        "garment_left_bottom",
+        "garment_right_bottom",
+        "garment_left_top",
+        "garment_right_top",
+    )
+    _MARKER_COLORS = (
+        (0.0, 1.0, 1.0),
+        (1.0, 0.5, 0.0),
+        (0.0, 0.0, 1.0),
+        (1.0, 0.0, 0.0),
+        (0.0, 1.0, 0.0),
+        (1.0, 1.0, 0.0),
+    )
+    _MARKER_INDICES = np.arange(len(_SEMANTIC_KEYPOINT_NAMES), dtype=np.int32)
+
+    def __init__(self):
+        markers = {}
+        for name, color in zip(self._SEMANTIC_KEYPOINT_NAMES, self._MARKER_COLORS):
+            markers[name] = sim_utils.SphereCfg(
+                radius=0.015,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
+            )
+
+        cfg = VisualizationMarkersCfg(
+            prim_path="/World/Debug/GarmentKeypoints",
+            markers=markers,
+        )
+        self._markers = VisualizationMarkers(cfg)
+        self._markers.set_visibility(False)
+        self._disabled = False
+        self._warned_missing_keypoints = False
+        self._warned_update_failure = False
+
+    @property
+    def disabled(self) -> bool:
+        return self._disabled
+
+    def update_from_env(self, env: DirectRLEnv) -> None:
+        """Update marker positions from the current cloth state."""
+        if self._disabled:
+            return
+
+        try:
+            translations = self._extract_semantic_keypoint_positions(env)
+        except Exception as exc:
+            if not self._warned_update_failure:
+                logger.warning(
+                    f"Disabling debugging markers after update failure: {exc}",
+                    exc_info=True,
+                )
+                self._warned_update_failure = True
+            self.disable()
+            return
+
+        if translations is None:
+            if not self._warned_missing_keypoints:
+                logger.warning(
+                    "Garment semantic keypoints are unavailable in the current replay env. "
+                    "Hiding debugging markers."
+                )
+                self._warned_missing_keypoints = True
+            self._markers.set_visibility(False)
+            return
+
+        self._markers.set_visibility(True)
+        self._markers.visualize(
+            translations=translations,
+            marker_indices=self._MARKER_INDICES,
+        )
+
+    def disable(self) -> None:
+        """Permanently disable the marker overlay for the current run."""
+        if self._disabled:
+            return
+        self._disabled = True
+        try:
+            self._markers.set_visibility(False)
+        except Exception:
+            pass
+
+    def _extract_semantic_keypoint_positions(self, env: DirectRLEnv) -> Optional[np.ndarray]:
+        garment_obj = getattr(env, "object", None)
+        if garment_obj is None or not hasattr(garment_obj, "check_points"):
+            return None
+
+        check_points = getattr(garment_obj, "check_points", None)
+        if check_points is None or len(check_points) < len(self._SEMANTIC_KEYPOINT_NAMES):
+            return None
+
+        mesh_points = None
+        try:
+            mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
+            mesh_points = np.asarray(mesh_points_world, dtype=np.float32)
+        except Exception:
+            cloth_prim_view = getattr(garment_obj, "_cloth_prim_view", None)
+            if cloth_prim_view is None:
+                return None
+            try:
+                mesh_points = (
+                    cloth_prim_view.get_world_positions()
+                    .squeeze(0)
+                    .detach()
+                    .cpu()
+                    .numpy()
+                    .astype(np.float32, copy=False)
+                )
+            except Exception:
+                return None
+
+        kp_positions = mesh_points[list(check_points)]
+        semantic_points = semantic_keypoints_from_positions(kp_positions)
+        return np.stack(
+            [np.asarray(semantic_points[name], dtype=np.float32) for name in self._SEMANTIC_KEYPOINT_NAMES],
+            axis=0,
+        )
 
 
 class HDF5ReplaySource:
@@ -401,6 +527,17 @@ def validate_args(args: argparse.Namespace) -> None:
                 f"end_episode ({args.end_episode}) must be > start_episode ({args.start_episode})"
             )
 
+    if getattr(args, "debugging_markers", False) and args.output_root is not None:
+        raise ValueError(
+            "--debugging_markers is viewport-only and cannot be used together with --output_root."
+        )
+
+    if getattr(args, "debugging_markers", False) and getattr(args, "headless", False):
+        logger.warning(
+            "--debugging_markers was enabled in headless mode. Replay will continue, "
+            "but the markers will not be visible."
+        )
+
 
 def _try_read_garment_name_from_json(json_path: Path) -> Optional[str]:
     """Read garment name (top-level key) from garment_info.json."""
@@ -676,18 +813,25 @@ def replay_episode(
     ik_stats: Optional[Dict[str, Any]] = None,
     device: str = "cpu",
     task_description: str = "fold the garment on the table",
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None,
 ) -> bool:
     """Replay a single episode from recorded data."""
     try:
         env.reset()
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
 
         if initial_pose is not None:
             env.set_all_pose(initial_pose)
             logger.debug(f"Set initial pose from recorded data: {initial_pose}")
+            if debug_markers is not None:
+                debug_markers.update_from_env(env)
         else:
             logger.warning("No initial pose found in recorded data, using default pose")
 
         stabilize_garment_after_reset(env, args)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
 
         success_achieved = False
 
@@ -711,6 +855,8 @@ def replay_episode(
                 action = episode_data[idx]["action"].to(device).unsqueeze(0)
 
             env.step(action)
+            if debug_markers is not None:
+                debug_markers.update_from_env(env)
 
             if replay_dataset is not None:
                 observations = env._get_observations()
@@ -773,6 +919,7 @@ def replay(args: argparse.Namespace) -> None:
     ik_solver: Optional[Any] = None
     is_bimanual = False
     ik_stats: Dict[str, Any] = {"total": 0, "success": 0, "fallback": 0, "errors": []}
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None
 
     with HDF5ReplaySource(args.dataset_root) as dataset:
         if args.use_ee_pose and not dataset.has_ee_pose():
@@ -813,9 +960,14 @@ def replay(args: argparse.Namespace) -> None:
         logger.info(f"Creating environment: {args.task}")
         env_cfg = parse_env_cfg(args.task, device=device)
 
-        garment_name = None
+        garment_name = getattr(args, "garment_name", None)
+        if isinstance(garment_name, str):
+            garment_name = garment_name.strip() or None
+        if garment_name is not None:
+            logger.info(f"Using garment name from CLI: {garment_name}")
+
         first_episode_meta = dataset.get_episode_meta(0)
-        if first_episode_meta:
+        if garment_name is None and first_episode_meta:
             garment_name = _extract_garment_name_from_episode_meta(first_episode_meta)
             if garment_name is not None:
                 logger.info("Using garment name from /data/demo_0/meta or initial_state/garment")
@@ -825,13 +977,21 @@ def replay(args: argparse.Namespace) -> None:
         if garment_name is None and garment_info_path is not None:
             garment_name = _try_read_garment_name_from_json(garment_info_path)
 
+        default_garment_name = getattr(env_cfg, "garment_name", None)
+        if isinstance(default_garment_name, str):
+            default_garment_name = default_garment_name.strip() or None
+        if garment_name is None:
+            garment_name = default_garment_name
+
         if garment_name is not None:
             env_cfg.garment_name = garment_name
             logger.info(f"Using garment name: {garment_name}")
         else:
-            logger.warning(
-                "Could not determine garment name from HDF5/env_args. "
-                "Using task default garment_name."
+            raise ValueError(
+                "Could not determine garment name for replay. "
+                "This HDF5 file does not include garment metadata in /data/demo_*/meta, "
+                "initial_state/garment, data/env_args, or garment_info.json. "
+                "Pass --garment_name (for example, Top_Long_Unseen_0)."
             )
 
         env_cfg.garment_version = args.garment_version
@@ -844,6 +1004,17 @@ def replay(args: argparse.Namespace) -> None:
             logger.info("Initializing observations...")
             env.initialize_obs()
             logger.info("Observations initialized successfully")
+
+            if getattr(args, "debugging_markers", False):
+                try:
+                    debug_markers = GarmentKeypointDebugMarkers()
+                    logger.info("Enabled garment semantic keypoint debugging markers.")
+                except Exception as exc:
+                    logger.warning(
+                        f"Failed to initialize debugging markers. Continuing without them: {exc}",
+                        exc_info=True,
+                    )
+                    debug_markers = None
 
             rate_limiter = RateLimiter(args.step_hz) if args.step_hz > 0 else None
             replay_dataset, json_path = create_replay_dataset(args, source_hdf5_path, dataset.fps)
@@ -923,6 +1094,7 @@ def replay(args: argparse.Namespace) -> None:
                             ik_stats=ik_stats,
                             device=device,
                             task_description=task_description,
+                            debug_markers=debug_markers,
                         )
 
                         if success:

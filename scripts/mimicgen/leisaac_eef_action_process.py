@@ -30,7 +30,6 @@ simulation_app = app_launcher.app
 import os
 import torch
 import numpy as np
-import h5py
 from copy import deepcopy
 from tqdm import tqdm
 
@@ -64,16 +63,22 @@ def _is_bimanual_obs(obs: dict) -> bool:
     return "left_ee_frame_state" in obs and "right_ee_frame_state" in obs
 
 
-def _get_bimanual_joint_tensor_from_obs(obs: dict) -> torch.Tensor | np.ndarray | None:
-    if "actions" in obs:
-        actions = obs["actions"]
-        if actions.shape[-1] >= 12:
-            return actions
+def _has_bimanual_joint_obs(obs: dict) -> bool:
+    return (
+        ("left_joint_pos_target" in obs and "right_joint_pos_target" in obs)
+        or ("left_joint_pos" in obs and "right_joint_pos" in obs)
+    )
 
+
+def _get_bimanual_joint_tensor_from_obs(obs: dict) -> torch.Tensor | np.ndarray | None:
     if "left_joint_pos_target" in obs and "right_joint_pos_target" in obs:
         return torch.cat([obs["left_joint_pos_target"], obs["right_joint_pos_target"]], dim=-1)
     if "left_joint_pos" in obs and "right_joint_pos" in obs:
         return torch.cat([obs["left_joint_pos"], obs["right_joint_pos"]], dim=-1)
+    if "actions" in obs:
+        actions = obs["actions"]
+        if actions.shape[-1] == 12:
+            return actions
     return None
 
 
@@ -143,7 +148,8 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
         # IK format: [pos_x, pos_y, pos_z, quat_w, quat_x, quat_y, quat_z, gripper] or [pos_x, pos_y, pos_z, quat_w, quat_x, quat_y, quat_z]
         # Need to convert IK to joint positions
         # Try to get joint positions from observations if available
-        if _is_bimanual_obs(obs):
+        is_bimanual_joint_stream = _is_bimanual_obs(obs) or _has_bimanual_joint_obs(obs)
+        if is_bimanual_joint_stream:
             joint_pos = _get_bimanual_joint_tensor_from_obs(obs)
             if joint_pos is None:
                 raise ValueError(
@@ -261,13 +267,19 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
                                 print(f"DEBUG: Converting states/articulation/{arm_name}/joint_position")
                                 arm_data['joint_position'] = _convert_joint_data_to_gr00t(arm_data['joint_position'])
         
-        # Update episode_data with converted observations
-        episode_data.data['obs'] = obs
     else:
         # Standard conversion: keep in radians (USD format)
         new_actions = joint_pos
-    
+
+    if 'actions' in obs:
+        obs['actions'] = new_actions.clone() if isinstance(new_actions, torch.Tensor) else new_actions.copy()
+    episode_data.data['obs'] = obs
+
     episode_data.data['actions'] = new_actions
+    if 'processed_actions' in episode_data.data:
+        episode_data.data['processed_actions'] = (
+            new_actions.clone() if isinstance(new_actions, torch.Tensor) else new_actions.copy()
+        )
 
     return episode_data
 
@@ -281,6 +293,11 @@ def main():
         raise ValueError("Must convert to either ik or joint action.")
     if args_cli.gr00t_format and not args_cli.to_joint:
         raise ValueError("--gr00t_format can only be used with --to_joint.")
+    if os.path.abspath(args_cli.input_file) == os.path.abspath(args_cli.output_file):
+        raise ValueError(
+            "--input_file and --output_file must be different files. "
+            "Create a new output HDF5 when converting actions."
+        )
 
     # Load dataset
     if not os.path.exists(args_cli.input_file):
@@ -303,28 +320,27 @@ def main():
             process_episode_data = ik_action_to_joint(process_episode_data, gr00t_format=args_cli.gr00t_format)
         output_dataset_handler.write_episode(process_episode_data)
 
-    input_dataset_handler.close()
-    output_dataset_handler.flush()
-    output_dataset_handler.close()
+    input_data_group = input_dataset_handler._hdf5_data_group
+    data_group = output_dataset_handler._hdf5_data_group
+    if input_data_group is not None and data_group is not None:
+        preserved_total = int(data_group.attrs.get("total", 0))
+        for attr_name, attr_value in input_data_group.attrs.items():
+            data_group.attrs[attr_name] = attr_value
+        data_group.attrs["total"] = preserved_total
+        data_group.attrs["num_episodes"] = len(list(data_group.keys()))
+        data_group.attrs["actions_mode"] = "ee_pose" if args_cli.to_ik else "joint"
+        if args_cli.to_ik:
+            data_group.attrs["actions_frame"] = "base"
+            data_group.attrs["ik_quat_order"] = "wxyz"
+        else:
+            if "actions_frame" in data_group.attrs:
+                del data_group.attrs["actions_frame"]
+            if "ik_quat_order" in data_group.attrs:
+                del data_group.attrs["ik_quat_order"]
 
-    with h5py.File(args_cli.input_file, "r") as input_file, h5py.File(args_cli.output_file, "a") as output_file:
-        input_data_group = input_file.get("data")
-        data_group = output_file.get("data")
-        if input_data_group is not None and data_group is not None:
-            preserved_total = int(data_group.attrs.get("total", 0))
-            for attr_name, attr_value in input_data_group.attrs.items():
-                data_group.attrs[attr_name] = attr_value
-            data_group.attrs["total"] = preserved_total
-            data_group.attrs["num_episodes"] = len(list(data_group.keys()))
-            data_group.attrs["actions_mode"] = "ee_pose" if args_cli.to_ik else "joint"
-            if args_cli.to_ik:
-                data_group.attrs["actions_frame"] = "base"
-                data_group.attrs["ik_quat_order"] = "wxyz"
-            else:
-                if "actions_frame" in data_group.attrs:
-                    del data_group.attrs["actions_frame"]
-                if "ik_quat_order" in data_group.attrs:
-                    del data_group.attrs["ik_quat_order"]
+    output_dataset_handler.flush()
+    input_dataset_handler.close()
+    output_dataset_handler.close()
 
 
 if __name__ == "__main__":

@@ -191,6 +191,8 @@ import contextlib
 import os
 import math
 from copy import deepcopy
+from dataclasses import dataclass
+from typing import Any
 
 import gymnasium as gym
 import torch
@@ -245,6 +247,53 @@ MARK_MIN_ACTION_GAP = 3
 active_mark_eef_name = None
 active_mark_signal_names = []
 source_actions_frame_hint = None
+
+
+@dataclass
+class DatasetMetadataIndex:
+    """Cached dataset-level metadata and open demo groups from the input HDF5 file."""
+
+    garment_info: dict | None
+    actions_frame: str | None
+    ik_quat_order: str | None
+    source_episode_indices: dict[str, int]
+    episode_groups: dict[str, Any]
+
+
+@dataclass
+class ReplayRuntimeContext:
+    """Replay configuration derived from the live environment once per process."""
+
+    expected_action_dim: int | None
+    eef_names: list[str]
+    native_ik_action_contract: bool
+    ik_solver_checked: bool = False
+    ik_solver_ready: bool = False
+
+
+@dataclass
+class ReplayPlan:
+    """Per-episode replay data reused across auto/manual replay attempts."""
+
+    initial_state: dict
+    replay_actions: torch.Tensor
+    replay_mode: str
+    ik_frame: str | None
+    seed: int | None
+    episode_index: int | None
+    garment_initial_pose: dict | None
+    ik_pose_by_eef: dict[str, torch.Tensor] | None = None
+    ik_gripper_by_eef: dict[str, torch.Tensor] | None = None
+
+
+def _normalize_hdf5_scalar(value):
+    """Normalize HDF5 scalar payloads into plain Python values."""
+    if hasattr(value, "shape") and getattr(value, "shape", ()) == ():
+        with contextlib.suppress(Exception):
+            value = value.item()
+    if isinstance(value, bytes):
+        value = value.decode("utf-8")
+    return value
 
 
 def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
@@ -619,61 +668,6 @@ def _quat_xyzw_to_wxyz(quat_xyzw: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _ik_pose_vector_to_4x4(
-    pose_vec: torch.Tensor,
-    quat_order: str,
-    device: torch.device,
-) -> torch.Tensor:
-    """Convert [x,y,z,q*,q*,q*,q*] vector to 4x4 homogeneous transform."""
-    if pose_vec.numel() != 7:
-        raise ValueError(f"Expected 7D pose vector, got {pose_vec.numel()} values.")
-
-    pos = pose_vec[:3].to(device=device, dtype=torch.float32)
-    quat = pose_vec[3:7].to(device=device, dtype=torch.float32)
-    if quat_order == "xyzw":
-        quat = _quat_xyzw_to_wxyz(quat)
-    elif quat_order != "wxyz":
-        raise ValueError(f"Unsupported quaternion order: {quat_order}")
-
-    rot = PoseUtils.matrix_from_quat(quat.unsqueeze(0))[0]
-    pose = torch.eye(4, device=device, dtype=torch.float32)
-    pose[:3, :3] = rot
-    pose[:3, 3] = pos
-    return pose
-
-
-def _ik_action_row_to_target_and_gripper(
-    ik_action_row: torch.Tensor,
-    eef_names: list[str],
-    quat_order: str,
-    device: torch.device,
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Decode one IK action row into target_eef_pose_dict and gripper_action_dict."""
-    if not eef_names:
-        raise ValueError("No end-effectors configured for IK replay.")
-    if len(eef_names) > 2:
-        raise ValueError(f"IK replay supports at most 2 end-effectors, got {len(eef_names)}.")
-
-    ik_action_row = ik_action_row.to(device=device, dtype=torch.float32).reshape(-1)
-    action_dim = int(ik_action_row.numel())
-    expected_dim = 8 * len(eef_names)
-    if action_dim != expected_dim:
-        raise ValueError(
-            f"IK action dimension mismatch: expected {expected_dim} for eefs={eef_names}, got {action_dim}."
-        )
-
-    target_eef_pose_dict: dict[str, torch.Tensor] = {}
-    gripper_action_dict: dict[str, torch.Tensor] = {}
-    for i, eef_name in enumerate(eef_names):
-        start = i * 8
-        pose = _ik_pose_vector_to_4x4(ik_action_row[start : start + 7], quat_order=quat_order, device=device)
-        grip = ik_action_row[start + 7].view(1)
-        target_eef_pose_dict[eef_name] = pose.unsqueeze(0)
-        gripper_action_dict[eef_name] = grip
-
-    return target_eef_pose_dict, gripper_action_dict
-
-
 def _first_pose_translation_mean(pose_dict: dict[str, torch.Tensor], max_steps: int = 128) -> torch.Tensor | None:
     """Compute mean xyz over first timesteps from a dict of [T,4,4] tensors."""
     if not isinstance(pose_dict, dict) or len(pose_dict) == 0:
@@ -761,100 +755,112 @@ def _load_garment_info(garment_info_path: str | None) -> dict | None:
     return None
 
 
-def _load_garment_info_from_hdf5(input_file: str) -> dict | None:
-    """Load merged garment_info from /data/demo_*/meta or initial_state/garment."""
-    if h5py is None:
-        return None
+def _build_dataset_metadata_index(dataset_file_handler: HDF5DatasetFileHandler) -> DatasetMetadataIndex:
+    """Scan the already-open dataset once and cache demo metadata for annotation."""
+    data_group = getattr(dataset_file_handler, "_hdf5_data_group", None)
+    if data_group is None:
+        return DatasetMetadataIndex(
+            garment_info=None,
+            actions_frame=None,
+            ik_quat_order=None,
+            source_episode_indices={},
+            episode_groups={},
+        )
 
-    def _normalize_scalar(value):
-        if hasattr(value, "shape") and getattr(value, "shape", ()) == ():
-            try:
-                value = value.item()
-            except Exception:
-                pass
-        if isinstance(value, bytes):
-            value = value.decode("utf-8")
+    def _normalize_attr(raw_value, valid_values: set[str] | None = None) -> str | None:
+        raw_value = _normalize_hdf5_scalar(raw_value)
+        if raw_value is None:
+            return None
+        value = str(raw_value).strip().lower()
+        if valid_values is not None and value not in valid_values:
+            return None
         return value
 
-    def _merge(dst: dict, src: dict):
+    def _merge_garment_info(dst: dict, src: dict):
         for garment_name, episodes in src.items():
             if not isinstance(episodes, dict):
                 continue
-            dst.setdefault(garment_name, {})
+            dst.setdefault(str(garment_name), {})
             for episode_idx, payload in episodes.items():
-                dst[garment_name][str(episode_idx)] = payload
+                dst[str(garment_name)][str(episode_idx)] = payload
 
-    def _demo_index_from_name(demo_name: str) -> str | None:
-        if not demo_name.startswith("demo_"):
-            return None
-        suffix = demo_name.split("_", maxsplit=1)[1]
-        return suffix if suffix.isdigit() else None
+    merged_garment_info: dict = {}
+    source_episode_indices: dict[str, int] = {}
+    episode_groups: dict[str, Any] = {}
 
-    merged: dict = {}
     try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data", None)
-            if data_group is None:
-                return None
+        actions_frame = _normalize_attr(data_group.attrs.get("actions_frame", None), {"base", "world"})
+        ik_quat_order = _normalize_attr(data_group.attrs.get("ik_quat_order", None), {"xyzw", "wxyz"})
 
-            for demo_name in sorted(data_group.keys()):
-                if not demo_name.startswith("demo_"):
-                    continue
-                demo_group = data_group[demo_name]
-                if "meta" in demo_group:
-                    meta_group = demo_group["meta"]
+        for demo_name in sorted(data_group.keys()):
+            if not demo_name.startswith("demo_"):
+                continue
 
-                    for key in ("garment_info", "garment_info.json"):
-                        if key not in meta_group:
-                            continue
-                        raw = _normalize_scalar(meta_group[key][()])
-                        if isinstance(raw, str):
-                            try:
-                                parsed = json.loads(raw)
-                            except json.JSONDecodeError:
-                                continue
-                        elif isinstance(raw, dict):
-                            parsed = raw
-                        else:
-                            continue
+            demo_group = data_group[demo_name]
+            episode_groups[demo_name] = demo_group
 
-                        if isinstance(parsed, dict):
-                            _merge(merged, parsed)
+            with contextlib.suppress(Exception):
+                if "source_episode_index" in demo_group.attrs:
+                    source_episode_indices[demo_name] = int(demo_group.attrs["source_episode_index"])
 
-                initial_state_group = demo_group.get("initial_state")
-                garment_group = None if initial_state_group is None else initial_state_group.get("garment")
-                demo_index = _demo_index_from_name(demo_name)
-                if garment_group is None or demo_index is None:
-                    continue
-
-                for garment_name in garment_group.keys():
-                    garment_entry = garment_group[garment_name]
-                    if "initial_pose" not in garment_entry:
+            meta_group = demo_group.get("meta")
+            if meta_group is not None:
+                for key in ("garment_info", "garment_info.json"):
+                    if key not in meta_group:
                         continue
+                    raw = _normalize_hdf5_scalar(meta_group[key][()])
+                    if isinstance(raw, str):
+                        with contextlib.suppress(json.JSONDecodeError):
+                            parsed = json.loads(raw)
+                            if isinstance(parsed, dict):
+                                _merge_garment_info(merged_garment_info, parsed)
 
-                    pose = _normalize_scalar(garment_entry["initial_pose"][()])
-                    if hasattr(pose, "tolist"):
-                        pose = pose.tolist()
-                    if isinstance(pose, list) and len(pose) == 1 and isinstance(pose[0], list):
-                        pose = pose[0]
-                    if not isinstance(pose, list):
-                        continue
+            initial_state_group = demo_group.get("initial_state")
+            garment_group = None if initial_state_group is None else initial_state_group.get("garment")
+            demo_suffix = demo_name.split("_", maxsplit=1)[1] if "_" in demo_name else None
+            if garment_group is None or demo_suffix is None or not demo_suffix.isdigit():
+                continue
 
-                    payload = {"object_initial_pose": pose}
-                    if "scale" in garment_entry:
-                        scale = _normalize_scalar(garment_entry["scale"][()])
-                        if hasattr(scale, "tolist"):
-                            scale = scale.tolist()
-                        if isinstance(scale, list) and len(scale) == 1 and isinstance(scale[0], list):
-                            scale = scale[0]
-                        payload["scale"] = scale
+            for garment_name in garment_group.keys():
+                garment_entry = garment_group[garment_name]
+                if "initial_pose" not in garment_entry:
+                    continue
 
-                    merged.setdefault(str(garment_name), {})[demo_index] = payload
+                pose = _normalize_hdf5_scalar(garment_entry["initial_pose"][()])
+                if hasattr(pose, "tolist"):
+                    pose = pose.tolist()
+                if isinstance(pose, list) and len(pose) == 1 and isinstance(pose[0], list):
+                    pose = pose[0]
+                if not isinstance(pose, list):
+                    continue
+
+                payload = {"object_initial_pose": pose}
+                if "scale" in garment_entry:
+                    scale = _normalize_hdf5_scalar(garment_entry["scale"][()])
+                    if hasattr(scale, "tolist"):
+                        scale = scale.tolist()
+                    if isinstance(scale, list) and len(scale) == 1 and isinstance(scale[0], list):
+                        scale = scale[0]
+                    payload["scale"] = scale
+
+                merged_garment_info.setdefault(str(garment_name), {})[demo_suffix] = payload
     except Exception as e:
-        print(f"Warning: failed to read garment info from HDF5 metadata: {e}")
-        return None
+        print(f"Warning: failed to read dataset metadata index from HDF5: {e}")
+        return DatasetMetadataIndex(
+            garment_info=None,
+            actions_frame=None,
+            ik_quat_order=None,
+            source_episode_indices=source_episode_indices,
+            episode_groups=episode_groups,
+        )
 
-    return merged if merged else None
+    return DatasetMetadataIndex(
+        garment_info=merged_garment_info or None,
+        actions_frame=actions_frame,
+        ik_quat_order=ik_quat_order,
+        source_episode_indices=source_episode_indices,
+        episode_groups=episode_groups,
+    )
 
 
 def _get_episode_initial_pose(garment_info: dict | None, episode_index: int) -> dict | None:
@@ -867,50 +873,6 @@ def _get_episode_initial_pose(garment_info: dict | None, episode_index: int) -> 
             pose = episodes[episode_key].get("object_initial_pose")
             if pose is not None:
                 return {"Garment": pose}
-    return None
-
-
-def _load_actions_frame_from_hdf5(input_file: str) -> str | None:
-    """Read optional /data attrs['actions_frame'] hint."""
-    if h5py is None:
-        return None
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data", None)
-            if data_group is None:
-                return None
-            raw = data_group.attrs.get("actions_frame", None)
-            if raw is None:
-                return None
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            value = str(raw).strip().lower()
-            if value in {"base", "world"}:
-                return value
-    except Exception:
-        return None
-    return None
-
-
-def _load_ik_quat_order_from_hdf5(input_file: str) -> str | None:
-    """Read optional /data attrs['ik_quat_order'] hint."""
-    if h5py is None:
-        return None
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data", None)
-            if data_group is None:
-                return None
-            raw = data_group.attrs.get("ik_quat_order", None)
-            if raw is None:
-                return None
-            if isinstance(raw, bytes):
-                raw = raw.decode("utf-8")
-            value = str(raw).strip().lower()
-            if value in {"xyzw", "wxyz"}:
-                return value
-    except Exception:
-        return None
     return None
 
 
@@ -948,16 +910,6 @@ def _arm_root_pose_world(env: ManagerBasedRLMimicEnv, arm_name: str) -> torch.Te
     return PoseUtils.make_pose(pos_w, PoseUtils.matrix_from_quat(quat_w))[0]
 
 
-def _pose_base_to_world(
-    env: ManagerBasedRLMimicEnv,
-    arm_name: str,
-    pose_in_base: torch.Tensor,
-) -> torch.Tensor:
-    """Transform a 4x4 pose from arm base frame to world frame."""
-    base_in_world = _arm_root_pose_world(env, arm_name)
-    return base_in_world @ pose_in_base
-
-
 def _get_first_garment_name(garment_info: dict | None) -> str | None:
     """Return first garment key from garment_info dict."""
     if not garment_info or not isinstance(garment_info, dict):
@@ -968,24 +920,7 @@ def _get_first_garment_name(garment_info: dict | None) -> str | None:
     return None
 
 
-def _get_source_episode_index_from_demo_name(input_file: str, episode_name: str, fallback: int) -> int:
-    """Read source_episode_index from /data/demo_*/ attrs, fallback to sequential index."""
-    if h5py is None:
-        return fallback
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data", None)
-            if data_group is None or episode_name not in data_group:
-                return fallback
-            demo_group = data_group[episode_name]
-            if "source_episode_index" in demo_group.attrs:
-                return int(demo_group.attrs["source_episode_index"])
-    except Exception:
-        return fallback
-    return fallback
-
-
-def _load_episode_with_numeric_datasets_only(input_file: str, episode_name: str, device: str) -> EpisodeData:
+def _load_episode_with_numeric_datasets_only(h5_episode_group: Any, device: str) -> EpisodeData:
     """Load an episode while skipping non-numeric datasets (e.g., demo/meta string blobs)."""
     if h5py is None:
         raise RuntimeError("h5py is required for fallback episode loading.")
@@ -1011,34 +946,30 @@ def _load_episode_with_numeric_datasets_only(input_file: str, episode_name: str,
             array = np.array(node)
             if not _is_supported_numeric_array(array):
                 continue
-            data[key] = torch.tensor(array, device=device)
+            data[key] = torch.from_numpy(array).to(device=device)
         return data
 
-    with h5py.File(input_file, "r") as file:
-        data_group = file.get("data", None)
-        if data_group is None or episode_name not in data_group:
-            raise KeyError(f"Episode '{episode_name}' not found in {input_file}")
+    if h5_episode_group is None:
+        raise KeyError("Missing HDF5 episode group for numeric-only fallback loading.")
 
-        h5_episode_group = data_group[episode_name]
-        episode = EpisodeData()
-        episode.data = _load_group(h5_episode_group)
+    episode = EpisodeData()
+    episode.data = _load_group(h5_episode_group)
 
-        if "seed" in h5_episode_group.attrs:
-            try:
-                episode.seed = int(h5_episode_group.attrs["seed"])
-            except Exception:
-                episode.seed = h5_episode_group.attrs["seed"]
-        if "success" in h5_episode_group.attrs:
-            episode.success = bool(h5_episode_group.attrs["success"])
-
+    if "seed" in h5_episode_group.attrs:
+        try:
+            episode.seed = int(h5_episode_group.attrs["seed"])
+        except Exception:
+            episode.seed = h5_episode_group.attrs["seed"]
+    if "success" in h5_episode_group.attrs:
+        episode.success = bool(h5_episode_group.attrs["success"])
     return episode
 
 
 def _load_episode_compat(
     dataset_file_handler: HDF5DatasetFileHandler,
-    input_file: str,
     episode_name: str,
     device: str,
+    h5_episode_group: Any | None = None,
 ) -> EpisodeData:
     """Load episode robustly across mixed numeric/string HDF5 demo schemas."""
     try:
@@ -1053,17 +984,23 @@ def _load_episode_compat(
             f"\tInfo: default episode loader failed on non-numeric datasets ({e}). "
             "Using numeric-only fallback loader."
         )
-        return _load_episode_with_numeric_datasets_only(input_file, episode_name, device)
+        return _load_episode_with_numeric_datasets_only(h5_episode_group, device)
 
 
-def _episode_has_path(episode: EpisodeData, key_path: str) -> bool:
-    """Check whether a slash-delimited key path exists in episode.data."""
-    node = episode.data
-    for token in key_path.split("/"):
-        if not isinstance(node, dict) or token not in node:
-            return False
-        node = node[token]
-    return True
+def _flatten_nested_leaves(node, prefix: str = "", skip_root_keys: set[str] | None = None) -> dict[str, Any]:
+    """Flatten nested dict leaves into slash-delimited key paths."""
+    leaves: dict[str, Any] = {}
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if not prefix and skip_root_keys and key in skip_root_keys:
+                continue
+            next_prefix = f"{prefix}/{key}" if prefix else key
+            leaves.update(_flatten_nested_leaves(value, prefix=next_prefix, skip_root_keys=None))
+        return leaves
+
+    if prefix:
+        leaves[prefix] = node
+    return leaves
 
 
 def _merge_source_obs_into_annotated_episode(source_episode: EpisodeData, annotated_episode: EpisodeData):
@@ -1072,31 +1009,21 @@ def _merge_source_obs_into_annotated_episode(source_episode: EpisodeData, annota
     if not isinstance(source_obs, dict):
         return
 
-    def _merge_recursive(node: dict | torch.Tensor, rel_path: str):
-        if isinstance(node, dict):
-            for key, value in node.items():
-                # Keep recorder-generated datagen_info from the replayed episode.
-                if rel_path == "" and key == "datagen_info":
-                    continue
-                next_rel_path = f"{rel_path}/{key}" if rel_path else key
-                _merge_recursive(value, next_rel_path)
-            return
+    annotated_obs = annotated_episode.data.get("obs", {})
+    existing_paths = {f"obs/{path}" for path in _flatten_nested_leaves(annotated_obs).keys()}
+    source_leaves = _flatten_nested_leaves(source_obs, skip_root_keys={"datagen_info"})
 
+    for rel_path, value in source_leaves.items():
         full_path = f"obs/{rel_path}"
-        if _episode_has_path(annotated_episode, full_path):
-            return
+        if full_path in existing_paths:
+            continue
 
-        if isinstance(node, torch.Tensor):
-            annotated_episode.add(full_path, node.clone())
-            return
-        if isinstance(node, np.ndarray):
-            annotated_episode.add(full_path, torch.from_numpy(node.copy()))
-            return
-        # Fallback for scalar numeric entries.
-        if isinstance(node, (int, float, bool)):
-            annotated_episode.add(full_path, torch.tensor(node))
-
-    _merge_recursive(source_obs, "")
+        if isinstance(value, torch.Tensor):
+            annotated_episode.add(full_path, value.clone())
+        elif isinstance(value, np.ndarray):
+            annotated_episode.add(full_path, torch.from_numpy(value.copy()))
+        elif isinstance(value, (int, float, bool)):
+            annotated_episode.add(full_path, torch.tensor(value))
 
 
 def _overwrite_annotated_actions_with_source_actions(
@@ -1116,6 +1043,184 @@ def _overwrite_annotated_actions_with_source_actions(
         )
 
     annotated_episode.data["actions"] = source_actions.clone()
+
+
+def _build_replay_runtime_context(env: ManagerBasedRLMimicEnv) -> ReplayRuntimeContext:
+    """Resolve replay configuration from the environment once."""
+    expected_action_dim = None
+    if hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
+        expected_action_dim = int(env.action_manager.total_action_dim)
+    elif hasattr(env, "action_space") and hasattr(env.action_space, "shape"):
+        shape = getattr(env.action_space, "shape", ())
+        if len(shape) > 0:
+            expected_action_dim = int(shape[0])
+
+    eef_names = list(getattr(env.cfg, "subtask_configs", {}).keys())
+    if not eef_names:
+        eef_names = ["left_arm", "right_arm"]
+    if set(eef_names) == {"left_arm", "right_arm"}:
+        eef_names = ["left_arm", "right_arm"]
+
+    native_ik_action_contract = False
+    if hasattr(env, "_is_native_mimic_ik_action_contract"):
+        try:
+            native_ik_action_contract = bool(env._is_native_mimic_ik_action_contract())
+        except Exception:
+            native_ik_action_contract = False
+    if (not native_ik_action_contract) and expected_action_dim is not None:
+        native_ik_action_contract = int(expected_action_dim) == int(args_cli.ik_action_dim)
+
+    return ReplayRuntimeContext(
+        expected_action_dim=expected_action_dim,
+        eef_names=eef_names,
+        native_ik_action_contract=native_ik_action_contract,
+    )
+
+
+def _ensure_ik_solver_ready(env: ManagerBasedRLMimicEnv, replay_runtime: ReplayRuntimeContext) -> None:
+    """Initialize the environment IK solver once when strict IK replay needs it."""
+    if replay_runtime.native_ik_action_contract:
+        return
+    if replay_runtime.ik_solver_checked:
+        if not replay_runtime.ik_solver_ready:
+            raise RuntimeError("environment IK solver initialization previously failed")
+        return
+
+    replay_runtime.ik_solver_checked = True
+    replay_runtime.ik_solver_ready = True
+    if not hasattr(env, "_init_ik_solver_if_needed"):
+        return
+    try:
+        if not bool(env._init_ik_solver_if_needed()):
+            raise RuntimeError("environment IK solver initialization returned False")
+    except Exception as e:
+        replay_runtime.ik_solver_ready = False
+        raise RuntimeError(
+            "Strict IK replay requires a working IK solver in the environment, "
+            f"but initialization failed: {e}"
+        ) from e
+
+
+def _decode_ik_action_trajectory(
+    ik_actions: torch.Tensor,
+    eef_names: list[str],
+    quat_order: str,
+    device: torch.device,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
+    """Decode an entire IK action trajectory into per-arm pose and gripper tensors."""
+    if not eef_names:
+        raise ValueError("No end-effectors configured for IK replay.")
+    if len(eef_names) > 2:
+        raise ValueError(f"IK replay supports at most 2 end-effectors, got {len(eef_names)}.")
+
+    ik_actions = ik_actions.to(device=device, dtype=torch.float32)
+    action_dim = int(ik_actions.shape[1])
+    expected_dim = 8 * len(eef_names)
+    if action_dim != expected_dim:
+        raise ValueError(
+            f"IK action dimension mismatch: expected {expected_dim} for eefs={eef_names}, got {action_dim}."
+        )
+
+    pose_by_eef: dict[str, torch.Tensor] = {}
+    gripper_by_eef: dict[str, torch.Tensor] = {}
+    step_count = int(ik_actions.shape[0])
+    eye = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0).repeat(step_count, 1, 1)
+    for i, eef_name in enumerate(eef_names):
+        chunk = ik_actions[:, i * 8 : (i + 1) * 8]
+        pos = chunk[:, :3]
+        quat = chunk[:, 3:7]
+        if quat_order == "xyzw":
+            quat = _quat_xyzw_to_wxyz(quat)
+        elif quat_order != "wxyz":
+            raise ValueError(f"Unsupported quaternion order: {quat_order}")
+
+        pose = eye.clone()
+        pose[:, :3, :3] = PoseUtils.matrix_from_quat(quat)
+        pose[:, :3, 3] = pos
+        pose_by_eef[eef_name] = pose
+        gripper_by_eef[eef_name] = chunk[:, 7:8]
+    return pose_by_eef, gripper_by_eef
+
+
+def _prepare_replay_plan(
+    env: ManagerBasedRLMimicEnv,
+    episode: EpisodeData,
+    replay_runtime: ReplayRuntimeContext,
+    episode_index: int | None = None,
+    garment_info: dict | None = None,
+    frame_hint: str | None = None,
+) -> ReplayPlan:
+    """Build replay inputs once per episode and reuse them across replay attempts."""
+    initial_state = _rebuild_initial_state_from_episode(episode)
+    source_actions = _as_2d_tensor(episode.data.get("actions", None))
+    if source_actions is None:
+        raise ValueError("Episode does not contain top-level actions for replay.")
+
+    replay_mode = "joint"
+    replay_actions = source_actions
+    expected_action_dim = replay_runtime.expected_action_dim
+    if bool(args_cli.require_ik_actions):
+        if int(source_actions.shape[1]) != int(args_cli.ik_action_dim):
+            message = (
+                "Strict IK replay is enabled, but source actions dimension does not match "
+                f"--ik_action_dim ({source_actions.shape[1]} vs {args_cli.ik_action_dim})."
+            )
+            if not bool(args_cli.legacy_joint_replay):
+                raise ValueError(message)
+            print(f"\tWarning: {message} Falling back to legacy joint replay.")
+            replay_actions = _get_replay_actions_for_episode(episode, expected_action_dim=expected_action_dim)
+            replay_mode = "joint"
+        else:
+            replay_mode = "ik"
+    else:
+        if int(source_actions.shape[1]) == int(args_cli.ik_action_dim):
+            replay_mode = "ik"
+        else:
+            replay_actions = _get_replay_actions_for_episode(episode, expected_action_dim=expected_action_dim)
+            replay_mode = "joint"
+
+    replay_actions = replay_actions.to(device=env.device, dtype=torch.float32)
+    garment_initial_pose = _get_episode_initial_pose(garment_info, episode_index)
+    if replay_mode != "ik":
+        return ReplayPlan(
+            initial_state=initial_state,
+            replay_actions=replay_actions,
+            replay_mode="joint",
+            ik_frame=None,
+            seed=int(getattr(episode, "seed", 0)),
+            episode_index=episode_index,
+            garment_initial_pose=garment_initial_pose,
+        )
+
+    ik_frame = str(args_cli.ik_action_frame).strip().lower()
+    if ik_frame == "auto":
+        ik_frame = _infer_ik_action_frame(
+            replay_actions,
+            eef_names=replay_runtime.eef_names,
+            frame_hint=frame_hint,
+            base_z_threshold=float(args_cli.ik_auto_base_z_threshold),
+        )
+    if ik_frame not in {"base", "world"}:
+        raise ValueError(f"Invalid IK action frame resolved: {ik_frame}")
+
+    _ensure_ik_solver_ready(env, replay_runtime)
+    ik_pose_by_eef, ik_gripper_by_eef = _decode_ik_action_trajectory(
+        replay_actions,
+        eef_names=replay_runtime.eef_names,
+        quat_order=str(args_cli.ik_quat_order),
+        device=env.device,
+    )
+    return ReplayPlan(
+        initial_state=initial_state,
+        replay_actions=replay_actions,
+        replay_mode="ik",
+        ik_frame=ik_frame,
+        seed=int(getattr(episode, "seed", 0)),
+        episode_index=episode_index,
+        garment_initial_pose=garment_initial_pose,
+        ik_pose_by_eef=ik_pose_by_eef,
+        ik_gripper_by_eef=ik_gripper_by_eef,
+    )
 
 
 def _resolve_task_type(task_id: str, explicit_task_type: str | None) -> str:
@@ -1324,8 +1429,9 @@ def main():
 
     env_name = dataset_file_handler.get_env_name()
     episode_count = dataset_file_handler.get_num_episodes()
+    dataset_metadata = _build_dataset_metadata_index(dataset_file_handler)
 
-    garment_info = _load_garment_info_from_hdf5(args_cli.input_file)
+    garment_info = dataset_metadata.garment_info
     if garment_info is not None:
         print("Using garment initial poses from HDF5 demo data (/data/demo_*/meta or initial_state/garment).")
     else:
@@ -1338,11 +1444,11 @@ def main():
         if garment_info is not None:
             print(f"Using garment initial poses from: {garment_info_path}")
 
-    source_actions_frame_hint = _load_actions_frame_from_hdf5(args_cli.input_file)
+    source_actions_frame_hint = dataset_metadata.actions_frame
     if source_actions_frame_hint is not None:
         print(f"Source actions frame hint from dataset: {source_actions_frame_hint}")
 
-    source_ik_quat_order_hint = _load_ik_quat_order_from_hdf5(args_cli.input_file)
+    source_ik_quat_order_hint = dataset_metadata.ik_quat_order
     explicit_ik_quat_order = any(
         arg == "--ik_quat_order" or arg.startswith("--ik_quat_order=") for arg in sys.argv
     )
@@ -1476,6 +1582,7 @@ def main():
             stabilize_garment_after_reset_for_annotation(env)
         except Exception as e:
             print(f"Warning: initial garment initialization/stabilization failed: {e}")
+    replay_runtime = _build_replay_runtime_context(env)
 
     # Only enables inputs if this script is NOT headless mode
     if not args_cli.headless and not os.environ.get("HEADLESS", 0):
@@ -1501,20 +1608,31 @@ def main():
                 processed_episode_count += 1
                 print(f"\nAnnotating episode #{episode_index} ({episode_name})")
                 episode = _load_episode_compat(
-                    dataset_file_handler, args_cli.input_file, episode_name, env.device
+                    dataset_file_handler,
+                    episode_name,
+                    env.device,
+                    h5_episode_group=dataset_metadata.episode_groups.get(episode_name),
                 )
-                source_episode_index = _get_source_episode_index_from_demo_name(
-                    args_cli.input_file, episode_name, episode_index
+                source_episode_index = dataset_metadata.source_episode_indices.get(
+                    episode_name, episode_index
+                )
+                replay_plan = _prepare_replay_plan(
+                    env,
+                    episode,
+                    replay_runtime,
+                    episode_index=source_episode_index,
+                    garment_info=garment_info,
+                    frame_hint=source_actions_frame_hint,
                 )
 
                 is_episode_annotated_successfully = False
                 if args_cli.auto:
                     is_episode_annotated_successfully = annotate_episode_in_auto_mode(
-                        env, episode, success_term, source_episode_index, garment_info
+                        env, episode, replay_plan, replay_runtime, success_term
                     )
                 else:
                     is_episode_annotated_successfully = annotate_episode_in_manual_mode(
-                        env, episode, success_term, subtask_term_signal_names, source_episode_index, garment_info
+                        env, episode, replay_plan, replay_runtime, success_term, subtask_term_signal_names
                     )
 
                 if is_episode_annotated_successfully and not skip_episode:
@@ -1551,106 +1669,41 @@ def main():
 
 def replay_episode(
     env: ManagerBasedRLMimicEnv,
-    episode: EpisodeData,
+    replay_plan: ReplayPlan,
+    replay_runtime: ReplayRuntimeContext,
     success_term: TerminationTermCfg | None = None,
-    episode_index: int | None = None,
-    garment_info: dict | None = None,
 ) -> bool:
     """Replays an episode in the environment.
 
-    This function replays the given recorded episode in the environment. It can optionally check if the task
+    This function replays the given recorded episode plan in the environment. It can optionally check if the task
     was successfully completed using a success termination condition input.
 
     Args:
         env: The environment to replay the episode in.
-        episode: The recorded episode data to replay.
+        replay_plan: Prepared replay plan for the episode.
+        replay_runtime: Cached replay configuration resolved from the environment.
         success_term: Optional termination term to check for task success.
 
     Returns:
         True if the episode was successfully replayed and the success condition was met (if provided),
         False otherwise.
     """
-    global current_action_index, skip_episode, is_paused, task_type, source_actions_frame_hint
-    # read initial state and actions from the loaded episode
-    initial_state = _rebuild_initial_state_from_episode(episode)
-    source_actions = _as_2d_tensor(episode.data.get("actions", None))
-    if source_actions is None:
-        raise ValueError("Episode does not contain top-level actions for replay.")
-
-    expected_action_dim = None
-    if hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
-        expected_action_dim = int(env.action_manager.total_action_dim)
-    elif hasattr(env, "action_space") and hasattr(env.action_space, "shape"):
-        shape = getattr(env.action_space, "shape", ())
-        if len(shape) > 0:
-            expected_action_dim = int(shape[0])
-
-    eef_names = list(getattr(env.cfg, "subtask_configs", {}).keys())
-    if not eef_names:
-        eef_names = ["left_arm", "right_arm"]
-    if set(eef_names) == {"left_arm", "right_arm"}:
-        eef_names = ["left_arm", "right_arm"]
-
-    replay_mode = "joint"
-    actions = source_actions
-    if bool(args_cli.require_ik_actions):
-        if int(source_actions.shape[1]) != int(args_cli.ik_action_dim):
-            message = (
-                "Strict IK replay is enabled, but source actions dimension does not match "
-                f"--ik_action_dim ({source_actions.shape[1]} vs {args_cli.ik_action_dim})."
-            )
-            if not bool(args_cli.legacy_joint_replay):
-                raise ValueError(message)
-            print(f"\tWarning: {message} Falling back to legacy joint replay.")
-            actions = _get_replay_actions_for_episode(episode, expected_action_dim=expected_action_dim)
-            replay_mode = "joint"
-        else:
-            replay_mode = "ik"
-    else:
-        if int(source_actions.shape[1]) == int(args_cli.ik_action_dim):
-            replay_mode = "ik"
-        else:
-            actions = _get_replay_actions_for_episode(episode, expected_action_dim=expected_action_dim)
-            replay_mode = "joint"
+    global current_action_index, skip_episode, is_paused, task_type
+    actions = replay_plan.replay_actions
+    replay_mode = replay_plan.replay_mode
 
     if replay_mode == "ik":
-        ik_frame = str(args_cli.ik_action_frame).strip().lower()
-        if ik_frame == "auto":
-            ik_frame = _infer_ik_action_frame(
-                actions,
-                eef_names=eef_names,
-                frame_hint=source_actions_frame_hint,
-                base_z_threshold=float(args_cli.ik_auto_base_z_threshold),
-            )
-        if ik_frame not in {"base", "world"}:
-            raise ValueError(f"Invalid IK action frame resolved: {ik_frame}")
         print(
-            f"\tReplay mode: IK actions (dim={actions.shape[1]}, quat_order={args_cli.ik_quat_order}, frame={ik_frame})."
+            "\tReplay mode: IK actions "
+            f"(dim={actions.shape[1]}, quat_order={args_cli.ik_quat_order}, frame={replay_plan.ik_frame})."
         )
-        native_ik_action_contract = False
-        if hasattr(env, "_is_native_mimic_ik_action_contract"):
-            try:
-                native_ik_action_contract = bool(env._is_native_mimic_ik_action_contract())
-            except Exception:
-                native_ik_action_contract = False
-        if (not native_ik_action_contract) and expected_action_dim is not None:
-            native_ik_action_contract = int(expected_action_dim) == int(args_cli.ik_action_dim)
-
-        if native_ik_action_contract:
+        if replay_runtime.native_ik_action_contract:
             print("\tIK replay will use native env IK action contract (no Pinocchio pose->joint conversion).")
-        if (not native_ik_action_contract) and hasattr(env, "_init_ik_solver_if_needed"):
-            try:
-                if not bool(env._init_ik_solver_if_needed()):
-                    raise RuntimeError("environment IK solver initialization returned False")
-            except Exception as e:
-                raise RuntimeError(
-                    "Strict IK replay requires a working IK solver in the environment, "
-                    f"but initialization failed: {e}"
-                ) from e
     else:
         print(f"\tReplay mode: joint actions (dim={actions.shape[1]}).")
 
-    env.seed(int(episode.seed))
+    if replay_plan.seed is not None:
+        env.seed(int(replay_plan.seed))
     # Hard simulator resets can destabilize particle-cloth scenes.
     # For garment environments, prefer environment-level reset only.
     is_cloth_env = hasattr(env, "object")
@@ -1671,14 +1724,13 @@ def replay_episode(
             env.initialize_obs()
         except Exception as e:
             print(f"Warning: initialize_obs failed during replay reset: {e}")
-    _set_arm_joint_state_from_initial_state(env, initial_state)
-    if episode_index is not None and hasattr(env, "set_all_pose"):
-        initial_pose = _get_episode_initial_pose(garment_info, episode_index)
-        if initial_pose is not None:
+    _set_arm_joint_state_from_initial_state(env, replay_plan.initial_state)
+    if replay_plan.episode_index is not None and hasattr(env, "set_all_pose"):
+        if replay_plan.garment_initial_pose is not None:
             try:
-                env.set_all_pose(initial_pose)
+                env.set_all_pose(replay_plan.garment_initial_pose)
             except Exception as e:
-                print(f"Warning: failed to set initial garment pose for episode {episode_index}: {e}")
+                print(f"Warning: failed to set initial garment pose for episode {replay_plan.episode_index}: {e}")
     env.scene.write_data_to_sim()
     env.sim.forward()
     try:
@@ -1686,6 +1738,15 @@ def replay_episode(
     except Exception:
         pass
     stabilize_garment_after_reset_for_annotation(env)
+    replay_pose_by_eef = None
+    if replay_mode == "ik":
+        replay_pose_by_eef = replay_plan.ik_pose_by_eef
+        if replay_plan.ik_frame == "base":
+            replay_pose_by_eef = {}
+            for eef_name in replay_runtime.eef_names:
+                base_in_world = _arm_root_pose_world(env, eef_name).unsqueeze(0)
+                replay_pose_by_eef[eef_name] = torch.matmul(base_in_world, replay_plan.ik_pose_by_eef[eef_name])
+
     first_action = True
     fold_success_seen = False
     step_period = (1.0 / args_cli.step_hz) if args_cli.step_hz and args_cli.step_hz > 0 else 0.0
@@ -1706,18 +1767,14 @@ def replay_episode(
         except Exception:
             pass
         if replay_mode == "ik":
-            ik_action_row = torch.as_tensor(action, dtype=torch.float32, device=env.device).reshape(-1)
-            target_eef_pose_dict, gripper_action_dict = _ik_action_row_to_target_and_gripper(
-                ik_action_row,
-                eef_names=eef_names,
-                quat_order=str(args_cli.ik_quat_order),
-                device=env.device,
-            )
-            if ik_frame == "base":
-                for eef_name in list(target_eef_pose_dict.keys()):
-                    pose_base = target_eef_pose_dict[eef_name][0]
-                    pose_world = _pose_base_to_world(env, eef_name, pose_base)
-                    target_eef_pose_dict[eef_name] = pose_world.unsqueeze(0)
+            target_eef_pose_dict = {
+                eef_name: replay_pose_by_eef[eef_name][action_index : action_index + 1]
+                for eef_name in replay_runtime.eef_names
+            }
+            gripper_action_dict = {
+                eef_name: replay_plan.ik_gripper_by_eef[eef_name][action_index].reshape(1)
+                for eef_name in replay_runtime.eef_names
+            }
             action_tensor = env.target_eef_pose_to_action(
                 target_eef_pose_dict=target_eef_pose_dict,
                 gripper_action_dict=gripper_action_dict,
@@ -1725,13 +1782,15 @@ def replay_episode(
                 env_id=0,
             )
             action_tensor = torch.as_tensor(action_tensor, dtype=torch.float32, device=env.device).reshape(1, -1)
-            if expected_action_dim is not None and int(action_tensor.shape[1]) != int(expected_action_dim):
+            if replay_runtime.expected_action_dim is not None and int(action_tensor.shape[1]) != int(
+                replay_runtime.expected_action_dim
+            ):
                 raise ValueError(
                     "Environment action conversion produced wrong dimension: "
-                    f"expected {expected_action_dim}, got {action_tensor.shape[1]}."
+                    f"expected {replay_runtime.expected_action_dim}, got {action_tensor.shape[1]}."
                 )
         else:
-            action_tensor = torch.as_tensor(action, dtype=torch.float32, device=env.device).reshape(1, -1)
+            action_tensor = action.reshape(1, -1)
 
         if getattr(env.cfg, "dynamic_reset_gripper_effort_limit", False):
             dynamic_reset_gripper_effort_limit_sim(env, task_type)
@@ -1772,9 +1831,9 @@ def replay_episode(
 def annotate_episode_in_auto_mode(
     env: ManagerBasedRLMimicEnv,
     episode: EpisodeData,
+    replay_plan: ReplayPlan,
+    replay_runtime: ReplayRuntimeContext,
     success_term: TerminationTermCfg | None = None,
-    episode_index: int | None = None,
-    garment_info: dict | None = None,
 ) -> bool:
     """Annotates an episode in automatic mode.
 
@@ -1793,7 +1852,7 @@ def annotate_episode_in_auto_mode(
     global skip_episode
     skip_episode = False
     is_episode_annotated_successfully = replay_episode(
-        env, episode, success_term, episode_index=episode_index, garment_info=garment_info
+        env, replay_plan, replay_runtime, success_term
     )
     if skip_episode:
         print("\tSkipping the episode.")
@@ -1825,10 +1884,10 @@ def annotate_episode_in_auto_mode(
 def annotate_episode_in_manual_mode(
     env: ManagerBasedRLMimicEnv,
     episode: EpisodeData,
+    replay_plan: ReplayPlan,
+    replay_runtime: ReplayRuntimeContext,
     success_term: TerminationTermCfg | None = None,
     subtask_term_signal_names: dict[str, list[str]] = {},
-    episode_index: int | None = None,
-    garment_info: dict | None = None,
 ) -> bool:
     """Annotates an episode in manual mode.
 
@@ -1875,7 +1934,7 @@ def annotate_episode_in_manual_mode(
             last_marked_action_index = -10**9
             last_mark_wall_time = 0.0
             task_success_result = replay_episode(
-                env, episode, success_term, episode_index=episode_index, garment_info=garment_info
+                env, replay_plan, replay_runtime, success_term
             )
             if skip_episode:
                 print("\tSkipping the episode.")

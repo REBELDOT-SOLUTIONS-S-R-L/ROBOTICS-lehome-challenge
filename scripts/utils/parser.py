@@ -226,6 +226,12 @@ def setup_replay_parser(
         help="Description of the task to be performed.",
     )
     parser.add_argument(
+        "--garment_name",
+        type=str,
+        default=None,
+        help="Garment name override for tasks that require an explicit cloth asset.",
+    )
+    parser.add_argument(
         "--garment_version", type=str, default="Release", help="Version of the garment."
     )
     parser.add_argument(
@@ -264,6 +270,12 @@ def setup_replay_parser(
         action="store_true",
         default=False,
         help="Disable depth observation during replay.",
+    )
+    parser.add_argument(
+        "--debugging_markers",
+        action="store_true",
+        default=False,
+        help="Show live garment semantic keypoint markers during HDF5 replay.",
     )
 
     return parser
