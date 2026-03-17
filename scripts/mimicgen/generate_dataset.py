@@ -246,6 +246,12 @@ from isaaclab.utils.datasets import EpisodeData, HDF5DatasetFileHandler
 
 import lehome.tasks  # noqa: F401
 
+from lehome.assets.robots.lerobot import (
+    ACTION_NAMES,
+    SO101_FOLLOWER_HOME_JOINT_POS,
+    SO101_LEFT_ARM_HOME_JOINT_POS,
+    SO101_RIGHT_ARM_HOME_JOINT_POS,
+)
 from lehome.utils.env_utils import get_task_type
 from lehome.utils.logger import get_logger
 from lehome.tasks.fold_cloth.checkpoint_mappings import (
@@ -264,13 +270,21 @@ except ImportError:
 
 
 SINGLE_ARM_SETTLE_ACTION = np.array(
-    [-1.0363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176],
+    [SO101_FOLLOWER_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
     dtype=np.float32,
 )
-DUAL_ARM_SETTLE_ACTION = np.array(
-    [-1.2363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176, 1.2363, -1.7135, 1.4979, 1.0534, -0.0850, -0.01176],
-    dtype=np.float32,
-)
+DUAL_ARM_SETTLE_ACTION = np.concatenate(
+    [
+        np.array(
+            [SO101_LEFT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
+            dtype=np.float32,
+        ),
+        np.array(
+            [SO101_RIGHT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
+            dtype=np.float32,
+        ),
+    ]
+).astype(np.float32)
 TRACE_EEF_NAMES = ("left_arm", "right_arm")
 # CSV trace columns stay grouped semantically by arm. The raw garment checkpoint
 # convention is defined centrally in checkpoint_mappings.json:

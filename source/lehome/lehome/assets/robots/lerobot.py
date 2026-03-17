@@ -1,3 +1,4 @@
+import math
 from pathlib import Path
 
 import isaaclab.sim as sim_utils
@@ -22,6 +23,60 @@ ACTION_NAMES = [
     "gripper",
 ]
 
+
+SO101_FOLLOWER_HOME_JOINT_POS = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": math.radians(-100.0),
+    "elbow_flex": math.radians(85.0),
+    "wrist_flex": math.radians(60.0),
+    "wrist_roll": 0.0,
+    "gripper": 0.0,
+}
+
+SO101_FOLLOWER_HOME_POSE_DEG = {
+    "shoulder_pan": 0.0,
+    "shoulder_lift": -100.0,
+    "elbow_flex": 85.0,
+    "wrist_flex": 60.0,
+    "wrist_roll": 0.0,
+    "gripper": 0.0,
+}
+
+SO101_LEFT_ARM_HOME_JOINT_POS = dict(SO101_FOLLOWER_HOME_JOINT_POS)
+SO101_LEFT_ARM_HOME_JOINT_POS["shoulder_pan"] = math.radians(-70.0)
+
+SO101_RIGHT_ARM_HOME_JOINT_POS = dict(SO101_FOLLOWER_HOME_JOINT_POS)
+SO101_RIGHT_ARM_HOME_JOINT_POS["shoulder_pan"] = math.radians(70.0)
+
+
+def _build_rest_pose_range(home_pose_deg: dict[str, float]) -> dict[str, tuple[float, float]]:
+    return {
+        "shoulder_pan": (
+            home_pose_deg["shoulder_pan"] - 20.0,
+            home_pose_deg["shoulder_pan"] + 20.0,
+        ),
+        "shoulder_lift": (
+            home_pose_deg["shoulder_lift"] - 20.0,
+            home_pose_deg["shoulder_lift"] + 20.0,
+        ),
+        "elbow_flex": (
+            home_pose_deg["elbow_flex"] - 20.0,
+            home_pose_deg["elbow_flex"] + 20.0,
+        ),
+        "wrist_flex": (
+            home_pose_deg["wrist_flex"] - 25.0,
+            home_pose_deg["wrist_flex"] + 25.0,
+        ),
+        "wrist_roll": (
+            home_pose_deg["wrist_roll"] - 20.0,
+            home_pose_deg["wrist_roll"] + 20.0,
+        ),
+        "gripper": (
+            home_pose_deg["gripper"] - 20.0,
+            home_pose_deg["gripper"] + 20.0,
+        ),
+    }
+
 SO101_FOLLOWER_CFG = ArticulationCfg(
     spawn=sim_utils.UsdFileCfg(
         usd_path=str(SO101_FOLLOWER_ASSET_PATH),
@@ -38,22 +93,7 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(1.4, -2.3, 0),
         rot=(0.0, 0.0, 0.0, 1.0),
-        joint_pos={
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 0.0,
-            "elbow_flex": 0.0,
-            "wrist_flex": 0.0,
-            "wrist_roll": 0.0,
-            "gripper": 0.0,
-        },
-        # joint_pos={
-        #     "shoulder_pan": -0.0363,
-        #     "shoulder_lift": -1.7135,
-        #     "elbow_flex": 1.4979,
-        #     "wrist_flex": 1.0534,
-        #     "wrist_roll": -0.085,
-        #     "gripper": -0.01176,
-        # },
+        joint_pos=SO101_FOLLOWER_HOME_JOINT_POS,
     ),
     actuators={
         "sts3215-gripper": ImplicitActuatorCfg(
@@ -96,14 +136,7 @@ SO101_KINFE_CFG = ArticulationCfg(
     init_state=ArticulationCfg.InitialStateCfg(
         pos=(1.4, -2.3, 0),
         rot=(0.0, 0.0, 0.0, 1.0),
-        joint_pos={
-            "shoulder_pan": 0.0,
-            "shoulder_lift": 0.0,
-            "elbow_flex": 0.0,
-            "wrist_flex": 0.0,
-            "wrist_roll": 0.0,
-            "gripper": 0.0,
-        },
+        joint_pos=SO101_FOLLOWER_HOME_JOINT_POS,
     ),
     actuators={
         "sts3215-gripper": ImplicitActuatorCfg(
@@ -150,11 +183,4 @@ SO101_FOLLOWER_MOTOR_LIMITS = {
 }
 
 
-SO101_FOLLOWER_REST_POSE_RANGE = {
-    "shoulder_pan": (0 - 20.0, 0 + 20.0),  # 0 degree
-    "shoulder_lift": (-100.0 - 20.0, -100.0 + 20.0),  # -100 degree
-    "elbow_flex": (90.0 - 20.0, 90.0 + 20.0),  # 90 degree
-    "wrist_flex": (50.0 - 25.0, 50.0 + 25.0),  # 50 degree, widened tolerance
-    "wrist_roll": (0.0 - 20.0, 0.0 + 20.0),  # 0 degree
-    "gripper": (-10.0 - 20.0, -10.0 + 20.0),  # -10 degree
-}
+SO101_FOLLOWER_REST_POSE_RANGE = _build_rest_pose_range(SO101_FOLLOWER_HOME_POSE_DEG)

@@ -5,44 +5,29 @@ import torch
 
 from isaaclab.app import AppLauncher
 from isaacsim.simulation_app import SimulationApp
+from lehome.assets.robots.lerobot import (
+    ACTION_NAMES,
+    SO101_FOLLOWER_HOME_JOINT_POS,
+    SO101_LEFT_ARM_HOME_JOINT_POS,
+    SO101_RIGHT_ARM_HOME_JOINT_POS,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import DirectRLEnv
 
 SINGLE_ARM_HOME_POSITION = np.array(
-    [
-        -1.0363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
+    [SO101_FOLLOWER_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
     dtype=np.float32,
 )
 
-# Left arm uses standard home position
+# Left arm uses the bimanual home position with outward shoulder pan.
 LEFT_ARM_HOME_POSITION = np.array(
-    [
-        -1.2363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
+    [SO101_LEFT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
     dtype=np.float32,
 )
-# Right arm with symmetric shoulder_pan
+# Right arm mirrors the left arm shoulder pan.
 RIGHT_ARM_HOME_POSITION = np.array(
-    [
-        1.2363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
+    [SO101_RIGHT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
     dtype=np.float32,
 )
 DUAL_ARM_HOME_POSITION = np.concatenate(

@@ -32,7 +32,11 @@ from isaaclab.envs.mdp import last_action as mdp_last_action
 
 from .mdp import garment_folded
 
-from lehome.assets.robots.lerobot import SO101_FOLLOWER_CFG
+from lehome.assets.robots.lerobot import (
+    SO101_FOLLOWER_CFG,
+    SO101_LEFT_ARM_HOME_JOINT_POS,
+    SO101_RIGHT_ARM_HOME_JOINT_POS,
+)
 from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_CFG
 from lehome.devices.action_process import init_action_cfg, preprocess_device_action as _preprocess_device_action
 
@@ -61,14 +65,7 @@ class GarmentFoldSceneCfg(InteractiveSceneCfg):
         init_state=SO101_FOLLOWER_CFG.init_state.replace(
             pos=(-0.23, -0.25, 0.5),
             rot=(0.0, 0.0, 0.0, 1.0),
-            joint_pos={
-                "shoulder_pan": -1.1363,
-                "shoulder_lift": 0.0,
-                "elbow_flex": 0.0,
-                "wrist_flex": 0.0,
-                "wrist_roll": 0.0,
-                "gripper": 0.0,
-            },
+            joint_pos=dict(SO101_LEFT_ARM_HOME_JOINT_POS),
         ),
     )
 
@@ -78,14 +75,7 @@ class GarmentFoldSceneCfg(InteractiveSceneCfg):
         init_state=SO101_FOLLOWER_CFG.init_state.replace(
             pos=(0.23, -0.25, 0.5),
             rot=(0.0, 0.0, 0.0, 1.0),
-            joint_pos={
-                "shoulder_pan": 1.1363,
-                "shoulder_lift": 0.0,
-                "elbow_flex": 0.0,
-                "wrist_flex": 0.0,
-                "wrist_roll": 0.0,
-                "gripper": 0.0,
-            },
+            joint_pos=dict(SO101_RIGHT_ARM_HOME_JOINT_POS),
         ),
     )
 
