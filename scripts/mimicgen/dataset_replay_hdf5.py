@@ -66,8 +66,17 @@ def _to_python_scalar_or_list(value: Any) -> Any:
 def _parse_json_if_possible(value: Any) -> Any:
     """Parse JSON string values when they are serialized dict/list content."""
     if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            return value
+        is_json_container = (
+            (stripped.startswith("{") and stripped.endswith("}"))
+            or (stripped.startswith("[") and stripped.endswith("]"))
+        )
+        if not is_json_container:
+            return value
         try:
-            parsed = json.loads(value)
+            parsed = json.loads(stripped)
         except json.JSONDecodeError:
             return value
         if isinstance(parsed, (dict, list)):

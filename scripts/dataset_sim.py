@@ -12,11 +12,13 @@ if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
 
 import argparse
+import sys
 from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
 from .utils import common, setup_record_parser, setup_replay_parser
+from .utils.arg_config import expand_cli_args_with_config
 from lehome.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -31,6 +33,15 @@ def main():
         description="LeHome dataset management tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help=(
+            "Optional config file that expands to CLI args before parsing. "
+            "Supports .json, .yaml, .yml, .csv, .txt, and .args."
+        ),
+    )
     subparsers = parser.add_subparsers(
         dest="command", help="Available commands", required=True
     )
@@ -39,7 +50,7 @@ def main():
     setup_record_parser(subparsers, [isaac_args_parser])
     setup_replay_parser(subparsers, [isaac_args_parser])
 
-    args = parser.parse_args()
+    args = parser.parse_args(expand_cli_args_with_config(sys.argv[1:], parser))
     simulation_app = common.launch_app_from_args(args)
 
     try:

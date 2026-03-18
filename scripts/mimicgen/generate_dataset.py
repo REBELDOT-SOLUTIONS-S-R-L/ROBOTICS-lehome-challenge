@@ -18,8 +18,25 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
+try:
+    from scripts.utils.arg_config import expand_cli_args_with_config
+except ImportError:
+    scripts_dir = Path(__file__).resolve().parents[1]
+    if str(scripts_dir) not in sys.path:
+        sys.path.append(str(scripts_dir))
+    from utils.arg_config import expand_cli_args_with_config
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac Lab environments.")
+parser.add_argument(
+    "--config",
+    type=str,
+    default=None,
+    help=(
+        "Optional config file that expands to CLI args before parsing. "
+        "Supports .json, .yaml, .yml, .csv, .txt, and .args."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
 parser.add_argument(
@@ -203,7 +220,7 @@ parser.add_argument(
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
-args_cli = parser.parse_args()
+args_cli = parser.parse_args(expand_cli_args_with_config(sys.argv[1:], parser))
 
 if args_cli.enable_pinocchio:
     # Import pinocchio before AppLauncher to force the use of the version installed by IsaacLab and not the one installed by Isaac Sim
@@ -1048,8 +1065,8 @@ class RobustDataGenInfoPool(DataGenInfoPool):
             out[key] = pose
         return out
 
-    def _maybe_override_target_eef_pose(self, episode: EpisodeData) -> None:
-        """Prepare target_eef_pose used by Mimic source segments."""
+    def _prepare_source_target_eef_pose(self, episode: EpisodeData) -> None:
+        """Prepare the source target_eef_pose stream before loading an episode into Mimic."""
         try:
             obs = episode.data.get("obs", {})
             datagen = obs.get("datagen_info", {})
@@ -1064,8 +1081,10 @@ class RobustDataGenInfoPool(DataGenInfoPool):
         except Exception:
             return
 
-    def _maybe_align_object_pose_to_runtime(self, episode: EpisodeData, episode_name: str) -> None:
-        """Align source pose frames to runtime world frame if a large global offset is detected."""
+    def _maybe_align_source_datagen_poses_to_runtime(
+        self, episode: EpisodeData, episode_name: str
+    ) -> None:
+        """Align source datagen pose frames to the runtime world frame when legacy offsets are detected."""
         if not self._align_object_pose_to_runtime:
             return
         if self._runtime_object_center is None:
@@ -1120,8 +1139,8 @@ class RobustDataGenInfoPool(DataGenInfoPool):
                     continue
                 try:
                     episode = _load_episode_compat(dataset_file_handler, file_path, episode_name, self.device)
-                    self._maybe_override_target_eef_pose(episode)
-                    self._maybe_align_object_pose_to_runtime(episode, episode_name)
+                    self._prepare_source_target_eef_pose(episode)
+                    self._maybe_align_source_datagen_poses_to_runtime(episode, episode_name)
                     self._validate_episode_object_pose(episode, episode_name)
                     self._add_episode(episode)
                 except ClothObjectPoseValidationError as exc:
@@ -1661,14 +1680,19 @@ def main():
             requires_env_ik_solver = not bool(env._is_native_mimic_ik_action_contract())
         except Exception:
             requires_env_ik_solver = True
-    if requires_env_ik_solver and hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
-        try:
-            requires_env_ik_solver = int(env.action_manager.total_action_dim) != 16
-        except Exception:
-            pass
-    if not requires_env_ik_solver:
-        print("Using native env IK action contract for generation (no Pinocchio pose->joint conversion).")
-    if requires_env_ik_solver and hasattr(env, "_init_ik_solver_if_needed"):
+    if requires_env_ik_solver:
+        if hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
+            try:
+                requires_env_ik_solver = int(env.action_manager.total_action_dim) != 16
+            except Exception:
+                pass
+
+    if requires_env_ik_solver:
+        if not hasattr(env, "_init_ik_solver_if_needed"):
+            raise RuntimeError(
+                "Generation requires a working IK solver in the environment, "
+                "but this environment does not expose _init_ik_solver_if_needed()."
+            )
         try:
             if not bool(env._init_ik_solver_if_needed()):
                 raise RuntimeError("environment IK solver initialization returned False")
@@ -1677,6 +1701,8 @@ def main():
                 "Generation requires a working IK solver in the environment, "
                 f"but initialization failed: {e}"
             ) from e
+    else:
+        print("Using native env IK action contract for generation (no Pinocchio pose->joint conversion).")
 
     # check if the mimic API from this environment contains decprecated signatures
     if "action_noise_dict" not in inspect.signature(env.target_eef_pose_to_action).parameters:
