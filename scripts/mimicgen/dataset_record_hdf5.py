@@ -31,6 +31,7 @@ from lehome.tasks.fold_cloth.checkpoint_mappings import (
 )
 
 from ..utils.common import stabilize_garment_after_reset
+from ..utils.garment_debug_markers import GarmentKeypointDebugMarkers
 
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
@@ -1221,6 +1222,7 @@ def run_idle_phase(
     count_render: int,
     debug_pose_state: Dict[str, Any],
     control_state: Dict[str, Any],
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None,
 ) -> Tuple[Optional[Dict[str, Any]], int]:
     """Run idle phase before recording starts.
 
@@ -1246,6 +1248,8 @@ def run_idle_phase(
 
         logger.info("[Idle Phase] Stabilizing garment after initialization...")
         stabilize_garment_after_reset(env, args)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
         object_initial_pose = _safe_get_all_pose(env)
         if object_initial_pose is not None:
             control_state["cached_object_initial_pose"] = object_initial_pose
@@ -1260,6 +1264,8 @@ def run_idle_phase(
             current_obs,
         )
         env.step(maintain_action)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
         env.render()
         if object_initial_pose is None:
             object_initial_pose = control_state.get("cached_object_initial_pose")
@@ -1267,6 +1273,8 @@ def run_idle_phase(
                 object_initial_pose = _safe_get_all_pose(env)
     else:
         env.step(actions)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
         object_initial_pose = _safe_get_all_pose(env)
 
     if object_initial_pose is not None:
@@ -1285,6 +1293,7 @@ def run_recording_phase(
     dataset: DirectHDF5Recorder,
     initial_object_pose: Optional[Dict[str, Any]],
     control_state: Optional[Dict[str, Any]] = None,
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None,
 ) -> Dict[str, Any]:
     """Run recording phase after S key is pressed and recording is enabled.
 
@@ -1371,6 +1380,8 @@ def run_recording_phase(
                 env.render()
             else:
                 env.step(actions)
+                if debug_markers is not None:
+                    debug_markers.update_from_env(env)
 
             episode_step_count += 1
             if args.log_success and episode_step_count % SUCCESS_LOG_INTERVAL == 0:
@@ -1404,6 +1415,8 @@ def run_recording_phase(
                 try:
                     env.reset()
                     stabilize_garment_after_reset(env, args)
+                    if debug_markers is not None:
+                        debug_markers.update_from_env(env)
                     object_initial_pose = _safe_get_all_pose(env)
                     if object_initial_pose is not None:
                         control_state["cached_object_initial_pose"] = object_initial_pose
@@ -1444,6 +1457,8 @@ def run_recording_phase(
         try:
             env.reset()
             stabilize_garment_after_reset(env, args)
+            if debug_markers is not None:
+                debug_markers.update_from_env(env)
         except Exception as e:
             logger.error(f"[Recording] Failed to reset environment: {e}")
             traceback.print_exc()
@@ -1482,6 +1497,7 @@ def run_live_control_without_record(
     args: argparse.Namespace,
     debug_pose_state: Dict[str, Any],
     control_state: Dict[str, Any],
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None,
 ) -> None:
     """Run live teleoperation control without recording.
 
@@ -1504,9 +1520,13 @@ def run_live_control_without_record(
             current_obs,
         )
         env.step(maintain_action)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
         env.render()
     else:
         env.step(actions)
+        if debug_markers is not None:
+            debug_markers.update_from_env(env)
 
     _log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
 
@@ -1552,12 +1572,31 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     object_initial_pose: Optional[Dict[str, Any]] = None
     debug_pose_state: Dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
     control_state: Dict[str, Any] = {"maintain_action": None}
+    debug_markers: Optional[GarmentKeypointDebugMarkers] = None
 
     if getattr(args, "debugging_log_pose", False):
         logger.info(
             "[Debug Pose] Enabled. Logging EEF and garment checkpoint positions in cm "
             f"at step 0 and every {DEBUG_POSE_LOG_INTERVAL} sim steps."
         )
+    if getattr(args, "debugging_markers", False):
+        if getattr(args, "headless", False):
+            logger.warning(
+                "--debugging_markers was enabled in headless mode. Teleoperation will continue, "
+                "but the viewport markers will not be visible."
+            )
+        if args.enable_record:
+            logger.warning(
+                "--debugging_markers is intended for viewport debugging and may also appear in recorded RGB observations."
+            )
+        try:
+            debug_markers = GarmentKeypointDebugMarkers()
+        except Exception as exc:
+            logger.warning(
+                f"Failed to initialize garment debugging markers for HDF5 teleoperation: {exc}",
+                exc_info=True,
+            )
+            debug_markers = None
 
     try:
         while simulation_app.is_running():
@@ -1570,6 +1609,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         count_render,
                         debug_pose_state,
                         control_state,
+                        debug_markers,
                     )
                     if pose is not None:
                         object_initial_pose = pose
@@ -1592,6 +1632,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         dataset,
                         object_initial_pose,
                         control_state,
+                        debug_markers,
                     )
                     break
                 else:
@@ -1601,6 +1642,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         args,
                         debug_pose_state,
                         control_state,
+                        debug_markers,
                     )
     except KeyboardInterrupt:
         logger.warning("\n[Ctrl+C] Interrupt signal detected")

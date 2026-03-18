@@ -100,6 +100,12 @@ def setup_record_parser(
         default=False,
         help="Print EEF and garment checkpoint positions during teleoperation.",
     )
+    parser.add_argument(
+        "--debugging_markers",
+        action="store_true",
+        default=False,
+        help="Show live garment semantic keypoint markers during teleoperation.",
+    )
     # Recording Parameters
     parser.add_argument(
         "--enable_record",
