@@ -63,25 +63,15 @@ def _to_python_scalar_or_list(value: Any) -> Any:
     return value
 
 
-def _parse_json_if_possible(value: Any) -> Any:
-    """Parse JSON string values when they are serialized dict/list content."""
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return value
-        is_json_container = (
-            (stripped.startswith("{") and stripped.endswith("}"))
-            or (stripped.startswith("[") and stripped.endswith("]"))
-        )
-        if not is_json_container:
-            return value
-        try:
-            parsed = json.loads(stripped)
-        except json.JSONDecodeError:
-            return value
-        if isinstance(parsed, (dict, list)):
-            return parsed
-    return value
+def _parse_meta_json_value(value: Any) -> Any:
+    """Parse a known JSON-serialized metadata payload."""
+    if not isinstance(value, str):
+        return value
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return value
+    return parsed if isinstance(parsed, (dict, list)) else value
 
 
 def _read_hdf5_node(node: Any) -> Any:
@@ -91,12 +81,12 @@ def _read_hdf5_node(node: Any) -> Any:
 
     if isinstance(node, h5py.Dataset):
         value = _to_python_scalar_or_list(node[()])
-        return _parse_json_if_possible(value)
+        return value
 
     if isinstance(node, h5py.Group):
         out: Dict[str, Any] = {}
         for key, val in node.attrs.items():
-            out[key] = _parse_json_if_possible(_to_python_scalar_or_list(val))
+            out[key] = _to_python_scalar_or_list(val)
         for key in node.keys():
             out[key] = _read_hdf5_node(node[key])
         return out
@@ -305,6 +295,9 @@ class HDF5ReplaySource:
             meta_node = demo["meta"]
             meta_value = _read_hdf5_node(meta_node)
             if isinstance(meta_value, dict):
+                for json_key in ("garment_info", "garment_info.json"):
+                    if json_key in meta_value:
+                        meta_value[json_key] = _parse_meta_json_value(meta_value[json_key])
                 parsed.update(meta_value)
 
         initial_state = demo.get("initial_state")
@@ -320,13 +313,13 @@ class HDF5ReplaySource:
                 pose_value = _to_python_scalar_or_list(garment_entry["initial_pose"][()])
                 if isinstance(pose_value, list) and len(pose_value) == 1 and isinstance(pose_value[0], list):
                     pose_value = pose_value[0]
-                garment_meta["initial_pose"] = _parse_json_if_possible(pose_value)
+                garment_meta["initial_pose"] = pose_value
 
             if "scale" in garment_entry:
                 scale_value = _to_python_scalar_or_list(garment_entry["scale"][()])
                 if isinstance(scale_value, list) and len(scale_value) == 1 and isinstance(scale_value[0], list):
                     scale_value = scale_value[0]
-                garment_meta["scale"] = _parse_json_if_possible(scale_value)
+                garment_meta["scale"] = scale_value
 
             if garment_meta:
                 parsed.setdefault(str(garment_name), {}).update(garment_meta)
