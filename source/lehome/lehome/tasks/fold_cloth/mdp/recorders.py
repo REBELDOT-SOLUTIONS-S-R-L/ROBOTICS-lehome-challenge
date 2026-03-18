@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
+from .terminations import is_so101_at_rest_pose
 from ..checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
@@ -76,6 +77,7 @@ class GarmentDatagenRecorder(RecorderTerm):
     - left_sleeve_to_bottom / right_sleeve_to_bottom
     - grasp_left_bottom / grasp_right_bottom
     - left_bottom_to_top / right_bottom_to_top
+    - left_return_home / right_return_home
     Legacy compatibility signals are also emitted:
     - grasp_left / grasp_right / fold_complete
     """
@@ -222,6 +224,7 @@ class GarmentDatagenRecorder(RecorderTerm):
           - left_sleeve_to_bottom / right_sleeve_to_bottom: sleeve-bottom checkpoint distance threshold
           - grasp_left_bottom / grasp_right_bottom: gripper closed after sleeve-to-bottom
           - left_bottom_to_top / right_bottom_to_top: bottom-top checkpoint distance threshold
+          - left_return_home / right_return_home: fold complete and both arms back at rest pose
 
         Returns:
             Dict mapping signal names to (num_envs, 1) tensors.
@@ -325,6 +328,12 @@ class GarmentDatagenRecorder(RecorderTerm):
             # Once fold is detected, keep the signal high
             fold_signal = torch.ones(num_envs, 1, device=device)
 
+        left_at_rest = is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)
+        right_at_rest = is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)
+        return_home_signal = (
+            (fold_signal.squeeze(-1) > 0.5) & left_at_rest & right_at_rest
+        ).float().unsqueeze(-1)
+
         return {
             "grasp_left_sleeve": grasp_left_sleeve,
             "grasp_right_sleeve": grasp_right_sleeve,
@@ -334,6 +343,8 @@ class GarmentDatagenRecorder(RecorderTerm):
             "grasp_right_bottom": grasp_right_bottom,
             "left_bottom_to_top": left_bottom_to_top,
             "right_bottom_to_top": right_bottom_to_top,
+            "left_return_home": return_home_signal,
+            "right_return_home": return_home_signal,
             # Backward compatibility
             "grasp_left": grasp_left_sleeve,
             "grasp_right": grasp_right_sleeve,

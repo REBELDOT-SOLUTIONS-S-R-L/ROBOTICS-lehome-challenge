@@ -35,6 +35,7 @@ from lehome.utils.depth_to_pointcloud import generate_pointcloud_from_data
 from lehome.devices.action_process import preprocess_device_action
 from lehome.utils import RobotKinematics, compute_joints_from_ee_pose, mat_to_quat
 from lehome.utils.logger import get_logger
+from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
 
 from .checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
@@ -1114,6 +1115,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         ).float().unsqueeze(-1)
 
         fold_signal = self._get_success().float().unsqueeze(-1)
+        left_at_rest = is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)
+        right_at_rest = is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)
+        return_home_signal = (
+            (fold_signal.squeeze(-1) > 0.5) & left_at_rest & right_at_rest
+        ).float().unsqueeze(-1)
 
         return {
             "grasp_left_sleeve": grasp_left_sleeve,
@@ -1124,6 +1130,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             "grasp_right_bottom": grasp_right_bottom,
             "left_bottom_to_top": left_bottom_to_top,
             "right_bottom_to_top": right_bottom_to_top,
+            "left_return_home": return_home_signal,
+            "right_return_home": return_home_signal,
             # Backward compatibility
             "grasp_left": grasp_left_sleeve,
             "grasp_right": grasp_right_sleeve,

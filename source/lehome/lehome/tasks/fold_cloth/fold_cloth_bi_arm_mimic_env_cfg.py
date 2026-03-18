@@ -9,6 +9,7 @@ Subtask phases:
   2. Bring sleeves to bottom corners
   3. Re-grasp bottom corners
   4. Bring bottom corners to top corners (both arms, coordinated)
+  5. Return both arms to the home pose (both arms, coordinated)
 
 Task success in this environment is measured by:
   - Garment fold success from 6 garment check_points and garment-specific
@@ -153,7 +154,6 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_left_top",
                 subtask_term_signal="left_bottom_to_top",
-                # MimicGen requires last subtask offset start to be 0.
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -162,6 +162,23 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
                 description="Left arm brings left bottom corner to left top corner",
+                next_subtask_description="Return left arm to home position",
+            )
+        )
+
+        # Subtask 4: Return left arm to home position
+        left_subtask_configs.append(
+            SubTaskConfig(
+                object_ref=None,
+                subtask_term_signal="left_return_home",
+                # Last subtask runs to episode end; keep offsets fixed.
+                subtask_term_offset_range=(0, 0),
+                selection_strategy="random",
+                action_noise=0.0,
+                num_interpolation_steps=8,
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Left arm returns to home position",
             )
         )
         self.subtask_configs["left_arm"] = left_subtask_configs
@@ -227,7 +244,6 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_right_top",
                 subtask_term_signal="right_bottom_to_top",
-                # MimicGen requires last subtask offset start to be 0.
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -236,6 +252,23 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
                 description="Right arm brings right bottom corner to right top corner",
+                next_subtask_description="Return right arm to home position",
+            )
+        )
+
+        # Subtask 4: Return right arm to home position
+        right_subtask_configs.append(
+            SubTaskConfig(
+                object_ref=None,
+                subtask_term_signal="right_return_home",
+                # Last subtask runs to episode end; keep offsets fixed.
+                subtask_term_offset_range=(0, 0),
+                selection_strategy="random",
+                action_noise=0.0,
+                num_interpolation_steps=8,
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Right arm returns to home position",
             )
         )
         self.subtask_configs["right_arm"] = right_subtask_configs
@@ -272,6 +305,13 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 3)],
                 constraint_type=SubTaskConstraintType.COORDINATION,
                 coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
+                coordination_synchronize_start=True,
+            ),
+            # Return-home phase: replay both arms back to home together.
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 4)],
+                constraint_type=SubTaskConstraintType.COORDINATION,
+                coordination_scheme=SubTaskConstraintCoordinationScheme.REPLAY,
                 coordination_synchronize_start=True,
             ),
         ]
