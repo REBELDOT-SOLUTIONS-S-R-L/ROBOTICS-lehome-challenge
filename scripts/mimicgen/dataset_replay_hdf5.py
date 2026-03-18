@@ -2,7 +2,6 @@
 
 import argparse
 import json
-import sys
 from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -96,13 +95,13 @@ def _read_hdf5_node(node: Any) -> Any:
     return node
 
 
-def _demo_sort_key(name: str) -> Tuple[int, str]:
-    """Sort demo names by numeric suffix if available."""
+def _demo_sort_key(name: str) -> Tuple[int, int, str]:
+    """Sort numbered demo groups before any non-standard dataset entries."""
     if name.startswith("demo_"):
         suffix = name.split("demo_", maxsplit=1)[1]
         if suffix.isdigit():
-            return int(suffix), name
-    return sys.maxsize, name
+            return 0, int(suffix), name
+    return 1, 0, name
 
 
 class GarmentKeypointDebugMarkers:
