@@ -116,6 +116,7 @@ def _demo_sort_key(name: str) -> Tuple[int, int, str]:
 class GarmentKeypointDebugMarkers:
     """Viewport-only garment keypoint marker overlay for replay debugging."""
 
+    _MARKER_RADIUS_M = 0.008
     _SEMANTIC_KEYPOINT_NAMES = CSV_TRACE_KEYPOINT_NAMES
     _MARKER_COLORS = (
         (0.0, 1.0, 1.0),
@@ -131,7 +132,7 @@ class GarmentKeypointDebugMarkers:
         markers = {}
         for name, color in zip(self._SEMANTIC_KEYPOINT_NAMES, self._MARKER_COLORS):
             markers[name] = sim_utils.SphereCfg(
-                radius=0.015,
+                radius=self._MARKER_RADIUS_M,
                 visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=color),
             )
 
