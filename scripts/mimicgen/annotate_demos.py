@@ -8,7 +8,9 @@ Script to add mimic annotations to demos to be used as source demos for mimic da
 """
 
 import argparse
+import csv
 import json
+import shlex
 import sys
 import time
 from pathlib import Path
@@ -18,8 +20,114 @@ from isaaclab.app import AppLauncher
 # Launching Isaac Sim Simulator first.
 
 
+def _config_mapping_to_argv(
+    config_data: dict[str, object], parser: argparse.ArgumentParser
+) -> list[str]:
+    """Convert a parser-compatible config mapping into argv tokens."""
+    parser_actions = {
+        action.dest: action
+        for action in parser._actions
+        if getattr(action, "dest", None) not in {None, "help"}
+    }
+    argv: list[str] = []
+    for raw_key, raw_value in config_data.items():
+        dest = str(raw_key).lstrip("-").replace("-", "_")
+        action = parser_actions.get(dest)
+        if action is None or raw_value is None:
+            continue
+
+        option = next(
+            (
+                opt
+                for opt in action.option_strings
+                if opt.startswith("--") and not opt.startswith("--no-")
+            ),
+            action.option_strings[0],
+        )
+
+        if isinstance(raw_value, bool):
+            if isinstance(action, argparse.BooleanOptionalAction):
+                argv.append(option if raw_value else f"--no-{dest.replace('_', '-')}")
+            elif action.nargs == 0 and raw_value:
+                argv.append(option)
+            elif action.nargs != 0:
+                argv.extend([option, str(raw_value)])
+            continue
+
+        if isinstance(raw_value, list):
+            argv.append(option)
+            argv.extend(str(item) for item in raw_value)
+            continue
+
+        argv.extend([option, str(raw_value)])
+    return argv
+
+
+def _load_config_argv(config_path: Path, parser: argparse.ArgumentParser) -> list[str]:
+    """Load additional CLI arguments from a config file."""
+    suffix = config_path.suffix.lower()
+    if suffix in {".txt", ".args"}:
+        return shlex.split(config_path.read_text(encoding="utf-8"))
+
+    if suffix == ".json":
+        config_payload = json.loads(config_path.read_text(encoding="utf-8"))
+    elif suffix in {".yaml", ".yml"}:
+        try:
+            import yaml
+        except ImportError as exc:
+            raise SystemExit(
+                f"YAML config requested via {config_path}, but PyYAML is not installed."
+            ) from exc
+        config_payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    elif suffix == ".csv":
+        with config_path.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            config_payload = {
+                str(row["key"]): row["value"]
+                for row in reader
+                if row.get("key")
+            }
+    else:
+        raise SystemExit(
+            f"Unsupported config format for {config_path}. Use .json, .yaml, .yml, .csv, .txt, or .args."
+        )
+
+    if isinstance(config_payload, list):
+        return [str(item) for item in config_payload]
+    if not isinstance(config_payload, dict):
+        raise SystemExit(
+            f"Config file {config_path} must contain either a mapping of arguments or a raw argv list."
+        )
+    return _config_mapping_to_argv(config_payload, parser)
+
+
+def _expand_cli_args_with_config(
+    argv: list[str], parser: argparse.ArgumentParser
+) -> list[str]:
+    """Prepend config-file arguments so explicit CLI values can still override them."""
+    config_parser = argparse.ArgumentParser(add_help=False)
+    config_parser.add_argument("--config", type=str, default=None)
+    config_args, _ = config_parser.parse_known_args(argv)
+    if not config_args.config:
+        return argv
+    config_path = Path(config_args.config).expanduser().resolve()
+    return _load_config_argv(config_path, parser) + argv
+
+
 # add argparse arguments
-parser = argparse.ArgumentParser(description="Annotate demonstrations for Isaac Lab environments.")
+parser = argparse.ArgumentParser(
+    description="Annotate demonstrations for Isaac Lab environments.",
+    fromfile_prefix_chars="@",
+)
+parser.add_argument(
+    "--config",
+    type=str,
+    default=None,
+    help=(
+        "Optional config file that expands to CLI args before parsing. "
+        "Supports .json, .yaml, .yml, .csv, .txt, and .args."
+    ),
+)
 parser.add_argument("--task", type=str, default=None, help="Name of the task.")
 parser.add_argument(
     "--garment_name",
@@ -174,7 +282,7 @@ parser.add_argument(
 # append AppLauncher cli args
 AppLauncher.add_app_launcher_args(parser)
 # parse the arguments
-args_cli = parser.parse_args()
+args_cli = parser.parse_args(_expand_cli_args_with_config(sys.argv[1:], parser))
 
 if args_cli.enable_pinocchio:
     # Import pinocchio before AppLauncher to force the use of the version installed by IsaacLab and not the one installed by Isaac Sim
@@ -191,7 +299,6 @@ import contextlib
 import os
 import math
 from copy import deepcopy
-from dataclasses import dataclass
 from typing import Any
 
 import gymnasium as gym
@@ -230,12 +337,35 @@ from lehome.utils.env_utils import (
 )
 from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
 from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
-from lehome.tasks.fold_cloth.checkpoint_mappings import (
-    ClothObjectPoseUnavailableError,
-    ClothObjectPoseValidationError,
-    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
-    validate_semantic_object_pose_dict,
-)
+try:
+    from scripts.utils.annotate_utils import (
+        DatagenObjectPoseCaptureError,
+        DatasetMetadataIndex,
+        ReplayPlan,
+        ReplayRuntimeContext,
+        get_cloth_keypoint_object_poses_world as _get_cloth_keypoint_object_poses_world,
+        normalize_hdf5_scalar as _normalize_hdf5_scalar,
+        orthonormalize_rotations as _orthonormalize_rotations,
+        pos_to_4x4 as _pos_to_4x4,
+        resolve_valid_annotation_object_pose as _resolve_valid_annotation_object_pose,
+        sanitize_pose_dict as _sanitize_pose_dict,
+    )
+except ImportError:
+    scripts_dir = Path(__file__).resolve().parents[1]
+    if str(scripts_dir) not in sys.path:
+        sys.path.append(str(scripts_dir))
+    from utils.annotate_utils import (
+        DatagenObjectPoseCaptureError,
+        DatasetMetadataIndex,
+        ReplayPlan,
+        ReplayRuntimeContext,
+        get_cloth_keypoint_object_poses_world as _get_cloth_keypoint_object_poses_world,
+        normalize_hdf5_scalar as _normalize_hdf5_scalar,
+        orthonormalize_rotations as _orthonormalize_rotations,
+        pos_to_4x4 as _pos_to_4x4,
+        resolve_valid_annotation_object_pose as _resolve_valid_annotation_object_pose,
+        sanitize_pose_dict as _sanitize_pose_dict,
+    )
 
 is_paused = False
 current_action_index = 0
@@ -251,180 +381,6 @@ active_mark_eef_name = None
 active_mark_signal_names = []
 source_actions_frame_hint = None
 OBJECT_POSE_CAPTURE_MAX_ATTEMPTS = 3
-
-
-class DatagenObjectPoseCaptureError(RuntimeError):
-    """Raised when annotation cannot capture valid garment object poses for a replay attempt."""
-
-
-@dataclass
-class DatasetMetadataIndex:
-    """Cached dataset-level metadata and open demo groups from the input HDF5 file."""
-
-    garment_info: dict | None
-    actions_frame: str | None
-    ik_quat_order: str | None
-    source_episode_indices: dict[str, int]
-    episode_groups: dict[str, Any]
-
-
-@dataclass
-class ReplayRuntimeContext:
-    """Replay configuration derived from the live environment once per process."""
-
-    expected_action_dim: int | None
-    eef_names: list[str]
-    native_ik_action_contract: bool
-    ik_solver_checked: bool = False
-    ik_solver_ready: bool = False
-
-
-@dataclass
-class ReplayPlan:
-    """Per-episode replay data reused across auto/manual replay attempts."""
-
-    initial_state: dict
-    replay_actions: torch.Tensor
-    replay_mode: str
-    ik_frame: str | None
-    seed: int | None
-    episode_index: int | None
-    garment_initial_pose: dict | None
-    ik_pose_by_eef: dict[str, torch.Tensor] | None = None
-    ik_gripper_by_eef: dict[str, torch.Tensor] | None = None
-
-
-def _normalize_hdf5_scalar(value):
-    """Normalize HDF5 scalar payloads into plain Python values."""
-    if hasattr(value, "shape") and getattr(value, "shape", ()) == ():
-        with contextlib.suppress(Exception):
-            value = value.item()
-    if isinstance(value, bytes):
-        value = value.decode("utf-8")
-    return value
-
-
-def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
-    """Convert (..., 3) position tensors into (..., 4, 4) transforms."""
-    batch_shape = pos.shape[:-1]
-    pose = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
-    pose[..., :3, 3] = pos
-    return pose
-
-
-def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-    """Map garment checkpoints to semantic virtual object positions."""
-    return map_semantic_keypoints_from_positions(kp_positions)
-
-
-def _orthonormalize_rotations(pose: torch.Tensor) -> torch.Tensor:
-    """Project rotation blocks of 4x4 poses to SO(3) for robustness."""
-    if pose.ndim < 2 or pose.shape[-2:] != (4, 4):
-        return pose
-    squeeze_batch = False
-    if pose.ndim == 2:
-        pose = pose.unsqueeze(0)
-        squeeze_batch = True
-    rot = pose[..., :3, :3]
-    try:
-        rot_flat = rot.reshape(-1, 3, 3)
-        u, _, vh = torch.linalg.svd(rot_flat)
-        rot_ortho_flat = u @ vh
-        det = torch.det(rot_ortho_flat)
-        neg = det < 0
-        if torch.any(neg):
-            u = u.clone()
-            u[neg, :, -1] *= -1.0
-            rot_ortho_flat = u @ vh
-        rot_ortho = rot_ortho_flat.reshape_as(rot)
-        pose = pose.clone()
-        pose[..., :3, :3] = rot_ortho
-        pose[..., 3, :3] = 0.0
-        pose[..., 3, 3] = 1.0
-    except Exception:
-        return pose[0] if squeeze_batch else pose
-    return pose[0] if squeeze_batch else pose
-
-
-def _sanitize_pose_dict(pose_dict: dict[str, torch.Tensor] | None) -> dict[str, torch.Tensor] | None:
-    """Ensure pose dict entries are proper homogeneous transforms."""
-    if not isinstance(pose_dict, dict):
-        return pose_dict
-    out = {}
-    for key, value in pose_dict.items():
-        try:
-            pose = torch.as_tensor(value)
-        except Exception:
-            out[key] = value
-            continue
-        if pose.ndim >= 2 and pose.shape[-2:] == (4, 4):
-            out[key] = _orthonormalize_rotations(pose)
-        else:
-            out[key] = value
-    return out
-
-
-def _get_cloth_keypoint_object_poses_world(env: ManagerBasedRLMimicEnv) -> dict[str, torch.Tensor] | None:
-    """Build cloth virtual object poses directly from world keypoints."""
-    garment_obj = getattr(env, "object", None)
-    if garment_obj is None or not hasattr(garment_obj, "check_points"):
-        return None
-
-    check_points = garment_obj.check_points
-    if not check_points or len(check_points) < 6:
-        return None
-
-    try:
-        mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-        mesh_points = np.asarray(mesh_points_world)
-    except Exception:
-        try:
-            mesh_points = (
-                garment_obj._cloth_prim_view.get_world_positions().squeeze(0).detach().cpu().numpy()
-            )
-        except Exception:
-            return None
-
-    kp_positions = mesh_points[check_points]  # (6, 3), world frame
-    semantic_points = _semantic_keypoints_from_positions(kp_positions)
-    object_poses = {}
-    num_envs = int(getattr(env, "num_envs", 1))
-    for name, point in semantic_points.items():
-        pos = torch.tensor(point, dtype=torch.float32, device=env.device).unsqueeze(0).expand(num_envs, -1)
-        object_poses[name] = _pos_to_4x4(pos)
-    return object_poses
-
-
-def _resolve_valid_annotation_object_pose(env: ManagerBasedRLMimicEnv) -> dict[str, torch.Tensor]:
-    """Resolve garment object poses for annotation, with mesh fallback and strict validation."""
-    errors: list[str] = []
-
-    try:
-        object_pose = env.get_object_poses()
-        validate_semantic_object_pose_dict(
-            object_pose,
-            context="annotation env.get_object_poses()",
-        )
-        return object_pose
-    except (ClothObjectPoseUnavailableError, ClothObjectPoseValidationError) as exc:
-        errors.append(f"env.get_object_poses failed: {exc}")
-    except Exception as exc:
-        errors.append(f"env.get_object_poses raised unexpected error: {exc}")
-
-    object_pose = _get_cloth_keypoint_object_poses_world(env)
-    if object_pose is not None:
-        try:
-            validate_semantic_object_pose_dict(
-                object_pose,
-                context="annotation cloth mesh fallback",
-            )
-            return object_pose
-        except ClothObjectPoseValidationError as exc:
-            errors.append(f"cloth mesh fallback returned invalid poses: {exc}")
-    else:
-        errors.append("cloth mesh fallback returned no object poses")
-
-    raise DatagenObjectPoseCaptureError("; ".join(errors))
 
 
 def _get_robot_eef_pose_world(env: ManagerBasedRLMimicEnv, eef_name: str) -> torch.Tensor | None:

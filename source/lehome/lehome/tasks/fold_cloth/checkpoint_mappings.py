@@ -49,14 +49,7 @@ GARMENT_CHECKPOINT_CONFIGS = {
     }
     for version, garments in _MAPPINGS.get("garments", {}).items()
 }
-REQUIRED_MIMIC_OBJECT_REFS = (
-    "garment_left_sleeve",
-    "garment_right_sleeve",
-    "garment_left_bottom",
-    "garment_right_bottom",
-    "garment_left_top",
-    "garment_right_top",
-)
+REQUIRED_MIMIC_OBJECT_REFS = tuple(CHECKPOINT_LABELS)
 
 
 class ClothObjectPoseUnavailableError(RuntimeError):

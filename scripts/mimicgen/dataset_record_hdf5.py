@@ -492,7 +492,7 @@ def _log_debug_pose_snapshot(
                 )
 
 
-def _maybe_log_debug_pose_snapshot(
+def _log_debug_pose_snapshot_if_enabled(
     env: DirectRLEnv,
     args: argparse.Namespace,
     debug_pose_state: Dict[str, Any],
@@ -1272,7 +1272,7 @@ def run_idle_phase(
     if object_initial_pose is not None:
         control_state["cached_object_initial_pose"] = object_initial_pose
 
-    _maybe_log_debug_pose_snapshot(env, args, debug_pose_state)
+    _log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
 
     return object_initial_pose, count_render
 
@@ -1508,7 +1508,7 @@ def run_live_control_without_record(
     else:
         env.step(actions)
 
-    _maybe_log_debug_pose_snapshot(env, args, debug_pose_state)
+    _log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
 
     if args.log_success:
         _ = env._get_success()

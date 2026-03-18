@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 import shutil
 from typing import Any, Dict, List, Optional, Tuple
@@ -16,7 +17,10 @@ from isaaclab.markers import VisualizationMarkers, VisualizationMarkersCfg
 from isaaclab_tasks.utils import parse_env_cfg
 from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
-from lehome.tasks.fold_cloth.checkpoint_mappings import semantic_keypoints_from_positions
+from lehome.tasks.fold_cloth.checkpoint_mappings import (
+    CSV_TRACE_KEYPOINT_NAMES,
+    semantic_keypoints_from_positions,
+)
 from lehome.utils.record import RateLimiter
 from lehome.utils.logger import get_logger
 
@@ -60,22 +64,15 @@ def _to_python_scalar_or_list(value: Any) -> Any:
     return value
 
 
-def _looks_like_json_string(value: Any) -> bool:
-    if not isinstance(value, str):
-        return False
-    stripped = value.strip()
-    return (stripped.startswith("{") and stripped.endswith("}")) or (
-        stripped.startswith("[") and stripped.endswith("]")
-    )
-
-
 def _parse_json_if_possible(value: Any) -> Any:
     """Parse JSON string values when they are serialized dict/list content."""
-    if _looks_like_json_string(value):
+    if isinstance(value, str):
         try:
-            return json.loads(value)
+            parsed = json.loads(value)
         except json.JSONDecodeError:
             return value
+        if isinstance(parsed, (dict, list)):
+            return parsed
     return value
 
 
@@ -105,20 +102,13 @@ def _demo_sort_key(name: str) -> Tuple[int, str]:
         suffix = name.split("demo_", maxsplit=1)[1]
         if suffix.isdigit():
             return int(suffix), name
-    return 10**9, name
+    return sys.maxsize, name
 
 
 class GarmentKeypointDebugMarkers:
     """Viewport-only garment keypoint marker overlay for replay debugging."""
 
-    _SEMANTIC_KEYPOINT_NAMES = (
-        "garment_left_sleeve",
-        "garment_right_sleeve",
-        "garment_left_bottom",
-        "garment_right_bottom",
-        "garment_left_top",
-        "garment_right_top",
-    )
+    _SEMANTIC_KEYPOINT_NAMES = CSV_TRACE_KEYPOINT_NAMES
     _MARKER_COLORS = (
         (0.0, 1.0, 1.0),
         (1.0, 0.5, 0.0),
