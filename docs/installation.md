@@ -28,10 +28,12 @@ This will create a virtual environment and install all required dependencies.
 ### 3. Clone and Configure IsaacLab
 
 ```bash
-cd third_party
-git clone https://github.com/lehome-official/IsaacLab.git
-cd ..
+git clone -b lehome-cloth-mimic-compat https://github.com/alex-luci/IsaacLab.git third_party/IsaacLab
 ```
+
+For the MimicGen annotation / generation workflow in this repository, use the
+`alex-luci/IsaacLab` `lehome-cloth-mimic-compat` branch. It includes the
+cloth-settle and recorder compatibility changes expected by the current scripts.
 
 ### 4. Install IsaacLab
 
@@ -49,6 +51,9 @@ Finally, install the LeHome package in development mode:
 ```bash
 uv pip install -e ./source/lehome
 ```
+
+If your `.venv` was previously pointing at IsaacLab packages from another checkout, re-running the two commands above after
+cloning `third_party/IsaacLab` will repair the editable installs to use this repository's local paths.
 
 ---
 ###
