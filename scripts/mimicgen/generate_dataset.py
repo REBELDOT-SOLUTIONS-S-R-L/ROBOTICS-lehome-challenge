@@ -1674,21 +1674,12 @@ def main():
         success_term = TerminationTermCfg(func=_recording_style_success_tensor, params={}, time_out=False)
         print("Using recording-style garment success checker for generation.")
 
-    uses_native_env_ik_action_contract = False
-    if hasattr(env, "_is_native_mimic_ik_action_contract"):
+    requires_env_ik_solver = True
+    if hasattr(env, "_is_native_mimic_ik_action_contract") and hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
         try:
-            uses_native_env_ik_action_contract = bool(env._is_native_mimic_ik_action_contract())
+            requires_env_ik_solver = not bool(env._is_native_mimic_ik_action_contract()) and int(env.action_manager.total_action_dim) != 16
         except Exception:
-            uses_native_env_ik_action_contract = False
-
-    if not uses_native_env_ik_action_contract:
-        if hasattr(env, "action_manager") and hasattr(env.action_manager, "total_action_dim"):
-            try:
-                uses_native_env_ik_action_contract = int(env.action_manager.total_action_dim) == 16
-            except Exception:
-                pass
-
-    requires_env_ik_solver = not uses_native_env_ik_action_contract
+            requires_env_ik_solver = True
 
     if requires_env_ik_solver:
         if not hasattr(env, "_init_ik_solver_if_needed"):
