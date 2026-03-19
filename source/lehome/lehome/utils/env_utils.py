@@ -60,11 +60,20 @@ def write_gripper_effort_limit_sim(env, env_arm):
         )
 
 
-def get_task_type(task: str) -> str:
+def get_task_type(task: str | None, task_type: str | None = None) -> str:
     """
     Make sure the task type is in the supported teleop devices.
     """
-    if "BiArm" in task:
+    if task_type is not None:
+        return task_type
+
+    task_lower = task.lower() if isinstance(task, str) else ""
+    if task and (
+        "BiArm" in task
+        or "biso101" in task_lower
+        or "bimanual" in task_lower
+        or task_lower.startswith("lehome-bi")
+    ):
         return "bi-so101leader"
     else:
         return "so101leader"

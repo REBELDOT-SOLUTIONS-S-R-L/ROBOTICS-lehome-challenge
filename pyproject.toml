@@ -23,6 +23,7 @@ override-dependencies = [
     "packaging==23.0",
     "numpy==1.26.0",
 ]
+build-constraint-dependencies = ["setuptools<70"]
 
 [[tool.uv.index]]
 name = "nvidia"

@@ -56,10 +56,93 @@ class RobotKinematics:
                 "scipy is required for inverse kinematics with Pinocchio. "
                 "Please install it with: pip install scipy"
             )
-        
-        # Load URDF model
-        self.model = pin.buildModelFromUrdf(self.urdf_path)
-        self.data = self.model.createData()
+
+        def try_build_model(pin_module):
+            """Try to build a Pinocchio model from multiple API variants."""
+            model_local = None
+            data_local = None
+
+            # API variant 1: module function buildModelFromUrdf
+            builder = getattr(pin_module, "buildModelFromUrdf", None)
+            if callable(builder):
+                model_local = builder(self.urdf_path)
+
+            # API variant 2: module function buildModelFromURDF
+            if model_local is None:
+                builder = getattr(pin_module, "buildModelFromURDF", None)
+                if callable(builder):
+                    model_local = builder(self.urdf_path)
+
+            # API variant 3: Model class static constructor
+            if model_local is None:
+                model_cls = getattr(pin_module, "Model", None)
+                if model_cls is not None:
+                    for method_name in ("BuildFromUrdf", "BuildFromURDF"):
+                        method = getattr(model_cls, method_name, None)
+                        if callable(method):
+                            model_local = method(self.urdf_path)
+                            break
+
+            # API variant 4: RobotWrapper constructor
+            if model_local is None:
+                robot_wrapper_cls = getattr(pin_module, "RobotWrapper", None)
+                if robot_wrapper_cls is not None:
+                    for method_name in ("BuildFromURDF", "BuildFromUrdf"):
+                        method = getattr(robot_wrapper_cls, method_name, None)
+                        if not callable(method):
+                            continue
+                        try:
+                            robot = method(self.urdf_path, [])
+                        except TypeError:
+                            robot = method(self.urdf_path)
+                        model_local = getattr(robot, "model", None)
+                        data_local = getattr(robot, "data", None)
+                        if model_local is not None:
+                            break
+
+            return model_local, data_local
+
+        # Try imported `pinocchio` first.
+        model, data = try_build_model(pin)
+        selected_pin_module = pin
+
+        # Fallback: some environments expose robotics Pinocchio as `pin`.
+        if model is None:
+            try:
+                import pin as pin_fallback
+            except ImportError:
+                pin_fallback = None
+            if pin_fallback is not None:
+                model, data = try_build_model(pin_fallback)
+                if model is not None:
+                    selected_pin_module = pin_fallback
+
+        if model is None:
+            module_path = getattr(pin, "__file__", "unknown")
+            module_version = getattr(pin, "__version__", "unknown")
+            available = ", ".join(
+                name
+                for name in (
+                    "buildModelFromUrdf",
+                    "buildModelFromURDF",
+                    "Model",
+                    "RobotWrapper",
+                    "SE3",
+                    "neutral",
+                )
+                if hasattr(pin, name)
+            )
+            raise RuntimeError(
+                "Imported module 'pinocchio' does not expose a compatible robotics API. "
+                f"module={module_path}, version={module_version}, available=[{available}]. "
+                "This usually means a different PyPI package named 'pinocchio' is installed. "
+                "Fix by reinstalling the robotics binding package: `pip uninstall -y pinocchio && pip install pin`."
+            )
+
+        self._pin = selected_pin_module
+
+        self.model = model
+        self.data = data if data is not None else self.model.createData()
         
         # Get end-effector frame ID
         try:
@@ -123,7 +206,7 @@ class RobotKinematics:
     
     def _forward_kinematics_pinocchio(self, joint_pos_deg: np.ndarray) -> np.ndarray:
         """Forward kinematics using Pinocchio."""
-        import pinocchio as pin
+        pin = self._pin
         
         # Convert degrees to radians
         joint_pos_rad = np.deg2rad(joint_pos_deg[: self.nq])
@@ -172,7 +255,7 @@ class RobotKinematics:
         orientation_weight: float,
     ) -> np.ndarray:
         """Inverse kinematics using Pinocchio with scipy.optimize."""
-        import pinocchio as pin
+        pin = self._pin
         
         # Target pose as Pinocchio SE3
         target_pose = pin.SE3(desired_ee_pose[:3, :3], desired_ee_pose[:3, 3])

@@ -23,7 +23,7 @@ class SO101Leader(Device):
     def __init__(
         self,
         env,
-        port: str = "/dev/ttyACM0",
+        port: str = "/dev/ttyUSB0",
         recalibrate: bool = False,
         calibration_file_name: str = "so101_leader.json",
     ):

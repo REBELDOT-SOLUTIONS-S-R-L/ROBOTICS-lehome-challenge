@@ -243,6 +243,8 @@ class GarmentObject(SingleClothPrim):
 
         self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
         logger.debug("[GarmentObject] Garment object initialized successfully")
+        self.initial_points_positions = None
+        self._initial_points_incompatible = False
 
         # refresh visibility
         # set_single_prim_visible(self.mesh_prim_path, visible=False)
@@ -368,10 +370,70 @@ class GarmentObject(SingleClothPrim):
             self._cloth_prim_view.initialize(self.physics_sim_view)
 
         self._get_initial_info()
+        if self._device == "cpu":
+            self._set_mesh_points_if_compatible(
+                self._get_points_pose().detach().cpu().numpy()
+            )
 
-        self._prim.GetAttribute("points").Set(
-            Vt.Vec3fArray.FromNumpy(self._get_points_pose().detach().cpu().numpy())
-        )
+    def _set_mesh_points_if_compatible(self, points) -> bool:
+        """
+        Set mesh points only when vertex count matches current mesh topology.
+        """
+        if torch.is_tensor(points):
+            points_np = points.detach().cpu().numpy()
+        else:
+            points_np = np.asarray(points)
+        points_np = np.asarray(points_np, dtype=np.float32)
+
+        points_attr = self._prim.GetAttribute("points")
+        current_points = points_attr.Get()
+        if current_points is not None:
+            expected_count = len(current_points)
+            if expected_count != len(points_np):
+                logger.warning(
+                    f"[GarmentObject] Skip mesh points update due to vertex count mismatch "
+                    f"(expected {expected_count}, got {len(points_np)})."
+                )
+                return False
+
+        points_attr.Set(Vt.Vec3fArray.FromNumpy(points_np))
+        return True
+
+    def _get_mesh_vertex_count(self) -> int | None:
+        """Return current render mesh vertex count if available."""
+        try:
+            points_attr = self._prim.GetAttribute("points")
+            current_points = points_attr.Get()
+            if current_points is not None:
+                return len(current_points)
+        except Exception:
+            return None
+        return None
+
+    def _is_points_topology_compatible(self, points) -> bool:
+        """Check whether given points count matches current mesh topology."""
+        points_count = self._get_points_count(points)
+        if points_count is None:
+            return False
+
+        expected_count = self._get_mesh_vertex_count()
+        if expected_count is None:
+            return True
+        return points_count == expected_count
+
+    def _get_points_count(self, points) -> int | None:
+        """Infer vertex count from cpu/gpu points buffer shape."""
+        try:
+            if torch.is_tensor(points):
+                if points.ndim >= 2 and points.shape[-1] == 3:
+                    return int(points.shape[-2])
+                return int(points.shape[0])
+            points_np = np.asarray(points)
+            if points_np.ndim >= 2 and points_np.shape[-1] == 3:
+                return int(points_np.shape[-2])
+            return int(points_np.shape[0])
+        except Exception:
+            return None
 
     def reset(self):
         """
@@ -379,92 +441,120 @@ class GarmentObject(SingleClothPrim):
         Meanwhile, return back to the initial positions of all particles that make up the object.
         """
         logger.debug("[GarmentObject] Performing soft reset")
-        # Reset Points Positions
-        if self._device == "cpu":
-            self._prim.GetAttribute("points").Set(
-                Vt.Vec3fArray.FromNumpy(self.initial_points_positions)
-            )
-        else:
-            self._cloth_prim_view.set_world_positions(self.initial_points_positions)
+        world = None
+        was_playing = False
+        try:
+            from isaacsim.core.api import World
 
-        # Get position range from configuration
-        pos_reset_range, pos_source = self._get_config_value(
-            "soft_reset_pos_range", "common"
-        )
-        logger.debug(f"[GarmentObject] Using soft_reset_pos_range from {pos_source}")
+            world = World.instance()
+            if world is not None:
+                was_playing = world.is_playing()
+                if was_playing:
+                    world.pause()
+        except Exception:
+            world = None
 
-        # Check if position range is valid (min != max for at least one dimension)
-        pos_range_valid = (
-            pos_reset_range[0] != pos_reset_range[3]
-            or pos_reset_range[1] != pos_reset_range[4]
-            or pos_reset_range[2] != pos_reset_range[5]
-        )
-        if not pos_range_valid:
-            # Only warn once per session to avoid spam
-            if not hasattr(self, "_warned_zero_pos_range"):
+        try:
+            has_initial_points = self._ensure_initial_points_positions()
+
+            # Reset Points Positions
+            if has_initial_points and self._device == "cpu":
+                self._set_mesh_points_if_compatible(self.initial_points_positions)
+            elif has_initial_points and self._is_points_topology_compatible(self.initial_points_positions):
+                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
+            elif has_initial_points:
                 logger.warning(
-                    f"[GarmentObject] WARNING: soft_reset_pos_range has zero range "
-                    f"(min == max for all dimensions). Reset position will always be the same: "
-                    f"[{pos_reset_range[0]}, {pos_reset_range[1]}, {pos_reset_range[2]}]"
+                    "[GarmentObject] Skipping GPU particle reset due to mesh/particle topology mismatch."
                 )
-                self._warned_zero_pos_range = True
-
-        # Get rotation range from configuration
-        rot_reset_range, rot_source = self._get_config_value(
-            "soft_reset_rot_range", "common"
-        )
-        logger.debug(f"[GarmentObject] Using soft_reset_rot_range from {rot_source}")
-
-        # Check if rotation range is valid (min != max for at least one dimension)
-        rot_range_valid = (
-            rot_reset_range[0] != rot_reset_range[3]
-            or rot_reset_range[1] != rot_reset_range[4]
-            or rot_reset_range[2] != rot_reset_range[5]
-        )
-        if not rot_range_valid:
-            # Only warn once per session to avoid spam
-            if not hasattr(self, "_warned_zero_rot_range"):
+            else:
                 logger.warning(
-                    f"[GarmentObject] WARNING: soft_reset_rot_range has zero range "
-                    f"(min == max for all dimensions). Reset rotation will always be the same: "
-                    f"[{rot_reset_range[0]}, {rot_reset_range[1]}, {rot_reset_range[2]}]"
+                    "[GarmentObject] initial_points_positions unavailable; skipping particle reset."
                 )
-                self._warned_zero_rot_range = True
 
-        # Generate random initial position/rotation within range
-        # Use provided rng if available, otherwise use global random module
-        if self.rng is not None:
-            pos = [
-                self.rng.uniform(pos_reset_range[0], pos_reset_range[3]),
-                self.rng.uniform(pos_reset_range[1], pos_reset_range[4]),
-                self.rng.uniform(pos_reset_range[2], pos_reset_range[5]),
-            ]
-            ori = [
-                self.rng.uniform(rot_reset_range[0], rot_reset_range[3]),
-                self.rng.uniform(rot_reset_range[1], rot_reset_range[4]),
-                self.rng.uniform(rot_reset_range[2], rot_reset_range[5]),
-            ]
-            logger.debug(
-                f"[GarmentObject] Using RandomState for reset (rng state: {self.rng.get_state()[1][:3] if hasattr(self.rng, 'get_state') else 'N/A'})"
+            # Get position range from configuration
+            pos_reset_range, pos_source = self._get_config_value(
+                "soft_reset_pos_range", "common"
             )
-        else:
-            pos = [
-                random.uniform(pos_reset_range[0], pos_reset_range[3]),
-                random.uniform(pos_reset_range[1], pos_reset_range[4]),
-                random.uniform(pos_reset_range[2], pos_reset_range[5]),
-            ]
-            ori = [
-                random.uniform(rot_reset_range[0], rot_reset_range[3]),
-                random.uniform(rot_reset_range[1], rot_reset_range[4]),
-                random.uniform(rot_reset_range[2], rot_reset_range[5]),
-            ]
-            logger.debug(f"[GarmentObject] Using global random module for reset")
+            logger.debug(f"[GarmentObject] Using soft_reset_pos_range from {pos_source}")
 
-        self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
-        self.reset_pose = np.concatenate(
-            [np.array(pos, dtype=np.float32), np.array(ori, dtype=np.float32)]
-        )
-        logger.info(f"[GarmentObject] Reset complete - pos: {pos}, ori: {ori}")
+            # Check if position range is valid (min != max for at least one dimension)
+            pos_range_valid = (
+                pos_reset_range[0] != pos_reset_range[3]
+                or pos_reset_range[1] != pos_reset_range[4]
+                or pos_reset_range[2] != pos_reset_range[5]
+            )
+            if not pos_range_valid:
+                # Only warn once per session to avoid spam
+                if not hasattr(self, "_warned_zero_pos_range"):
+                    logger.warning(
+                        f"[GarmentObject] WARNING: soft_reset_pos_range has zero range "
+                        f"(min == max for all dimensions). Reset position will always be the same: "
+                        f"[{pos_reset_range[0]}, {pos_reset_range[1]}, {pos_reset_range[2]}]"
+                    )
+                    self._warned_zero_pos_range = True
+
+            # Get rotation range from configuration
+            rot_reset_range, rot_source = self._get_config_value(
+                "soft_reset_rot_range", "common"
+            )
+            logger.debug(f"[GarmentObject] Using soft_reset_rot_range from {rot_source}")
+
+            # Check if rotation range is valid (min != max for at least one dimension)
+            rot_range_valid = (
+                rot_reset_range[0] != rot_reset_range[3]
+                or rot_reset_range[1] != rot_reset_range[4]
+                or rot_reset_range[2] != rot_reset_range[5]
+            )
+            if not rot_range_valid:
+                # Only warn once per session to avoid spam
+                if not hasattr(self, "_warned_zero_rot_range"):
+                    logger.warning(
+                        f"[GarmentObject] WARNING: soft_reset_rot_range has zero range "
+                        f"(min == max for all dimensions). Reset rotation will always be the same: "
+                        f"[{rot_reset_range[0]}, {rot_reset_range[1]}, {rot_reset_range[2]}]"
+                    )
+                    self._warned_zero_rot_range = True
+
+            # Generate random initial position/rotation within range
+            # Use provided rng if available, otherwise use global random module
+            if self.rng is not None:
+                pos = [
+                    self.rng.uniform(pos_reset_range[0], pos_reset_range[3]),
+                    self.rng.uniform(pos_reset_range[1], pos_reset_range[4]),
+                    self.rng.uniform(pos_reset_range[2], pos_reset_range[5]),
+                ]
+                ori = [
+                    self.rng.uniform(rot_reset_range[0], rot_reset_range[3]),
+                    self.rng.uniform(rot_reset_range[1], rot_reset_range[4]),
+                    self.rng.uniform(rot_reset_range[2], rot_reset_range[5]),
+                ]
+                logger.debug(
+                    f"[GarmentObject] Using RandomState for reset (rng state: {self.rng.get_state()[1][:3] if hasattr(self.rng, 'get_state') else 'N/A'})"
+                )
+            else:
+                pos = [
+                    random.uniform(pos_reset_range[0], pos_reset_range[3]),
+                    random.uniform(pos_reset_range[1], pos_reset_range[4]),
+                    random.uniform(pos_reset_range[2], pos_reset_range[5]),
+                ]
+                ori = [
+                    random.uniform(rot_reset_range[0], rot_reset_range[3]),
+                    random.uniform(rot_reset_range[1], rot_reset_range[4]),
+                    random.uniform(rot_reset_range[2], rot_reset_range[5]),
+                ]
+                logger.debug(f"[GarmentObject] Using global random module for reset")
+
+            self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
+            self.reset_pose = np.concatenate(
+                [np.array(pos, dtype=np.float32), np.array(ori, dtype=np.float32)]
+            )
+            logger.info(f"[GarmentObject] Reset complete - pos: {pos}, ori: {ori}")
+        finally:
+            if world is not None and was_playing:
+                try:
+                    world.play()
+                except Exception:
+                    pass
 
     def get_current_mesh_points(
         self, visualize=False, save=False, save_path="./pointcloud.ply"
@@ -653,8 +743,44 @@ class GarmentObject(SingleClothPrim):
             self.initial_points_positions = (
                 self._get_points_pose().detach().cpu().numpy()
             )
+            self._initial_points_incompatible = False
         else:
-            self.initial_points_positions = self._cloth_prim_view.get_world_positions()
+            gpu_points = self._cloth_prim_view.get_world_positions()
+            if self._is_points_topology_compatible(gpu_points):
+                self.initial_points_positions = gpu_points
+                self._initial_points_incompatible = False
+            else:
+                self.initial_points_positions = None
+                self._initial_points_incompatible = True
+                expected = self._get_mesh_vertex_count()
+                got = self._get_points_count(gpu_points)
+                logger.warning(
+                    f"[GarmentObject] Incompatible initial particle buffer size (expected {expected}, got {got}). "
+                    "Will skip particle position reset to avoid invalid mesh state."
+                )
+
+    def _ensure_initial_points_positions(self) -> bool:
+        """Ensure initial particle positions are available for soft resets."""
+        if self.initial_points_positions is not None:
+            return True
+        if self._initial_points_incompatible:
+            return False
+
+        try:
+            self._get_initial_info()
+            if self.initial_points_positions is not None:
+                return True
+        except Exception as e:
+            logger.debug(f"[GarmentObject] _get_initial_info failed before reset: {e}")
+
+        try:
+            self.initialize()
+            if self.initial_points_positions is not None:
+                return True
+        except Exception as e:
+            logger.debug(f"[GarmentObject] initialize failed before reset: {e}")
+
+        return False
 
     def transform_points(self, points, pos, ori, scale):
         """
@@ -701,12 +827,19 @@ class GarmentObject(SingleClothPrim):
             self.set_world_pose(
                 [0.0, 0.0, 0.0], euler_angles_to_quat([0.0, 0.0, 0.0], degrees=True)
             )
-            if self._device == "cpu":
-                self._prim.GetAttribute("points").Set(
-                    Vt.Vec3fArray.FromNumpy(self.initial_points_positions)
+            has_initial_points = self._ensure_initial_points_positions()
+            if has_initial_points and self._device == "cpu":
+                self._set_mesh_points_if_compatible(self.initial_points_positions)
+            elif has_initial_points and self._is_points_topology_compatible(self.initial_points_positions):
+                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
+            elif has_initial_points:
+                logger.warning(
+                    "[GarmentObject] Skipping GPU particle reset in set_all_pose due to mesh/particle topology mismatch."
                 )
             else:
-                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
+                logger.warning(
+                    "[GarmentObject] initial_points_positions unavailable in set_all_pose; skipping particle reset."
+                )
             self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
             self.reset_pose = np.array(pose, dtype=np.float32)
 

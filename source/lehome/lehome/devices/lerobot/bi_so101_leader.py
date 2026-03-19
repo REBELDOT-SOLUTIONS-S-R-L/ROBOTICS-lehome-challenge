@@ -5,7 +5,7 @@ from ..device_base import Device
 
 
 class BiSO101Leader(Device):
-    def __init__(self, env, left_port: str = '/dev/ttyACM0', right_port: str = '/dev/ttyACM1', recalibrate: bool = False):
+    def __init__(self, env, left_port: str = '/dev/ttyUSB0', right_port: str = '/dev/ttyUSB1', recalibrate: bool = False):
         super().__init__(env)
 
         # use left so101 leader as the main device to store state

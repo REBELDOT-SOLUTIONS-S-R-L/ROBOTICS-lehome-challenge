@@ -9,45 +9,38 @@ from isaacsim.simulation_app import SimulationApp
 if TYPE_CHECKING:
     from isaaclab.envs import DirectRLEnv
 
-SINGLE_ARM_HOME_POSITION = np.array(
-    [
-        -1.0363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
-    dtype=np.float32,
-)
+_HOME_POSITION_CACHE: tuple[np.ndarray, np.ndarray] | None = None
 
-# Left arm uses standard home position
-LEFT_ARM_HOME_POSITION = np.array(
-    [
-        -1.2363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
-    dtype=np.float32,
-)
-# Right arm with symmetric shoulder_pan
-RIGHT_ARM_HOME_POSITION = np.array(
-    [
-        1.2363,  # shoulder_pan
-        -1.7135,  # shoulder_lift
-        1.4979,  # elbow_flex
-        1.0534,  # wrist_flex
-        -0.085,  # wrist_roll
-        -0.01176,  # gripper
-    ],
-    dtype=np.float32,
-)
-DUAL_ARM_HOME_POSITION = np.concatenate(
-    [LEFT_ARM_HOME_POSITION, RIGHT_ARM_HOME_POSITION]
-)
+
+def _get_cached_home_positions() -> tuple[np.ndarray, np.ndarray]:
+    """Load home joint targets lazily to avoid importing Isaac asset modules before SimulationApp starts."""
+    global _HOME_POSITION_CACHE
+    if _HOME_POSITION_CACHE is not None:
+        return _HOME_POSITION_CACHE
+
+    from lehome.assets.robots.lerobot import (
+        ACTION_NAMES,
+        SO101_FOLLOWER_HOME_JOINT_POS,
+        SO101_LEFT_ARM_HOME_JOINT_POS,
+        SO101_RIGHT_ARM_HOME_JOINT_POS,
+    )
+
+    single_arm_home_position = np.array(
+        [SO101_FOLLOWER_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
+        dtype=np.float32,
+    )
+    left_arm_home_position = np.array(
+        [SO101_LEFT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
+        dtype=np.float32,
+    )
+    right_arm_home_position = np.array(
+        [SO101_RIGHT_ARM_HOME_JOINT_POS[action_name] for action_name in ACTION_NAMES],
+        dtype=np.float32,
+    )
+    dual_arm_home_position = np.concatenate([left_arm_home_position, right_arm_home_position])
+
+    _HOME_POSITION_CACHE = (single_arm_home_position, dual_arm_home_position)
+    return _HOME_POSITION_CACHE
 
 
 def launch_app(parser: argparse.ArgumentParser) -> SimulationApp:
@@ -115,7 +108,8 @@ def stabilize_garment_after_reset(
     except Exception:
         action_dim = 12 if is_bimanual else 6
 
-    home_joints = DUAL_ARM_HOME_POSITION if is_bimanual else SINGLE_ARM_HOME_POSITION
+    single_arm_home_position, dual_arm_home_position = _get_cached_home_positions()
+    home_joints = dual_arm_home_position if is_bimanual else single_arm_home_position
 
     if len(home_joints) != action_dim:
         # Use warning from logger if available, otherwise print

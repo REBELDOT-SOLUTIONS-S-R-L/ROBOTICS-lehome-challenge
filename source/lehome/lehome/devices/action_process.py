@@ -52,11 +52,13 @@ def init_action_cfg(action_cfg, device):
                 "wrist_roll",
             ],
             scale=1.0,
+            use_default_offset=False,
         )
         action_cfg.left_gripper_action = mdp.JointPositionActionCfg(
             asset_name="left_arm",
             joint_names=["gripper"],
             scale=1.0,
+            use_default_offset=False,
         )
         action_cfg.right_arm_action = mdp.JointPositionActionCfg(
             asset_name="right_arm",
@@ -68,11 +70,58 @@ def init_action_cfg(action_cfg, device):
                 "wrist_roll",
             ],
             scale=1.0,
+            use_default_offset=False,
         )
         action_cfg.right_gripper_action = mdp.JointPositionActionCfg(
             asset_name="right_arm",
             joint_names=["gripper"],
             scale=1.0,
+            use_default_offset=False,
+        )
+    elif device in ["mimic_bi-so101leader", "mimic_bi-keyboard"]:
+        action_cfg.left_arm_action = mdp.DifferentialInverseKinematicsActionCfg(
+            asset_name="left_arm",
+            joint_names=[
+                "shoulder_pan",
+                "shoulder_lift",
+                "elbow_flex",
+                "wrist_flex",
+                "wrist_roll",
+            ],
+            body_name="gripper",
+            controller=mdp.DifferentialIKControllerCfg(
+                command_type="pose",
+                ik_method="dls",
+                use_relative_mode=False,
+            ),
+        )
+        action_cfg.left_gripper_action = mdp.JointPositionActionCfg(
+            asset_name="left_arm",
+            joint_names=["gripper"],
+            scale=1.0,
+            use_default_offset=False,
+        )
+        action_cfg.right_arm_action = mdp.DifferentialInverseKinematicsActionCfg(
+            asset_name="right_arm",
+            joint_names=[
+                "shoulder_pan",
+                "shoulder_lift",
+                "elbow_flex",
+                "wrist_flex",
+                "wrist_roll",
+            ],
+            body_name="gripper",
+            controller=mdp.DifferentialIKControllerCfg(
+                command_type="pose",
+                ik_method="dls",
+                use_relative_mode=False,
+            ),
+        )
+        action_cfg.right_gripper_action = mdp.JointPositionActionCfg(
+            asset_name="right_arm",
+            joint_names=["gripper"],
+            scale=1.0,
+            use_default_offset=False,
         )
     elif device in ["bi-keyboard"]:
         action_cfg.left_arm_action = mdp.RelativeJointPositionActionCfg(
@@ -109,8 +158,16 @@ def init_action_cfg(action_cfg, device):
         )
 
     else:
-        action_cfg.arm_action = None
-        action_cfg.gripper_action = None
+        for attr_name in (
+            "arm_action",
+            "gripper_action",
+            "left_arm_action",
+            "left_gripper_action",
+            "right_arm_action",
+            "right_gripper_action",
+        ):
+            if hasattr(action_cfg, attr_name):
+                setattr(action_cfg, attr_name, None)
     return action_cfg
 
 

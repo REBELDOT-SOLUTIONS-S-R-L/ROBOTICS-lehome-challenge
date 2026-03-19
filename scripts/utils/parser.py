@@ -33,14 +33,14 @@ def setup_record_parser(
     parser.add_argument(
         "--left_arm_port",
         type=str,
-        default="/dev/ttyACM0",
-        help="Port for the left teleop device:bi-so101leader, default is /dev/ttyACM0",
+        default="/dev/ttyUSB0",
+        help="Port for the left teleop device:bi-so101leader, default is /dev/ttyUSB0",
     )
     parser.add_argument(
         "--right_arm_port",
         type=str,
-        default="/dev/ttyACM1",
-        help="Port for the right teleop device:bi-so101leader, default is /dev/ttyACM1",
+        default="/dev/ttyUSB1",
+        help="Port for the right teleop device:bi-so101leader, default is /dev/ttyUSB1",
     )
     parser.add_argument(
         "--recalibrate",
@@ -93,6 +93,12 @@ def setup_record_parser(
         action="store_true",
         default=False,
         help="Log success information.",
+    )
+    parser.add_argument(
+        "--debugging_log_pose",
+        action="store_true",
+        default=False,
+        help="Print EEF and garment checkpoint positions during teleoperation.",
     )
     # Recording Parameters
     parser.add_argument(
@@ -220,6 +226,12 @@ def setup_replay_parser(
         help="Description of the task to be performed.",
     )
     parser.add_argument(
+        "--garment_name",
+        type=str,
+        default=None,
+        help="Garment name override for tasks that require an explicit cloth asset.",
+    )
+    parser.add_argument(
         "--garment_version", type=str, default="Release", help="Version of the garment."
     )
     parser.add_argument(
@@ -258,6 +270,12 @@ def setup_replay_parser(
         action="store_true",
         default=False,
         help="Disable depth observation during replay.",
+    )
+    parser.add_argument(
+        "--debugging_markers",
+        action="store_true",
+        default=False,
+        help="Show live garment semantic keypoint markers during HDF5 replay.",
     )
 
     return parser
