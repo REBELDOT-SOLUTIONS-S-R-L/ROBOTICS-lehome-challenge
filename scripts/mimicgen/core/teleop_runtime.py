@@ -16,6 +16,7 @@ from lehome.utils.logger import get_logger
 from lehome.utils.record import get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
+from ...utils.garment_debug_markers import GarmentKeypointDebugMarkers
 from .record_debug import (
     DEBUG_POSE_LOG_INTERVAL,
     SUCCESS_LOG_INTERVAL,
@@ -26,6 +27,54 @@ from .record_debug import (
 from .recording import DirectHDF5Recorder, _as_numpy
 
 logger = get_logger(__name__)
+DEBUG_MARKER_UPDATE_INTERVAL = 5
+
+
+def create_debug_markers_if_needed(
+    args: argparse.Namespace,
+) -> GarmentKeypointDebugMarkers | None:
+    """Create live garment semantic keypoint markers when enabled for teleop."""
+    if not getattr(args, "debugging_markers", False):
+        return None
+    if getattr(args, "headless", False):
+        logger.warning(
+            "--debugging_markers was enabled in headless mode. Teleop will continue, "
+            "but the markers will not be visible."
+        )
+        return None
+    try:
+        markers = GarmentKeypointDebugMarkers()
+        logger.info("Enabled garment semantic keypoint debugging markers.")
+        return markers
+    except Exception as exc:
+        logger.warning(
+            f"Failed to initialize debugging markers. Continuing without them: {exc}",
+            exc_info=True,
+        )
+        return None
+
+
+def update_debug_markers_if_needed(
+    env: DirectRLEnv,
+    debug_markers: GarmentKeypointDebugMarkers | None,
+    debug_marker_state: dict[str, Any] | None = None,
+    *,
+    force: bool = False,
+) -> None:
+    """Update marker overlay at a throttled cadence to reduce viewport overhead."""
+    if debug_markers is None:
+        return
+    if force:
+        debug_markers.update_from_env(env)
+        return
+    if debug_marker_state is None:
+        debug_markers.update_from_env(env)
+        return
+
+    step_count = int(debug_marker_state.get("step_count", 0))
+    if step_count == 0 or step_count % DEBUG_MARKER_UPDATE_INTERVAL == 0:
+        debug_markers.update_from_env(env)
+    debug_marker_state["step_count"] = step_count + 1
 
 
 def validate_task_and_device(args: argparse.Namespace) -> None:
@@ -222,6 +271,8 @@ def run_idle_phase(
     count_render: int,
     debug_pose_state: dict[str, Any],
     control_state: dict[str, Any],
+    debug_markers: GarmentKeypointDebugMarkers | None = None,
+    debug_marker_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
     """Run idle phase before recording starts."""
     actions = teleop_interface.advance()
@@ -230,10 +281,22 @@ def run_idle_phase(
     if count_render == 0:
         logger.info("[Idle Phase] Initializing observations...")
         env.initialize_obs()
+        update_debug_markers_if_needed(
+            env,
+            debug_markers,
+            debug_marker_state,
+            force=True,
+        )
         count_render += 1
 
         logger.info("[Idle Phase] Stabilizing garment after initialization...")
         stabilize_garment_after_reset(env, args)
+        update_debug_markers_if_needed(
+            env,
+            debug_markers,
+            debug_marker_state,
+            force=True,
+        )
         object_initial_pose = _safe_get_all_pose(env)
         if object_initial_pose is not None:
             control_state["cached_object_initial_pose"] = object_initial_pose
@@ -252,6 +315,8 @@ def run_idle_phase(
         env.step(actions)
         object_initial_pose = _safe_get_all_pose(env)
 
+    update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
+
     if object_initial_pose is not None:
         control_state["cached_object_initial_pose"] = object_initial_pose
 
@@ -267,6 +332,8 @@ def run_recording_phase(
     dataset: DirectHDF5Recorder,
     initial_object_pose: dict[str, Any] | None,
     control_state: dict[str, Any] | None = None,
+    debug_markers: GarmentKeypointDebugMarkers | None = None,
+    debug_marker_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Run the active episode recording loop after the user starts recording."""
     if control_state is None:
@@ -335,6 +402,8 @@ def run_recording_phase(
             else:
                 env.step(actions)
 
+            update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
+
             episode_step_count += 1
             if args.log_success and episode_step_count % SUCCESS_LOG_INTERVAL == 0:
                 log_success_result(
@@ -367,6 +436,12 @@ def run_recording_phase(
                 try:
                     env.reset()
                     stabilize_garment_after_reset(env, args)
+                    update_debug_markers_if_needed(
+                        env,
+                        debug_markers,
+                        debug_marker_state,
+                        force=True,
+                    )
                     object_initial_pose = _safe_get_all_pose(env)
                     if object_initial_pose is not None:
                         control_state["cached_object_initial_pose"] = object_initial_pose
@@ -398,6 +473,12 @@ def run_recording_phase(
         try:
             env.reset()
             stabilize_garment_after_reset(env, args)
+            update_debug_markers_if_needed(
+                env,
+                debug_markers,
+                debug_marker_state,
+                force=True,
+            )
         except Exception as exc:
             logger.error(f"[Recording] Failed to reset environment: {exc}")
             traceback.print_exc()
@@ -417,6 +498,8 @@ def run_live_control_without_record(
     args: argparse.Namespace,
     debug_pose_state: dict[str, Any],
     control_state: dict[str, Any],
+    debug_markers: GarmentKeypointDebugMarkers | None = None,
+    debug_marker_state: dict[str, Any] | None = None,
 ) -> None:
     """Run live teleoperation control without recording."""
     actions = teleop_interface.advance()
@@ -428,6 +511,8 @@ def run_live_control_without_record(
     else:
         env.step(actions)
 
+    update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
+
     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
     if args.log_success:
         _ = env._get_success()
@@ -436,10 +521,12 @@ def run_live_control_without_record(
 __all__ = [
     "DEBUG_POSE_LOG_INTERVAL",
     "create_dataset_if_needed",
+    "create_debug_markers_if_needed",
     "create_teleop_interface",
     "register_teleop_callbacks",
     "run_idle_phase",
     "run_live_control_without_record",
     "run_recording_phase",
+    "update_debug_markers_if_needed",
     "validate_task_and_device",
 ]

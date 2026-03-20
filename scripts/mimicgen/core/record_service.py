@@ -16,6 +16,7 @@ from lehome.utils.logger import get_logger
 from .teleop_runtime import (
     DEBUG_POSE_LOG_INTERVAL,
     create_dataset_if_needed,
+    create_debug_markers_if_needed,
     create_teleop_interface,
     register_teleop_callbacks,
     run_idle_phase,
@@ -53,11 +54,13 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     flags = register_teleop_callbacks(teleop_interface, recording_enabled=args.enable_record)
     teleop_interface.reset()
     dataset = create_dataset_if_needed(env, args)
+    debug_markers = create_debug_markers_if_needed(args)
     count_render = 0
     printed_instructions = False
     idle_frame_counter = 0
     object_initial_pose = None
     debug_pose_state: dict[str, object] = {"step_count": 0, "eef_body_idx_cache": {}}
+    debug_marker_state: dict[str, object] = {"step_count": 0}
     control_state: dict[str, object] = {"maintain_action": None}
 
     if getattr(args, "debugging_log_pose", False):
@@ -77,6 +80,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         count_render,
                         debug_pose_state,
                         control_state,
+                        debug_markers,
+                        debug_marker_state,
                     )
                     if pose is not None:
                         object_initial_pose = pose
@@ -99,6 +104,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         dataset,
                         object_initial_pose,
                         control_state,
+                        debug_markers,
+                        debug_marker_state,
                     )
                     break
                 else:
@@ -108,6 +115,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         args,
                         debug_pose_state,
                         control_state,
+                        debug_markers,
+                        debug_marker_state,
                     )
     except KeyboardInterrupt:
         logger.warning("\n[Ctrl+C] Interrupt signal detected")
