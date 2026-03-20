@@ -5,11 +5,11 @@ subtask termination signals, and end-effector information for both arms.
 
 The garment keypoints (from GarmentObject.check_points) are mapped to
 semantic virtual objects used by mimic subtasks:
-  - garment_left_sleeve / garment_right_sleeve
-  - garment_left_bottom / garment_right_bottom
-  - garment_left_top / garment_right_top
-  - garment_top_center / garment_bottom_center
-  - garment_kp_left / garment_kp_right / garment_center (compatibility)
+  - garment_left_middle / garment_right_middle
+  - garment_left_lower / garment_right_lower
+  - garment_left_upper / garment_right_upper
+  - garment_upper_center / garment_lower_center
+  - garment_kp_left / garment_kp_right / garment_center
 
 These are stored as 4×4 homogeneous transforms (identity rotation, position from keypoints)
 in datagen_info.object_pose, compatible with MimicGen's DatagenInfo format.
@@ -40,8 +40,8 @@ _GRIPPER_JOINT_IDX = 5
 # Gripper is considered "closed" when joint angle exceeds this (radians)
 _GRIPPER_CLOSE_THRESHOLD = 0.5
 # Distance thresholds for semantic checkpoint transitions (meters)
-_SLEEVE_TO_BOTTOM_THRESHOLD_M = 0.10
-_BOTTOM_TO_TOP_THRESHOLD_M = 0.12
+_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
+_LOWER_TO_UPPER_THRESHOLD_M = 0.12
 
 
 def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
@@ -60,7 +60,7 @@ def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
 
 
 def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-    """Map six garment checkpoints using checkpoint_mappings.json."""
+    """Map six garment checkpoints using the shared semantic checkpoint order."""
     return map_semantic_keypoints_from_positions(kp_positions)
 
 
@@ -73,13 +73,11 @@ class GarmentDatagenRecorder(RecorderTerm):
     3. Transform trajectories relative to object frames (via eef_pose + object_pose)
 
     Subtask termination signals:
-    - grasp_left_sleeve / grasp_right_sleeve
-    - left_sleeve_to_bottom / right_sleeve_to_bottom
-    - grasp_left_bottom / grasp_right_bottom
-    - left_bottom_to_top / right_bottom_to_top
+    - grasp_left_middle / grasp_right_middle
+    - left_middle_to_lower / right_middle_to_lower
+    - grasp_left_lower / grasp_right_lower
+    - left_lower_to_upper / right_lower_to_upper
     - left_return_home / right_return_home
-    Legacy compatibility signals are also emitted:
-    - grasp_left / grasp_right / fold_complete
     """
 
     def __init__(self, cfg: RecorderTermCfg, env: ManagerBasedEnv):
@@ -162,8 +160,8 @@ class GarmentDatagenRecorder(RecorderTerm):
         """Compute virtual 4×4 object poses from garment keypoints.
 
         Groups the 6 check_points into:
-          - garment_kp_left:  centroid of left top, left sleeve, left bottom
-          - garment_kp_right: centroid of right top, right sleeve, right bottom
+          - garment_kp_left:  centroid of left upper, left middle, left lower
+          - garment_kp_right: centroid of right upper, right middle, right lower
           - garment_center:   centroid of all 6
 
         Returns:
@@ -220,10 +218,10 @@ class GarmentDatagenRecorder(RecorderTerm):
         """Compute binary subtask termination signals.
 
         Signals (0 → 1 edge marks subtask completion):
-          - grasp_left_sleeve / grasp_right_sleeve: gripper closed
-          - left_sleeve_to_bottom / right_sleeve_to_bottom: sleeve-bottom checkpoint distance threshold
-          - grasp_left_bottom / grasp_right_bottom: gripper closed after sleeve-to-bottom
-          - left_bottom_to_top / right_bottom_to_top: bottom-top checkpoint distance threshold
+          - grasp_left_middle / grasp_right_middle: gripper closed
+          - left_middle_to_lower / right_middle_to_lower: middle-lower checkpoint distance threshold
+          - grasp_left_lower / grasp_right_lower: gripper closed after middle-to-lower
+          - left_lower_to_upper / right_lower_to_upper: lower-upper checkpoint distance threshold
           - left_return_home / right_return_home: fold complete and both arms back at rest pose
 
         Returns:
@@ -236,13 +234,13 @@ class GarmentDatagenRecorder(RecorderTerm):
         left_gripper_pos = left_arm.data.joint_pos[:, _GRIPPER_JOINT_IDX]
         right_gripper_pos = right_arm.data.joint_pos[:, _GRIPPER_JOINT_IDX]
 
-        grasp_left_sleeve = (left_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
-        grasp_right_sleeve = (right_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
+        grasp_left_middle = (left_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
+        grasp_right_middle = (right_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
 
-        left_sleeve_to_bottom = torch.zeros(num_envs, 1, device=device)
-        right_sleeve_to_bottom = torch.zeros(num_envs, 1, device=device)
-        left_bottom_to_top = torch.zeros(num_envs, 1, device=device)
-        right_bottom_to_top = torch.zeros(num_envs, 1, device=device)
+        left_middle_to_lower = torch.zeros(num_envs, 1, device=device)
+        right_middle_to_lower = torch.zeros(num_envs, 1, device=device)
+        left_lower_to_upper = torch.zeros(num_envs, 1, device=device)
+        right_lower_to_upper = torch.zeros(num_envs, 1, device=device)
 
         garment_obj = getattr(env, "object", None)
         if garment_obj is not None and hasattr(garment_obj, "check_points"):
@@ -266,41 +264,41 @@ class GarmentDatagenRecorder(RecorderTerm):
                 if mesh_points is not None:
                     kp_positions = mesh_points[check_points]
                     sem = _semantic_keypoints_from_positions(kp_positions)
-                    left_sleeve_bottom_dist = float(
-                        np.linalg.norm(sem["garment_left_sleeve"] - sem["garment_left_bottom"])
+                    left_middle_lower_dist = float(
+                        np.linalg.norm(sem["garment_left_middle"] - sem["garment_left_lower"])
                     )
-                    right_sleeve_bottom_dist = float(
-                        np.linalg.norm(sem["garment_right_sleeve"] - sem["garment_right_bottom"])
+                    right_middle_lower_dist = float(
+                        np.linalg.norm(sem["garment_right_middle"] - sem["garment_right_lower"])
                     )
-                    left_bottom_top_dist = float(
-                        np.linalg.norm(sem["garment_left_bottom"] - sem["garment_left_top"])
+                    left_lower_upper_dist = float(
+                        np.linalg.norm(sem["garment_left_lower"] - sem["garment_left_upper"])
                     )
-                    right_bottom_top_dist = float(
-                        np.linalg.norm(sem["garment_right_bottom"] - sem["garment_right_top"])
-                    )
-
-                    left_sleeve_to_bottom_flag = left_sleeve_bottom_dist <= _SLEEVE_TO_BOTTOM_THRESHOLD_M
-                    right_sleeve_to_bottom_flag = right_sleeve_bottom_dist <= _SLEEVE_TO_BOTTOM_THRESHOLD_M
-                    bottom_to_top_flag = (
-                        left_bottom_top_dist <= _BOTTOM_TO_TOP_THRESHOLD_M
-                        and right_bottom_top_dist <= _BOTTOM_TO_TOP_THRESHOLD_M
+                    right_lower_upper_dist = float(
+                        np.linalg.norm(sem["garment_right_lower"] - sem["garment_right_upper"])
                     )
 
-                    if left_sleeve_to_bottom_flag:
-                        left_sleeve_to_bottom = torch.ones(num_envs, 1, device=device)
-                    if right_sleeve_to_bottom_flag:
-                        right_sleeve_to_bottom = torch.ones(num_envs, 1, device=device)
-                    if bottom_to_top_flag:
-                        left_bottom_to_top = torch.ones(num_envs, 1, device=device)
-                        right_bottom_to_top = torch.ones(num_envs, 1, device=device)
+                    left_middle_to_lower_flag = left_middle_lower_dist <= _MIDDLE_TO_LOWER_THRESHOLD_M
+                    right_middle_to_lower_flag = right_middle_lower_dist <= _MIDDLE_TO_LOWER_THRESHOLD_M
+                    lower_to_upper_flag = (
+                        left_lower_upper_dist <= _LOWER_TO_UPPER_THRESHOLD_M
+                        and right_lower_upper_dist <= _LOWER_TO_UPPER_THRESHOLD_M
+                    )
 
-        grasp_left_bottom = (
+                    if left_middle_to_lower_flag:
+                        left_middle_to_lower = torch.ones(num_envs, 1, device=device)
+                    if right_middle_to_lower_flag:
+                        right_middle_to_lower = torch.ones(num_envs, 1, device=device)
+                    if lower_to_upper_flag:
+                        left_lower_to_upper = torch.ones(num_envs, 1, device=device)
+                        right_lower_to_upper = torch.ones(num_envs, 1, device=device)
+
+        grasp_left_lower = (
             (left_gripper_pos > _GRIPPER_CLOSE_THRESHOLD)
-            & (left_sleeve_to_bottom.squeeze(-1) > 0.5)
+            & (left_middle_to_lower.squeeze(-1) > 0.5)
         ).float().unsqueeze(-1)
-        grasp_right_bottom = (
+        grasp_right_lower = (
             (right_gripper_pos > _GRIPPER_CLOSE_THRESHOLD)
-            & (right_sleeve_to_bottom.squeeze(-1) > 0.5)
+            & (right_middle_to_lower.squeeze(-1) > 0.5)
         ).float().unsqueeze(-1)
 
         # Fold completion: use success checker
@@ -335,18 +333,14 @@ class GarmentDatagenRecorder(RecorderTerm):
         ).float().unsqueeze(-1)
 
         return {
-            "grasp_left_sleeve": grasp_left_sleeve,
-            "grasp_right_sleeve": grasp_right_sleeve,
-            "left_sleeve_to_bottom": left_sleeve_to_bottom,
-            "right_sleeve_to_bottom": right_sleeve_to_bottom,
-            "grasp_left_bottom": grasp_left_bottom,
-            "grasp_right_bottom": grasp_right_bottom,
-            "left_bottom_to_top": left_bottom_to_top,
-            "right_bottom_to_top": right_bottom_to_top,
+            "grasp_left_middle": grasp_left_middle,
+            "grasp_right_middle": grasp_right_middle,
+            "left_middle_to_lower": left_middle_to_lower,
+            "right_middle_to_lower": right_middle_to_lower,
+            "grasp_left_lower": grasp_left_lower,
+            "grasp_right_lower": grasp_right_lower,
+            "left_lower_to_upper": left_lower_to_upper,
+            "right_lower_to_upper": right_lower_to_upper,
             "left_return_home": return_home_signal,
             "right_return_home": return_home_signal,
-            # Backward compatibility
-            "grasp_left": grasp_left_sleeve,
-            "grasp_right": grasp_right_sleeve,
-            "fold_complete": fold_signal,
         }

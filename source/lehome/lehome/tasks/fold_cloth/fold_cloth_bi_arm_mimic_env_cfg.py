@@ -5,10 +5,10 @@ Uses garment cloth keypoints as virtual object references so MimicGen can
 determine spatial relationships between the robot and grasp targets.
 
 Subtask phases:
-  1. Reach & grasp sleeves (both arms, coordinated)
-  2. Bring sleeves to bottom corners
-  3. Re-grasp bottom corners
-  4. Bring bottom corners to top corners (both arms, coordinated)
+  1. Reach & grasp middle keypoints (both arms, coordinated)
+  2. Bring middle keypoints to lower keypoints
+  3. Re-grasp lower keypoints
+  4. Bring lower keypoints to upper keypoints (both arms, coordinated)
   5. Return both arms to the home pose (both arms, coordinated)
 
 Task success in this environment is measured by:
@@ -61,11 +61,11 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
     source demo selection and trajectory transformation.
 
     Virtual objects (from garment check_points):
-      - garment_left_sleeve, garment_right_sleeve
-      - garment_left_bottom, garment_right_bottom
-      - garment_left_top, garment_right_top
-      - garment_top_center, garment_bottom_center
-      - garment_kp_left, garment_kp_right, garment_center (backward compatible)
+      - garment_left_middle, garment_right_middle
+      - garment_left_lower, garment_right_lower
+      - garment_left_upper, garment_right_upper
+      - garment_upper_center, garment_lower_center
+      - garment_kp_left, garment_kp_right, garment_center
     """
 
     def __post_init__(self):
@@ -98,11 +98,11 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # -----------------------------------------------------------------
         left_subtask_configs = []
 
-        # Subtask 0: Reach & grasp left sleeve
+        # Subtask 0: Reach & grasp left middle keypoint
         left_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_left_sleeve",
-                subtask_term_signal="grasp_left_sleeve",
+                object_ref="garment_left_middle",
+                subtask_term_signal="grasp_left_middle",
                 subtask_term_offset_range=(5, 15),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -110,16 +110,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Left arm reaches and grasps left sleeve",
-                next_subtask_description="Bring left sleeve to left bottom corner",
+                description="Left arm reaches and grasps left middle keypoint",
+                next_subtask_description="Bring left middle keypoint to left lower keypoint",
             )
         )
 
-        # Subtask 1: Bring left sleeve to left bottom corner
+        # Subtask 1: Bring left middle keypoint to left lower keypoint
         left_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_left_bottom",
-                subtask_term_signal="left_sleeve_to_bottom",
+                object_ref="garment_left_lower",
+                subtask_term_signal="left_middle_to_lower",
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -127,16 +127,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Left arm brings left sleeve to left bottom corner",
-                next_subtask_description="Re-grasp left bottom corner",
+                description="Left arm brings left middle keypoint to left lower keypoint",
+                next_subtask_description="Re-grasp left lower keypoint",
             )
         )
 
-        # Subtask 2: Re-grasp left bottom corner
+        # Subtask 2: Re-grasp left lower keypoint
         left_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_left_bottom",
-                subtask_term_signal="grasp_left_bottom",
+                object_ref="garment_left_lower",
+                subtask_term_signal="grasp_left_lower",
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -144,16 +144,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Left arm re-grasps left bottom corner",
-                next_subtask_description="Bring left bottom corner to left top corner",
+                description="Left arm re-grasps left lower keypoint",
+                next_subtask_description="Bring left lower keypoint to left upper keypoint",
             )
         )
 
-        # Subtask 3: Bring left bottom corner to left top corner
+        # Subtask 3: Bring left lower keypoint to left upper keypoint
         left_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_left_top",
-                subtask_term_signal="left_bottom_to_top",
+                object_ref="garment_left_upper",
+                subtask_term_signal="left_lower_to_upper",
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -161,7 +161,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Left arm brings left bottom corner to left top corner",
+                description="Left arm brings left lower keypoint to left upper keypoint",
                 next_subtask_description="Return left arm to home position",
             )
         )
@@ -188,11 +188,11 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # -----------------------------------------------------------------
         right_subtask_configs = []
 
-        # Subtask 0: Reach & grasp right sleeve
+        # Subtask 0: Reach & grasp right middle keypoint
         right_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_right_sleeve",
-                subtask_term_signal="grasp_right_sleeve",
+                object_ref="garment_right_middle",
+                subtask_term_signal="grasp_right_middle",
                 subtask_term_offset_range=(5, 15),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -200,16 +200,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Right arm reaches and grasps right sleeve",
-                next_subtask_description="Bring right sleeve to right bottom corner",
+                description="Right arm reaches and grasps right middle keypoint",
+                next_subtask_description="Bring right middle keypoint to right lower keypoint",
             )
         )
 
-        # Subtask 1: Bring right sleeve to right bottom corner
+        # Subtask 1: Bring right middle keypoint to right lower keypoint
         right_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_right_bottom",
-                subtask_term_signal="right_sleeve_to_bottom",
+                object_ref="garment_right_lower",
+                subtask_term_signal="right_middle_to_lower",
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -217,16 +217,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Right arm brings right sleeve to right bottom corner",
-                next_subtask_description="Re-grasp right bottom corner",
+                description="Right arm brings right middle keypoint to right lower keypoint",
+                next_subtask_description="Re-grasp right lower keypoint",
             )
         )
 
-        # Subtask 2: Re-grasp right bottom corner
+        # Subtask 2: Re-grasp right lower keypoint
         right_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_right_bottom",
-                subtask_term_signal="grasp_right_bottom",
+                object_ref="garment_right_lower",
+                subtask_term_signal="grasp_right_lower",
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -234,16 +234,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Right arm re-grasps right bottom corner",
-                next_subtask_description="Bring right bottom corner to right top corner",
+                description="Right arm re-grasps right lower keypoint",
+                next_subtask_description="Bring right lower keypoint to right upper keypoint",
             )
         )
 
-        # Subtask 3: Bring right bottom corner to right top corner
+        # Subtask 3: Bring right lower keypoint to right upper keypoint
         right_subtask_configs.append(
             SubTaskConfig(
-                object_ref="garment_right_top",
-                subtask_term_signal="right_bottom_to_top",
+                object_ref="garment_right_upper",
+                subtask_term_signal="right_lower_to_upper",
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
@@ -251,7 +251,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
-                description="Right arm brings right bottom corner to right top corner",
+                description="Right arm brings right lower keypoint to right upper keypoint",
                 next_subtask_description="Return right arm to home position",
             )
         )
@@ -286,21 +286,21 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
                 coordination_synchronize_start=True,
             ),
-            # Sleeve-to-bottom phase
+            # Middle-to-lower phase
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 1), ("right_arm", 1)],
                 constraint_type=SubTaskConstraintType.COORDINATION,
                 coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
                 coordination_synchronize_start=True,
             ),
-            # Bottom re-grasp phase
+            # Lower re-grasp phase
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 2)],
                 constraint_type=SubTaskConstraintType.COORDINATION,
                 coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
                 coordination_synchronize_start=True,
             ),
-            # Bottom-to-top fold phase
+            # Lower-to-upper fold phase
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 3)],
                 constraint_type=SubTaskConstraintType.COORDINATION,

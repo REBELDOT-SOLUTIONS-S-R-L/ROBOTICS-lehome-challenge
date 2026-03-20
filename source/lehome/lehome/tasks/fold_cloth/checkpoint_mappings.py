@@ -1,4 +1,4 @@
-"""Shared garment checkpoint semantics loaded from checkpoint_mappings.json."""
+"""Shared garment checkpoint semantics and per-garment checkpoint loading."""
 
 from __future__ import annotations
 
@@ -10,46 +10,49 @@ from typing import Any
 import numpy as np
 
 
-_MAPPINGS_PATH = Path(__file__).with_name("checkpoint_mappings.json")
+DEFAULT_GARMENT_CFG_BASE_PATH = "Assets/objects/Challenge_Garment"
+_REPO_ROOT = Path(__file__).resolve().parents[5]
+_GARMENT_TYPE_DIR_BY_PREFIX = {
+    "Top_Long": "Top_Long",
+    "Top_Short": "Top_Short",
+    "Pant_Long": "Pant_Long",
+    "Pant_Short": "Pant_Short",
+}
 
 
-@lru_cache(maxsize=1)
-def _load_checkpoint_mappings() -> dict[str, Any]:
-    with _MAPPINGS_PATH.open("r", encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-_MAPPINGS = _load_checkpoint_mappings()
-
-CHECKPOINT_LABELS = tuple(str(name) for name in _MAPPINGS["checkpoint_names_by_index"])
+CHECKPOINT_LABELS = (
+    "garment_left_upper",
+    "garment_right_upper",
+    "garment_left_middle",
+    "garment_right_middle",
+    "garment_left_lower",
+    "garment_right_lower",
+)
+CSV_TRACE_KEYPOINT_NAMES = CHECKPOINT_LABELS
 ARM_KEYPOINT_GROUPS = {
-    str(arm_name): tuple(str(name) for name in keypoint_names)
-    for arm_name, keypoint_names in _MAPPINGS["arm_keypoint_groups"].items()
+    "left_arm": tuple(name for name in CHECKPOINT_LABELS if "_left_" in name),
+    "right_arm": tuple(name for name in CHECKPOINT_LABELS if "_right_" in name),
 }
-CSV_TRACE_KEYPOINT_NAMES = tuple(
-    str(name) for name in _MAPPINGS["csv_trace_keypoint_names"]
-)
 CENTER_GROUPS = {
-    str(group_name): tuple(str(name) for name in members)
-    for group_name, members in _MAPPINGS["center_groups"].items()
+    "garment_upper_center": (
+        "garment_left_upper",
+        "garment_right_upper",
+    ),
+    "garment_lower_center": (
+        "garment_left_lower",
+        "garment_right_lower",
+    ),
+    "garment_kp_left": ARM_KEYPOINT_GROUPS["left_arm"],
+    "garment_kp_right": ARM_KEYPOINT_GROUPS["right_arm"],
+    "garment_center": CHECKPOINT_LABELS,
 }
-SUCCESS_DISTANCE_SPECS = tuple(
-    (
-        str(item["name"]),
-        str(item["src"]),
-        str(item["dst"]),
-        float(item["threshold_m"]),
-    )
-    for item in _MAPPINGS["success_distance_specs"]
+SUCCESS_DISTANCE_SPECS = (
+    ("left_middle_to_lower", "garment_left_middle", "garment_left_lower", 0.10),
+    ("right_middle_to_lower", "garment_right_middle", "garment_right_lower", 0.10),
+    ("left_lower_to_upper", "garment_left_lower", "garment_left_upper", 0.12),
+    ("right_lower_to_upper", "garment_right_lower", "garment_right_upper", 0.12),
 )
-GARMENT_CHECKPOINT_CONFIGS = {
-    str(version): {
-        str(garment_name): dict(config)
-        for garment_name, config in garments.items()
-    }
-    for version, garments in _MAPPINGS.get("garments", {}).items()
-}
-REQUIRED_MIMIC_OBJECT_REFS = tuple(CHECKPOINT_LABELS)
+REQUIRED_MIMIC_OBJECT_REFS = CHECKPOINT_LABELS
 
 
 class ClothObjectPoseUnavailableError(RuntimeError):
@@ -58,6 +61,85 @@ class ClothObjectPoseUnavailableError(RuntimeError):
 
 class ClothObjectPoseValidationError(ValueError):
     """Raised when garment object poses exist structurally but are semantically invalid."""
+
+
+def _resolve_garment_base_path(base_path: str | Path) -> Path:
+    base_path = Path(base_path)
+    if base_path.is_absolute():
+        return base_path
+    return _REPO_ROOT / base_path
+
+
+def _get_garment_type_dir(garment_name: str) -> str:
+    parts = garment_name.split("_")
+    if len(parts) < 2:
+        raise ValueError(
+            f"Invalid garment name format: {garment_name!r}. "
+            "Expected format like 'Top_Long_Unseen_0'."
+        )
+    garment_prefix = f"{parts[0]}_{parts[1]}"
+    try:
+        return _GARMENT_TYPE_DIR_BY_PREFIX[garment_prefix]
+    except KeyError as exc:
+        raise ValueError(
+            f"Unknown garment type prefix {garment_prefix!r} for garment {garment_name!r}."
+        ) from exc
+
+
+def _find_garment_config_path(
+    garment_name: str,
+    version: str,
+    base_path: str | Path,
+) -> Path:
+    garment_dir = _resolve_garment_base_path(base_path) / version / _get_garment_type_dir(garment_name) / garment_name
+    if not garment_dir.is_dir():
+        raise FileNotFoundError(f"Garment directory not found: {garment_dir}")
+
+    candidates = sorted(garment_dir.glob("*_obj_exp.json"))
+    if not candidates:
+        candidates = sorted(garment_dir.glob("*.json"))
+    if not candidates:
+        raise FileNotFoundError(f"No garment JSON configuration found under: {garment_dir}")
+    return candidates[0]
+
+
+@lru_cache(maxsize=None)
+def _load_garment_config_raw(
+    garment_name: str,
+    version: str = "Release",
+    base_path: str = DEFAULT_GARMENT_CFG_BASE_PATH,
+) -> dict[str, Any]:
+    config_path = _find_garment_config_path(
+        garment_name=garment_name,
+        version=version,
+        base_path=base_path,
+    )
+    with config_path.open("r", encoding="utf-8") as handle:
+        config = json.load(handle)
+    if not isinstance(config, dict):
+        raise ValueError(
+            f"Expected garment JSON object at {config_path}, got {type(config).__name__}."
+        )
+    return config
+
+
+def _extract_checkpoint_indices(
+    garment_name: str,
+    version: str = "Release",
+    base_path: str = DEFAULT_GARMENT_CFG_BASE_PATH,
+) -> tuple[int, ...]:
+    config = _load_garment_config_raw(
+        garment_name=garment_name,
+        version=version,
+        base_path=base_path,
+    )
+    checkpoint_indices = tuple(int(idx) for idx in config.get("check_point", []))
+    if len(checkpoint_indices) < len(CHECKPOINT_LABELS):
+        raise ValueError(
+            f"Garment {garment_name!r} ({version}) exposes {len(checkpoint_indices)} checkpoints, "
+            f"expected at least {len(CHECKPOINT_LABELS)}."
+        )
+    return checkpoint_indices
 
 
 def semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
@@ -151,17 +233,41 @@ def validate_semantic_object_pose_dict(
         )
 
 
-def get_garment_checkpoint_config(garment_name: str, version: str = "Release") -> dict[str, Any]:
-    """Return per-garment checkpoint metadata loaded from checkpoint_mappings.json."""
-    try:
-        return GARMENT_CHECKPOINT_CONFIGS[version][garment_name]
-    except KeyError as exc:
-        raise KeyError(
-            f"No checkpoint mapping found for garment_name={garment_name!r}, version={version!r}"
-        ) from exc
+def get_garment_checkpoint_config(
+    garment_name: str,
+    version: str = "Release",
+    base_path: str = DEFAULT_GARMENT_CFG_BASE_PATH,
+) -> dict[str, Any]:
+    """Return per-garment checkpoint metadata derived from the raw garment JSON."""
+    config_path = _find_garment_config_path(
+        garment_name=garment_name,
+        version=version,
+        base_path=base_path,
+    )
+    checkpoint_indices = _extract_checkpoint_indices(
+        garment_name=garment_name,
+        version=version,
+        base_path=base_path,
+    )
+    return {
+        "garment_type_dir": _get_garment_type_dir(garment_name),
+        "config_path": str(config_path.relative_to(_resolve_garment_base_path(base_path)).as_posix()),
+        "checkpoint_indices": checkpoint_indices,
+        "checkpoint_name_to_index": {
+            checkpoint_name: checkpoint_indices[idx]
+            for idx, checkpoint_name in enumerate(CHECKPOINT_LABELS)
+        },
+    }
 
 
-def get_garment_checkpoint_indices(garment_name: str, version: str = "Release") -> tuple[int, ...]:
+def get_garment_checkpoint_indices(
+    garment_name: str,
+    version: str = "Release",
+    base_path: str = DEFAULT_GARMENT_CFG_BASE_PATH,
+) -> tuple[int, ...]:
     """Return the raw check_point indices for a garment."""
-    config = get_garment_checkpoint_config(garment_name, version)
-    return tuple(int(idx) for idx in config.get("checkpoint_indices", []))
+    return _extract_checkpoint_indices(
+        garment_name=garment_name,
+        version=version,
+        base_path=base_path,
+    )

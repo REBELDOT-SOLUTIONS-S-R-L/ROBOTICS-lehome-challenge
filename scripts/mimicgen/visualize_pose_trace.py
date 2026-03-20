@@ -17,38 +17,38 @@ import numpy as np
 
 
 TRACE_EEF_KEYPOINT_COLUMNS = (
-    "dist_left_arm_to_garment_left_sleeve_m",
-    "dist_left_arm_to_garment_left_bottom_m",
-    "dist_left_arm_to_garment_left_top_m",
-    "dist_right_arm_to_garment_right_sleeve_m",
-    "dist_right_arm_to_garment_right_bottom_m",
-    "dist_right_arm_to_garment_right_top_m",
+    "dist_left_arm_to_garment_left_middle_m",
+    "dist_left_arm_to_garment_left_lower_m",
+    "dist_left_arm_to_garment_left_upper_m",
+    "dist_right_arm_to_garment_right_middle_m",
+    "dist_right_arm_to_garment_right_lower_m",
+    "dist_right_arm_to_garment_right_upper_m",
 )
 TRACE_TERM_COLUMNS = (
-    ("dist_left_sleeve_to_bottom_m", "threshold_left_sleeve_to_bottom_m"),
-    ("dist_right_sleeve_to_bottom_m", "threshold_right_sleeve_to_bottom_m"),
-    ("dist_left_bottom_to_top_m", "threshold_left_bottom_to_top_m"),
-    ("dist_right_bottom_to_top_m", "threshold_right_bottom_to_top_m"),
+    ("dist_left_middle_to_lower_m", "threshold_left_middle_to_lower_m"),
+    ("dist_right_middle_to_lower_m", "threshold_right_middle_to_lower_m"),
+    ("dist_left_lower_to_upper_m", "threshold_left_lower_to_upper_m"),
+    ("dist_right_lower_to_upper_m", "threshold_right_lower_to_upper_m"),
 )
 TRACE_Z_COLUMNS = (
     "eef_left_arm_z",
     "eef_right_arm_z",
-    "keypoint_garment_left_sleeve_z",
-    "keypoint_garment_left_bottom_z",
-    "keypoint_garment_left_top_z",
-    "keypoint_garment_right_sleeve_z",
-    "keypoint_garment_right_bottom_z",
-    "keypoint_garment_right_top_z",
+    "keypoint_garment_left_middle_z",
+    "keypoint_garment_left_lower_z",
+    "keypoint_garment_left_upper_z",
+    "keypoint_garment_right_middle_z",
+    "keypoint_garment_right_lower_z",
+    "keypoint_garment_right_upper_z",
 )
 TRACE_3D_SPECS = (
     ("left eef", "eef_left_arm", "#1f77b4", "-", 2.2),
     ("right eef", "eef_right_arm", "#d62728", "-", 2.2),
-    ("left sleeve", "keypoint_garment_left_sleeve", "#17becf", "--", 1.6),
-    ("left bottom", "keypoint_garment_left_bottom", "#2ca02c", "--", 1.6),
-    ("left top", "keypoint_garment_left_top", "#9467bd", "--", 1.6),
-    ("right sleeve", "keypoint_garment_right_sleeve", "#ff7f0e", "--", 1.6),
-    ("right bottom", "keypoint_garment_right_bottom", "#8c564b", "--", 1.6),
-    ("right top", "keypoint_garment_right_top", "#e377c2", "--", 1.6),
+    ("left upper", "keypoint_garment_left_upper", "#9467bd", "--", 1.6),
+    ("left middle", "keypoint_garment_left_middle", "#17becf", "--", 1.6),
+    ("left lower", "keypoint_garment_left_lower", "#2ca02c", "--", 1.6),
+    ("right upper", "keypoint_garment_right_upper", "#e377c2", "--", 1.6),
+    ("right middle", "keypoint_garment_right_middle", "#ff7f0e", "--", 1.6),
+    ("right lower", "keypoint_garment_right_lower", "#8c564b", "--", 1.6),
 )
 INT_COLUMNS = {
     "step",

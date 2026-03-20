@@ -31,6 +31,7 @@ from isaaclab.envs.mdp import joint_pos as mdp_joint_pos
 from isaaclab.envs.mdp import last_action as mdp_last_action
 
 from .mdp import garment_folded
+from .mdp import robot_rest_pose as mdp_robot_rest_pose
 
 from lehome.assets.robots.lerobot import (
     SO101_FOLLOWER_CFG,
@@ -186,7 +187,7 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation specifications — joint positions and last action."""
+    """Observation specifications — joint positions, last action, and rest pose."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -201,6 +202,7 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("right_arm")},
         )
         actions = ObsTerm(func=mdp_last_action)
+        robot_rest_pose = ObsTerm(func=mdp_robot_rest_pose)
 
         def __post_init__(self):
             self.enable_corruption = False

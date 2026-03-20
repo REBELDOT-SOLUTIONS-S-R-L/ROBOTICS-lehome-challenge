@@ -303,9 +303,9 @@ DUAL_ARM_SETTLE_ACTION = np.concatenate(
     ]
 ).astype(np.float32)
 TRACE_EEF_NAMES = ("left_arm", "right_arm")
-# CSV trace columns stay grouped semantically by arm. The raw garment checkpoint
-# convention is defined centrally in checkpoint_mappings.json:
-# p0=left_top, p1=right_top, p2=left_sleeve, p3=right_sleeve, p4=left_bottom, p5=right_bottom.
+# CSV trace columns stay in the shared semantic checkpoint order defined in
+# checkpoint_mappings.py:
+# p0=left_upper, p1=right_upper, p2=left_middle, p3=right_middle, p4=left_lower, p5=right_lower.
 TRACE_KEYPOINT_NAMES = CSV_TRACE_KEYPOINT_NAMES
 TRACE_EEF_KEYPOINT_GROUPS = ARM_KEYPOINT_GROUPS
 TRACE_SUCCESS_DISTANCE_SPECS = SUCCESS_DISTANCE_SPECS
