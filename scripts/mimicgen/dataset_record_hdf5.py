@@ -509,7 +509,7 @@ def _log_debug_pose_snapshot_if_enabled(
 
 
 class DirectHDF5Recorder:
-    """Streaming recorder that writes teleop episodes directly into HDF5."""
+    """Episode-buffered recorder that flushes teleop data into HDF5 on finalize."""
 
     _ACTIVE_EPISODE_NAME = "_active_demo"
 
@@ -539,6 +539,8 @@ class DirectHDF5Recorder:
         self._active_datasets: Dict[str, Any] = {}
         self._active_episode_meta: Optional[Dict[str, Any]] = None
         self._active_num_samples = 0
+        self._episode_frames: list[Dict[str, Any]] = []
+        self._episode_articulation_states: list[Dict[str, Dict[str, np.ndarray]]] = []
 
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
         self._file = h5py.File(self._file_path, "w")
@@ -577,6 +579,8 @@ class DirectHDF5Recorder:
         self._active_datasets = {}
         self._active_episode_meta = None
         self._active_num_samples = 0
+        self._episode_frames = []
+        self._episode_articulation_states = []
 
     def _ensure_group(self, path: str) -> Any:
         if self._active_group is None:
@@ -912,6 +916,194 @@ class DirectHDF5Recorder:
             rgb = rgb[..., :3]
         self._append_dataset(target_path, rgb, dtype=np.uint8)
 
+    def _normalize_rgb_frame(self, frame_value: Any) -> Optional[np.ndarray]:
+        if frame_value is None:
+            return None
+        rgb = _as_numpy(frame_value, dtype=np.uint8)
+        if rgb.ndim == 4:
+            rgb = rgb.squeeze(0)
+        if rgb.ndim != 3 or rgb.shape[-1] not in (3, 4):
+            return None
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        return rgb
+
+    @staticmethod
+    def _normalize_buffer_sample(value: Any, dtype: Optional[np.dtype] = None) -> np.ndarray:
+        arr = _as_numpy(value, dtype=dtype)
+        if arr.ndim == 0:
+            arr = arr.reshape(1)
+        return arr
+
+    def _stack_buffer_key(self, key: str, dtype: np.dtype) -> np.ndarray:
+        stacked: list[np.ndarray] = []
+        for frame in self._episode_frames:
+            if key not in frame:
+                raise KeyError(f"Missing buffered frame key '{key}' while finalizing episode.")
+            stacked.append(self._normalize_buffer_sample(frame[key], dtype=dtype))
+        return np.stack(stacked, axis=0)
+
+    def _stack_optional_buffer_key(self, key: str, dtype: np.dtype) -> Optional[np.ndarray]:
+        stacked: list[np.ndarray] = []
+        for frame in self._episode_frames:
+            value = frame.get(key)
+            if value is None:
+                return None
+            stacked.append(self._normalize_buffer_sample(value, dtype=dtype))
+        if not stacked:
+            return None
+        return np.stack(stacked, axis=0)
+
+    def _extract_joint_velocities_from_buffer(
+        self, num_frames: int
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        left = np.zeros((num_frames, 6), dtype=np.float32)
+        right = np.zeros((num_frames, 6), dtype=np.float32)
+        single = np.zeros((num_frames, 6), dtype=np.float32)
+
+        for i, articulation in enumerate(self._episode_articulation_states):
+            if not isinstance(articulation, dict):
+                continue
+
+            if "left_arm" in articulation and "joint_velocity" in articulation["left_arm"]:
+                arr = _as_numpy(articulation["left_arm"]["joint_velocity"], dtype=np.float32)
+                if arr.ndim == 1 and arr.shape[0] >= 6:
+                    left[i] = arr[:6]
+            if "right_arm" in articulation and "joint_velocity" in articulation["right_arm"]:
+                arr = _as_numpy(articulation["right_arm"]["joint_velocity"], dtype=np.float32)
+                if arr.ndim == 1 and arr.shape[0] >= 6:
+                    right[i] = arr[:6]
+
+            robot_state = articulation.get("robot")
+            if isinstance(robot_state, dict) and "joint_velocity" in robot_state:
+                arr = _as_numpy(robot_state["joint_velocity"], dtype=np.float32)
+                if arr.ndim == 1 and arr.shape[0] >= 6:
+                    single[i] = arr[:6]
+                    continue
+
+            for _, entity in sorted(articulation.items()):
+                if not isinstance(entity, dict):
+                    continue
+                if "joint_velocity" not in entity:
+                    continue
+                arr = _as_numpy(entity["joint_velocity"], dtype=np.float32)
+                if arr.ndim == 1 and arr.shape[0] >= 6:
+                    single[i] = arr[:6]
+                    break
+
+        return left, right, single
+
+    def _write_buffered_obs_group(self, joint_actions: np.ndarray) -> None:
+        obs_group = self._ensure_group("obs")
+        obs_group.create_dataset("actions", data=joint_actions, compression=self._compression)
+
+        joint_pos = self._stack_buffer_key("joint_pos", dtype=np.float32)
+        joint_vel_left, joint_vel_right, joint_vel_single = self._extract_joint_velocities_from_buffer(
+            num_frames=joint_pos.shape[0]
+        )
+
+        if self._is_bi_arm:
+            left_joint_pos = joint_pos[:, :6]
+            right_joint_pos = joint_pos[:, 6:12]
+            left_target = joint_actions[:, :6]
+            right_target = joint_actions[:, 6:12]
+
+            obs_group.create_dataset("left_joint_pos", data=left_joint_pos, compression=self._compression)
+            obs_group.create_dataset("right_joint_pos", data=right_joint_pos, compression=self._compression)
+            obs_group.create_dataset("left_joint_pos_target", data=left_target, compression=self._compression)
+            obs_group.create_dataset("right_joint_pos_target", data=right_target, compression=self._compression)
+            obs_group.create_dataset(
+                "left_joint_pos_rel", data=(left_target - left_joint_pos), compression=self._compression
+            )
+            obs_group.create_dataset(
+                "right_joint_pos_rel", data=(right_target - right_joint_pos), compression=self._compression
+            )
+            obs_group.create_dataset("left_joint_vel", data=joint_vel_left, compression=self._compression)
+            obs_group.create_dataset("right_joint_vel", data=joint_vel_right, compression=self._compression)
+            obs_group.create_dataset("left_joint_vel_rel", data=joint_vel_left, compression=self._compression)
+            obs_group.create_dataset("right_joint_vel_rel", data=joint_vel_right, compression=self._compression)
+
+            ee_frame_state = self._stack_optional_buffer_key("ee_frame_state", dtype=np.float32)
+            if ee_frame_state is not None and ee_frame_state.ndim == 2 and ee_frame_state.shape[1] >= 14:
+                obs_group.create_dataset(
+                    "left_ee_frame_state", data=ee_frame_state[:, :7], compression=self._compression
+                )
+                obs_group.create_dataset(
+                    "right_ee_frame_state", data=ee_frame_state[:, 7:14], compression=self._compression
+                )
+
+            top_rgb = self._stack_optional_buffer_key("top_rgb", dtype=np.uint8)
+            if top_rgb is not None:
+                obs_group.create_dataset("top", data=top_rgb, compression=self._compression)
+            left_rgb = self._stack_optional_buffer_key("left_rgb", dtype=np.uint8)
+            if left_rgb is not None:
+                obs_group.create_dataset("left_wrist", data=left_rgb, compression=self._compression)
+            right_rgb = self._stack_optional_buffer_key("right_rgb", dtype=np.uint8)
+            if right_rgb is not None:
+                obs_group.create_dataset("right_wrist", data=right_rgb, compression=self._compression)
+        else:
+            single_joint_pos = joint_pos[:, :6]
+            single_target = joint_actions[:, :6]
+            obs_group.create_dataset("joint_pos", data=single_joint_pos, compression=self._compression)
+            obs_group.create_dataset("joint_pos_target", data=single_target, compression=self._compression)
+            obs_group.create_dataset(
+                "joint_pos_rel", data=(single_target - single_joint_pos), compression=self._compression
+            )
+            obs_group.create_dataset("joint_vel", data=joint_vel_single, compression=self._compression)
+            obs_group.create_dataset("joint_vel_rel", data=joint_vel_single, compression=self._compression)
+
+            ee_frame_state = self._stack_optional_buffer_key("ee_frame_state", dtype=np.float32)
+            if ee_frame_state is not None and ee_frame_state.ndim == 2 and ee_frame_state.shape[1] >= 7:
+                obs_group.create_dataset("ee_frame_state", data=ee_frame_state[:, :7], compression=self._compression)
+
+            top_rgb = self._stack_optional_buffer_key("top_rgb", dtype=np.uint8)
+            if top_rgb is not None:
+                obs_group.create_dataset("top", data=top_rgb, compression=self._compression)
+            wrist_rgb = self._stack_optional_buffer_key("wrist_rgb", dtype=np.uint8)
+            if wrist_rgb is not None:
+                obs_group.create_dataset("wrist", data=wrist_rgb, compression=self._compression)
+
+    def _write_buffered_state_groups(self) -> None:
+        states_group = self._ensure_group("states")
+        articulation_group = self._ensure_group("states/articulation")
+
+        if not self._episode_articulation_states:
+            return
+
+        series_by_arm: Dict[str, Dict[str, list[np.ndarray]]] = {}
+        for articulation in self._episode_articulation_states:
+            if not isinstance(articulation, dict):
+                continue
+            for arm_name, state in articulation.items():
+                if not isinstance(state, dict):
+                    continue
+                arm_series = series_by_arm.setdefault(arm_name, {})
+                for key, value in state.items():
+                    arm_series.setdefault(key, []).append(_as_numpy(value, dtype=np.float32))
+
+        for arm_name, state_series in sorted(series_by_arm.items()):
+            arm_group = articulation_group.create_group(arm_name)
+            for key, values in sorted(state_series.items()):
+                if not values:
+                    continue
+                arm_group.create_dataset(
+                    key,
+                    data=np.stack(values, axis=0).astype(np.float32, copy=False),
+                    compression=self._compression,
+                )
+
+    def _flush_buffered_episode_to_hdf5(self) -> None:
+        if self._active_group is None:
+            raise RuntimeError("Cannot flush buffered episode without an active group.")
+        if not self._episode_frames:
+            return
+
+        joint_actions = self._stack_buffer_key("action", dtype=np.float32)
+        self._active_group.create_dataset("actions", data=joint_actions, compression=self._compression)
+        self._active_group.create_dataset("processed_actions", data=joint_actions, compression=self._compression)
+        self._write_buffered_obs_group(joint_actions)
+        self._write_buffered_state_groups()
+
     def append_frame(self, frame: Dict[str, Any]) -> None:
         if self._active_group is None:
             raise RuntimeError("Cannot append a frame without an active episode.")
@@ -920,69 +1112,34 @@ class DirectHDF5Recorder:
         joint_pos = _as_numpy(frame["observation.state"], dtype=np.float32).reshape(-1)
         articulation_state, ee_frame_state = self._capture_articulation_snapshot()
 
-        self._append_dataset("actions", joint_action, dtype=np.float32)
-        self._append_dataset("processed_actions", joint_action, dtype=np.float32)
-        self._append_dataset("obs/actions", joint_action, dtype=np.float32)
+        frame_to_store: Dict[str, Any] = {
+            "action": joint_action,
+            "joint_pos": joint_pos,
+        }
+        if ee_frame_state is not None:
+            frame_to_store["ee_frame_state"] = ee_frame_state
+
+        top_rgb = self._normalize_rgb_frame(frame.get("observation.images.top_rgb"))
+        if top_rgb is not None:
+            frame_to_store["top_rgb"] = top_rgb
 
         if self._is_bi_arm:
-            left_joint_pos = joint_pos[:6]
-            right_joint_pos = joint_pos[6:12]
-            left_target = joint_action[:6]
-            right_target = joint_action[6:12]
-            left_state = articulation_state.get("left_arm", {})
-            right_state = articulation_state.get("right_arm", {})
-            left_joint_vel = _as_numpy(left_state.get("joint_velocity", np.zeros(6)), dtype=np.float32).reshape(-1)
-            right_joint_vel = _as_numpy(right_state.get("joint_velocity", np.zeros(6)), dtype=np.float32).reshape(-1)
-
-            self._append_dataset("obs/left_joint_pos", left_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/right_joint_pos", right_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/left_joint_pos_target", left_target, dtype=np.float32)
-            self._append_dataset("obs/right_joint_pos_target", right_target, dtype=np.float32)
-            self._append_dataset("obs/left_joint_pos_rel", left_target - left_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/right_joint_pos_rel", right_target - right_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/left_joint_vel", left_joint_vel, dtype=np.float32)
-            self._append_dataset("obs/right_joint_vel", right_joint_vel, dtype=np.float32)
-            self._append_dataset("obs/left_joint_vel_rel", left_joint_vel, dtype=np.float32)
-            self._append_dataset("obs/right_joint_vel_rel", right_joint_vel, dtype=np.float32)
-
-            if ee_frame_state is not None and ee_frame_state.shape[0] >= 14:
-                self._append_dataset("obs/left_ee_frame_state", ee_frame_state[:7], dtype=np.float32)
-                self._append_dataset("obs/right_ee_frame_state", ee_frame_state[7:14], dtype=np.float32)
-
-            self._append_rgb_if_available("obs/top", frame.get("observation.images.top_rgb"))
-            self._append_rgb_if_available("obs/left_wrist", frame.get("observation.images.left_rgb"))
-            self._append_rgb_if_available("obs/right_wrist", frame.get("observation.images.right_rgb"))
+            left_rgb = self._normalize_rgb_frame(frame.get("observation.images.left_rgb"))
+            if left_rgb is not None:
+                frame_to_store["left_rgb"] = left_rgb
+            right_rgb = self._normalize_rgb_frame(frame.get("observation.images.right_rgb"))
+            if right_rgb is not None:
+                frame_to_store["right_rgb"] = right_rgb
         else:
-            joint_target = joint_action[:6]
-            single_joint_pos = joint_pos[:6]
-            arm_name = self._state_arm_names[0]
-            arm_state = articulation_state.get(arm_name, {})
-            joint_vel = _as_numpy(arm_state.get("joint_velocity", np.zeros(6)), dtype=np.float32).reshape(-1)
+            wrist_rgb = self._normalize_rgb_frame(frame.get("observation.images.wrist_rgb"))
+            if wrist_rgb is not None:
+                frame_to_store["wrist_rgb"] = wrist_rgb
 
-            self._append_dataset("obs/joint_pos", single_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/joint_pos_target", joint_target, dtype=np.float32)
-            self._append_dataset("obs/joint_pos_rel", joint_target - single_joint_pos, dtype=np.float32)
-            self._append_dataset("obs/joint_vel", joint_vel, dtype=np.float32)
-            self._append_dataset("obs/joint_vel_rel", joint_vel, dtype=np.float32)
-
-            if ee_frame_state is not None and ee_frame_state.shape[0] >= 7:
-                self._append_dataset("obs/ee_frame_state", ee_frame_state[:7], dtype=np.float32)
-
-            self._append_rgb_if_available("obs/top", frame.get("observation.images.top_rgb"))
-            self._append_rgb_if_available("obs/wrist", frame.get("observation.images.wrist_rgb"))
-
-        for arm_name, state in articulation_state.items():
-            for key, value in state.items():
-                self._append_dataset(
-                    f"states/articulation/{arm_name}/{key}",
-                    value,
-                    dtype=np.float32,
-                )
+        self._episode_frames.append(frame_to_store)
+        self._episode_articulation_states.append(articulation_state)
 
         self._active_num_samples += 1
         self._active_group.attrs["num_samples"] = np.int64(self._active_num_samples)
-        if self._active_num_samples % self._flush_steps == 0:
-            self._file.flush()
 
     def add_frame(self, frame: Dict[str, Any]) -> None:
         self.append_frame(frame)
@@ -1002,6 +1159,8 @@ class DirectHDF5Recorder:
         if self._active_num_samples <= 0:
             self.discard_episode()
             return
+
+        self._flush_buffered_episode_to_hdf5()
 
         demo_name = f"demo_{self._demo_count}"
         if demo_name in self._data_group:
