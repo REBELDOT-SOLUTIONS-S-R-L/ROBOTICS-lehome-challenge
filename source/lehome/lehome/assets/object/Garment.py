@@ -368,8 +368,8 @@ class GarmentObject(SingleClothPrim):
         # set local pose for initialization (wait for the update of scene manager)
         self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
 
-        self.physics_sim_view = SimulationManager.get_physics_sim_view()
-        if self.physics_sim_view is not None:
+        if "cuda" in self._device:
+            self.physics_sim_view = SimulationManager.get_physics_sim_view()
             self._cloth_prim_view.initialize(self.physics_sim_view)
 
         self._get_initial_info()
@@ -499,8 +499,7 @@ class GarmentObject(SingleClothPrim):
         normalized_indices = self._normalize_checkpoint_indices(checkpoint_indices)
 
         try:
-            cloth_physics_view = getattr(getattr(self, "_cloth_prim_view", None), "_physics_view", None)
-            if cloth_physics_view is not None:
+            if "cuda" in str(self._device):
                 world_positions = self._cloth_prim_view.get_world_positions(clone=clone)
                 if not torch.is_tensor(world_positions):
                     world_positions = torch.as_tensor(
