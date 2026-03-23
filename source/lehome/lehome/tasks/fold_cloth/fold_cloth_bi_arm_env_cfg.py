@@ -269,6 +269,7 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
         render_interval=1,
         render=render_cfg,
         use_fabric=False,
+        device="cuda:0",
     )
 
     # Garment configuration
