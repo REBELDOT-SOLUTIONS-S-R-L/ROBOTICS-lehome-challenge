@@ -35,10 +35,8 @@ from isaaclab_tasks.utils.parse_cfg import parse_env_cfg
 import lehome.tasks  # noqa: F401
 
 from .annotation_runtime import (
-    annotate_episode_in_auto_mode,
-    annotate_episode_in_manual_mode,
+    annotate_episode,
     build_replay_runtime_context,
-    get_robot_eef_pose_world,
     normalize_manual_subtask_signal_name,
     prepare_replay_plan,
     recover_from_object_pose_capture_failure,
@@ -54,6 +52,7 @@ from .env_setup import apply_common_mimic_env_overrides
 from .env_setup import assign_env_garment_metadata
 from .env_setup import resolve_env_garment_metadata
 from .env_setup import resolve_task_type as _resolve_task_type
+from .robot_utils import get_robot_eef_pose_world
 
 try:
     from scripts.utils.annotate_utils import (
@@ -345,29 +344,18 @@ def run_annotation(parsed_args, simulation_app_instance, *, cli_argv: list[str] 
                     for attempt_index in range(OBJECT_POSE_CAPTURE_MAX_ATTEMPTS):
                         session.reset_attempt_state()
                         try:
-                            if args_cli.auto:
-                                is_episode_annotated_successfully = annotate_episode_in_auto_mode(
-                                    env,
-                                    episode,
-                                    replay_plan,
-                                    replay_runtime,
-                                    session,
-                                    args_cli,
-                                    task_type,
-                                    success_term,
-                                )
-                            else:
-                                is_episode_annotated_successfully = annotate_episode_in_manual_mode(
-                                    env,
-                                    episode,
-                                    replay_plan,
-                                    replay_runtime,
-                                    session,
-                                    args_cli,
-                                    task_type,
-                                    success_term,
-                                    subtask_term_signal_names,
-                                )
+                            is_episode_annotated_successfully = annotate_episode(
+                                env,
+                                episode,
+                                replay_plan,
+                                replay_runtime,
+                                session,
+                                args_cli,
+                                auto=bool(args_cli.auto),
+                                task_type=task_type,
+                                success_term=success_term,
+                                subtask_term_signal_names=subtask_term_signal_names,
+                            )
                             object_pose_failure = None
                             break
                         except DatagenObjectPoseCaptureError as exc:
