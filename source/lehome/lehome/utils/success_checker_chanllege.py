@@ -37,22 +37,14 @@ def calculate_distance(point_a, point_b):
 
 def get_object_particle_position(particle_object, index_list):
     try:
-        _, mesh_points, _, _ = particle_object.get_current_mesh_points()
-    except Exception as e1:
-        try:
-            logger.error(f"Error in get_object_particle_position: {e1}")
-            mesh_points = (
-                particle_object._cloth_prim_view.get_world_positions()
-                .squeeze(0)
-                .detach()
-                .cpu()
-                .numpy()
-            )
-        except Exception as e2:
-            logger.error(f"Error in get_object_particle_position: {e2}")
-            return
-    positions = (mesh_points[index_list] * 100).tolist()
-    return positions
+        checkpoint_positions = particle_object.get_checkpoint_world_positions(
+            index_list,
+            as_numpy=True,
+        )
+    except Exception as exc:
+        logger.error(f"Error in get_object_particle_position: {exc}")
+        return None
+    return (np.asarray(checkpoint_positions, dtype=np.float32) * 100.0).tolist()
 
 
 @step_interval(interval=50)

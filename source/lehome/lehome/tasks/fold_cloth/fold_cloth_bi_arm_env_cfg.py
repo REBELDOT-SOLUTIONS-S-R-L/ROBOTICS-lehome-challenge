@@ -130,7 +130,7 @@ class GarmentFoldSceneCfg(InteractiveSceneCfg):
             rot=(0.1650476, -0.9862856, 0.0, 0.0),
             convention="ros",
         ),
-        data_types=["rgb", "depth"],
+        data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=28.7,
             focus_distance=400.0,

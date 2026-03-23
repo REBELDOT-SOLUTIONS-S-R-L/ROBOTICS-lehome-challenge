@@ -279,14 +279,8 @@ class GarmentEnv(DirectRLEnv):
         joint_pos = torch.cat([left_joint_pos, right_joint_pos], dim=1)
         joint_pos = joint_pos.squeeze(0)
         top_camera_rgb = self.top_camera.data.output["rgb"]
-        top_camera_depth = self.top_camera.data.output["depth"].squeeze()
         left_camera_rgb = self.left_camera.data.output["rgb"]
         right_camera_rgb = self.right_camera.data.output["rgb"]
-
-        # Convert depth from meters to millimeters (uint16)
-        # Range: 0-65535 mm (0-65.535 m), precision: 1 mm
-        depth_np = top_camera_depth.cpu().detach().numpy().copy()
-        depth_mm = np.clip(depth_np * 1000, 0, 65535).astype(np.uint16)
 
         observations = {
             "action": action.cpu().detach().numpy(),
@@ -303,7 +297,6 @@ class GarmentEnv(DirectRLEnv):
             .detach()
             .numpy()
             .squeeze(),
-            "observation.top_depth": depth_mm,
         }
         return observations
 
@@ -323,7 +316,9 @@ class GarmentEnv(DirectRLEnv):
             colors (np.ndarray) (0-255)
         """
         top_camera_rgb_tensor = self.top_camera.data.output["rgb"]
-        top_camera_depth_tensor = self.top_camera.data.output["depth"]
+        top_camera_depth_tensor = self.top_camera.data.output.get("depth")
+        if top_camera_depth_tensor is None:
+            raise RuntimeError("Top camera depth output is disabled for this environment.")
 
         depth_img = top_camera_depth_tensor[env_index].clone().cpu().numpy().squeeze()
 

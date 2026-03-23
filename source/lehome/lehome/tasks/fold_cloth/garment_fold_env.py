@@ -281,13 +281,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         joint_pos = torch.cat([left_joint_pos, right_joint_pos], dim=1).squeeze(0)
 
         top_camera_rgb = top_camera.data.output["rgb"]
-        top_camera_depth = top_camera.data.output["depth"].squeeze()
         left_camera_rgb = left_camera.data.output["rgb"]
         right_camera_rgb = right_camera.data.output["rgb"]
-
-        # Convert depth from meters to millimeters (uint16)
-        depth_np = top_camera_depth.cpu().detach().numpy().copy()
-        depth_mm = np.clip(depth_np * 1000, 0, 65535).astype(np.uint16)
 
         observations = {
             "action": action.cpu().detach().numpy(),
@@ -295,7 +290,6 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             "observation.images.top_rgb": top_camera_rgb.cpu().detach().numpy().squeeze(),
             "observation.images.left_rgb": left_camera_rgb.cpu().detach().numpy().squeeze(),
             "observation.images.right_rgb": right_camera_rgb.cpu().detach().numpy().squeeze(),
-            "observation.top_depth": depth_mm,
         }
         return observations
 
@@ -566,14 +560,23 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         """Retrieve workspace pointcloud from specified env_id."""
         top_camera = self.scene["top_camera"]
         top_camera_rgb_tensor = top_camera.data.output["rgb"]
-        top_camera_depth_tensor = top_camera.data.output["depth"]
+        top_camera_depth_tensor = top_camera.data.output.get("depth")
+        if top_camera_depth_tensor is None:
+            raise RuntimeError("Top camera depth output is disabled for this environment.")
+
+        depth_img = top_camera_depth_tensor[env_index].clone().cpu().numpy().squeeze()
+        depth_img = depth_img.astype(np.float32) / 1000.0
+        rgb_img = top_camera_rgb_tensor[env_index].clone().cpu().numpy()th")
+        if top_camera_depth_tensor is None:
+            raise RuntimeError("Top camera depth output is disabled for this environment.")
 
         depth_img = top_camera_depth_tensor[env_index].clone().cpu().numpy().squeeze()
         depth_img = depth_img.astype(np.float32) / 1000.0
         rgb_img = top_camera_rgb_tensor[env_index].clone().cpu().numpy()
 
+
         pointclouds = generate_pointcloud_from_data(
-            rgb_image=rgb_img,
+            rgb_image=rgb_img,_get_obs
             depth_image=depth_img,
             num_points=num_points,
             use_fps=use_fps,
@@ -999,24 +1002,16 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             _raise_unavailable("garment check_points are missing or incomplete.")
 
         try:
-            mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-            mesh_points = mesh_points_world
-        except Exception as primary_exc:
-            try:
-                mesh_points = (
-                    garment_obj._cloth_prim_view.get_world_positions()
-                    .squeeze(0)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-            except Exception as fallback_exc:
-                _raise_unavailable(
-                    "unable to read garment mesh points from either GarmentObject or cloth_prim_view "
-                    f"({primary_exc}; {fallback_exc})."
-                )
+            kp_positions = garment_obj.get_checkpoint_world_positions(
+                check_points,
+                as_numpy=True,
+            )
+        except Exception as exc:
+            _raise_unavailable(
+                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
+            )
 
-        kp_positions = mesh_points[check_points]  # (6, 3)
+        kp_positions = np.asarray(kp_positions, dtype=np.float32)
         semantic_points = _semantic_keypoints_from_positions(kp_positions)
         object_poses = {}
         for name, point in semantic_points.items():
@@ -1064,19 +1059,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             try:
                 check_points = garment_obj.check_points
                 if check_points and len(check_points) >= 6:
-                    try:
-                        mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-                        mesh_points = mesh_points_world
-                    except Exception:
-                        mesh_points = (
-                            garment_obj._cloth_prim_view.get_world_positions()
-                            .squeeze(0)
-                            .detach()
-                            .cpu()
-                            .numpy()
-                        )
-
-                    kp_positions = mesh_points[check_points]  # [p0, p1, p2, p3, p4, p5]
+                    kp_positions = garment_obj.get_checkpoint_world_positions(
+                        check_points,
+                        as_numpy=True,
+                    )
+                    kp_positions = np.asarray(kp_positions, dtype=np.float32)
                     sem = map_semantic_keypoints_from_positions(kp_positions)
 
                     left_middle_lower_dist = float(

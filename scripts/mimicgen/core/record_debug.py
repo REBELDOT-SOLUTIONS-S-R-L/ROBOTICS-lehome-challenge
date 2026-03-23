@@ -138,18 +138,12 @@ def _get_garment_checkpoint_positions_world_cm(
     check_points: Sequence[int],
 ) -> list[list[float]] | None:
     try:
-        world_points, _, _, _ = particle_object.get_current_mesh_points()
-        world_points = _as_numpy(world_points, dtype=np.float32)
-        return (world_points[check_points] * 100.0).tolist()
-    except Exception:
-        pass
-
-    try:
-        world_points = (
-            particle_object._cloth_prim_view.get_world_positions().squeeze(0).detach().cpu().numpy()
+        checkpoint_positions = particle_object.get_checkpoint_world_positions(
+            check_points,
+            as_numpy=True,
         )
-        world_points = _as_numpy(world_points, dtype=np.float32)
-        return (world_points[check_points] * 100.0).tolist()
+        checkpoint_positions = _as_numpy(checkpoint_positions, dtype=np.float32)
+        return (checkpoint_positions * 100.0).tolist()
     except Exception:
         return None
 

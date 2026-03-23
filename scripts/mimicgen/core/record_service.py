@@ -129,6 +129,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     except Exception as exc:
         logger.error(f"An unexpected error occurred: {exc}")
     finally:
+        if debug_markers is not None:
+            debug_markers.close()
         if dataset is not None:
             dataset.finalize()
         env.close()

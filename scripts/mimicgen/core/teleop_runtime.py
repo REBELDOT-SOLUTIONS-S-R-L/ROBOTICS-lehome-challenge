@@ -27,7 +27,6 @@ from .record_debug import (
 from .recording import DirectHDF5Recorder, _as_numpy
 
 logger = get_logger(__name__)
-DEBUG_MARKER_UPDATE_INTERVAL = 5
 
 
 def create_debug_markers_if_needed(
@@ -61,20 +60,12 @@ def update_debug_markers_if_needed(
     *,
     force: bool = False,
 ) -> None:
-    """Update marker overlay at a throttled cadence to reduce viewport overhead."""
+    """Update marker overlay when live debugging markers are enabled."""
     if debug_markers is None:
         return
-    if force:
-        debug_markers.update_from_env(env)
-        return
-    if debug_marker_state is None:
-        debug_markers.update_from_env(env)
-        return
-
-    step_count = int(debug_marker_state.get("step_count", 0))
-    if step_count == 0 or step_count % DEBUG_MARKER_UPDATE_INTERVAL == 0:
-        debug_markers.update_from_env(env)
-    debug_marker_state["step_count"] = step_count + 1
+    debug_markers.update_from_env(env)
+    if debug_marker_state is not None:
+        debug_marker_state["step_count"] = int(debug_marker_state.get("step_count", 0)) + 1
 
 
 def validate_task_and_device(args: argparse.Namespace) -> None:

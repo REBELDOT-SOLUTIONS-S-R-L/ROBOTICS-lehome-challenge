@@ -180,27 +180,17 @@ class GarmentDatagenRecorder(RecorderTerm):
         if not check_points or len(check_points) < 6:
             _raise_unavailable("garment check_points are missing or incomplete.")
 
-        # Get particle positions
         try:
-            mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-            mesh_points = mesh_points_world
-        except Exception as primary_exc:
-            try:
-                mesh_points = (
-                    garment_obj._cloth_prim_view.get_world_positions()
-                    .squeeze(0)
-                    .detach()
-                    .cpu()
-                    .numpy()
-                )
-            except Exception as fallback_exc:
-                _raise_unavailable(
-                    "unable to read garment mesh points from either GarmentObject or cloth_prim_view "
-                    f"({primary_exc}; {fallback_exc})."
-                )
+            kp_positions = garment_obj.get_checkpoint_world_positions(
+                check_points,
+                as_numpy=True,
+            )
+        except Exception as exc:
+            _raise_unavailable(
+                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
+            )
 
-        # Extract keypoint positions (in meters)
-        kp_positions = mesh_points[check_points]  # (6, 3)
+        kp_positions = np.asarray(kp_positions, dtype=np.float32)
         semantic_points = _semantic_keypoints_from_positions(kp_positions)
         object_poses: dict[str, torch.Tensor] = {}
         for name, point in semantic_points.items():
@@ -247,22 +237,15 @@ class GarmentDatagenRecorder(RecorderTerm):
             check_points = garment_obj.check_points
             if check_points and len(check_points) >= 6:
                 try:
-                    mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-                    mesh_points = mesh_points_world
+                    kp_positions = garment_obj.get_checkpoint_world_positions(
+                        check_points,
+                        as_numpy=True,
+                    )
                 except Exception:
-                    try:
-                        mesh_points = (
-                            garment_obj._cloth_prim_view.get_world_positions()
-                            .squeeze(0)
-                            .detach()
-                            .cpu()
-                            .numpy()
-                        )
-                    except Exception:
-                        mesh_points = None
+                    kp_positions = None
 
-                if mesh_points is not None:
-                    kp_positions = mesh_points[check_points]
+                if kp_positions is not None:
+                    kp_positions = np.asarray(kp_positions, dtype=np.float32)
                     sem = _semantic_keypoints_from_positions(kp_positions)
                     left_middle_lower_dist = float(
                         np.linalg.norm(sem["garment_left_middle"] - sem["garment_left_lower"])
