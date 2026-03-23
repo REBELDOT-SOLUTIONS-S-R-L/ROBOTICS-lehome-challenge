@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
+
+from lehome.utils.logger import get_logger
 
 try:
     from scripts.utils.annotate_utils import ReplayRuntimeContext
@@ -14,6 +17,23 @@ except ImportError:
     if str(scripts_dir) not in sys.path:
         sys.path.append(str(scripts_dir))
     from utils.annotate_utils import ReplayRuntimeContext
+
+logger = get_logger(__name__)
+
+
+def get_env_garment_metadata(env: Any) -> tuple[str | None, Any | None]:
+    """Read garment metadata exposed by the live environment instance."""
+    garment_name = None
+    if hasattr(env, "cfg") and hasattr(env.cfg, "garment_name"):
+        garment_name = env.cfg.garment_name
+
+    scale = None
+    if hasattr(env, "object") and hasattr(env.object, "init_scale"):
+        try:
+            scale = env.object.init_scale
+        except Exception:
+            logger.warning("Failed to get scale from garment object")
+    return garment_name, scale
 
 
 def ensure_ik_solver_ready(
@@ -42,5 +62,4 @@ def ensure_ik_solver_ready(
             f"but initialization failed: {exc}"
         ) from exc
 
-
-__all__ = ["ensure_ik_solver_ready"]
+__all__ = ["ensure_ik_solver_ready", "get_env_garment_metadata"]

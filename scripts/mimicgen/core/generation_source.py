@@ -167,7 +167,7 @@ class RobustDataGenInfoPool(DataGenInfoPool):
         except Exception:
             return
 
-    def _maybe_align_source_datagen_poses_to_runtime(
+    def _align_legacy_source_datagen_poses_to_runtime_if_needed(
         self,
         episode: EpisodeData,
         episode_name: str,
@@ -235,7 +235,7 @@ class RobustDataGenInfoPool(DataGenInfoPool):
                         info_prefix="Info",
                     )
                     self._prepare_source_target_eef_pose(episode)
-                    self._maybe_align_source_datagen_poses_to_runtime(episode, episode_name)
+                    self._align_legacy_source_datagen_poses_to_runtime_if_needed(episode, episode_name)
                     self._validate_episode_object_pose(episode, episode_name)
                     self._add_episode(episode)
                 except ClothObjectPoseValidationError as exc:

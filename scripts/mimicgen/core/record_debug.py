@@ -14,8 +14,8 @@ from isaaclab.envs import DirectRLEnv
 from lehome.tasks.fold_cloth.checkpoint_mappings import ARM_KEYPOINT_GROUPS, CHECKPOINT_LABELS
 from lehome.utils.logger import get_logger
 
+from .data_utils import as_numpy
 from .recording import (
-    _as_numpy,
     _get_scene_articulation,
     _get_single_arm_candidates,
     _resolve_eef_body_idx,
@@ -113,7 +113,7 @@ def _get_arm_eef_world_position_cm(
     if body_pos_w is None:
         return None
 
-    return _as_numpy(body_pos_w[0, eef_body_idx], dtype=np.float32).reshape(-1) * 100.0
+    return as_numpy(body_pos_w[0, eef_body_idx], dtype=np.float32).reshape(-1) * 100.0
 
 
 def _get_debug_arm_names(env: DirectRLEnv) -> list[str]:
@@ -139,7 +139,7 @@ def _get_garment_checkpoint_positions_world_cm(
 ) -> list[list[float]] | None:
     try:
         world_points, _, _, _ = particle_object.get_current_mesh_points()
-        world_points = _as_numpy(world_points, dtype=np.float32)
+        world_points = as_numpy(world_points, dtype=np.float32)
         return (world_points[check_points] * 100.0).tolist()
     except Exception:
         pass
@@ -148,7 +148,7 @@ def _get_garment_checkpoint_positions_world_cm(
         world_points = (
             particle_object._cloth_prim_view.get_world_positions().squeeze(0).detach().cpu().numpy()
         )
-        world_points = _as_numpy(world_points, dtype=np.float32)
+        world_points = as_numpy(world_points, dtype=np.float32)
         return (world_points[check_points] * 100.0).tolist()
     except Exception:
         return None
@@ -203,7 +203,7 @@ def log_debug_pose_snapshot(
         logger.info(f"{prefix} Garment checkpoints used by success checker (cm):")
 
     for point_idx, (mesh_idx, point_pos_cm) in enumerate(zip(check_points, garment_positions_cm)):
-        point_arr = _as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
+        point_arr = as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
         checkpoint_name = (
             GARMENT_CHECKPOINT_LABELS[point_idx]
             if point_idx < len(GARMENT_CHECKPOINT_LABELS)
@@ -226,7 +226,7 @@ def log_debug_pose_snapshot(
                     if point_idx < len(GARMENT_CHECKPOINT_LABELS)
                     else f"checkpoint_{point_idx}"
                 )
-                point_arr = _as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
+                point_arr = as_numpy(point_pos_cm, dtype=np.float32).reshape(-1)
                 if point_arr.size >= 3:
                     garment_world_positions_by_label[checkpoint_name] = point_arr
 

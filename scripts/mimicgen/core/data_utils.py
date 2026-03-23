@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import numpy as np
@@ -59,6 +60,48 @@ def as_2d_tensor(data: Any) -> torch.Tensor | None:
     return tensor
 
 
+def as_numpy(value: Any, dtype: np.dtype | None = None) -> np.ndarray:
+    """Convert tensor or array-like values to a numpy array."""
+    if isinstance(value, np.ndarray):
+        arr = value
+    elif torch.is_tensor(value):
+        arr = value.detach().cpu().numpy()
+    else:
+        arr = np.asarray(value)
+    if dtype is not None:
+        arr = arr.astype(dtype, copy=False)
+    return arr
+
+
+def to_json_compatible(value: Any) -> Any:
+    """Recursively convert tensors and arrays into JSON-serializable structures."""
+    if isinstance(value, dict):
+        return {str(k): to_json_compatible(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [to_json_compatible(v) for v in value]
+    if isinstance(value, tuple):
+        return [to_json_compatible(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, np.generic):
+        return value.item()
+    if torch.is_tensor(value):
+        return value.detach().cpu().numpy().tolist()
+    if isinstance(value, Mapping):
+        return {str(k): to_json_compatible(v) for k, v in value.items()}
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return [to_json_compatible(v) for v in value]
+    return value
+
+
+def quat_wxyz_to_xyzw(quat: Any) -> np.ndarray:
+    """Convert quaternion values from (w, x, y, z) to (x, y, z, w)."""
+    quat_arr = as_numpy(quat, dtype=np.float32).reshape(-1)
+    if quat_arr.shape[0] != 4:
+        return quat_arr
+    return np.array([quat_arr[1], quat_arr[2], quat_arr[3], quat_arr[0]], dtype=np.float32)
+
+
 def flatten_nested_leaves(
     node: Any,
     prefix: str = "",
@@ -79,4 +122,11 @@ def flatten_nested_leaves(
     return leaves
 
 
-__all__ = ["as_2d_tensor", "as_tensor", "flatten_nested_leaves"]
+__all__ = [
+    "as_2d_tensor",
+    "as_numpy",
+    "as_tensor",
+    "flatten_nested_leaves",
+    "quat_wxyz_to_xyzw",
+    "to_json_compatible",
+]

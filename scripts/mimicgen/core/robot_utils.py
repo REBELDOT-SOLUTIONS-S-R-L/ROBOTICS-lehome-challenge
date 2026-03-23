@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
+import numpy as np
 import torch
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
@@ -58,6 +60,45 @@ def arm_root_pose_world(env: ManagerBasedRLMimicEnv, arm_name: str) -> torch.Ten
     pos_w = arm.data.root_pos_w[0:1]
     quat_w = arm.data.root_quat_w[0:1]
     return PoseUtils.make_pose(pos_w, PoseUtils.matrix_from_quat(quat_w))[0]
+
+
+def get_arm_eef_pose_robot_frame(
+    arm: Any,
+    eef_body_idx: int,
+    device: torch.device | str,
+) -> np.ndarray | None:
+    """Return the end-effector pose expressed in the arm root frame for env 0."""
+    root_pos_w = getattr(arm.data, "root_pos_w", None)
+    root_quat_w = getattr(arm.data, "root_quat_w", None)
+    if root_pos_w is None or root_quat_w is None:
+        return None
+
+    body_pos_w = getattr(arm.data, "body_link_pos_w", None)
+    body_quat_w = getattr(arm.data, "body_link_quat_w", None)
+    if body_pos_w is None or body_quat_w is None:
+        body_pos_w = getattr(arm.data, "body_pos_w", None)
+        body_quat_w = getattr(arm.data, "body_quat_w", None)
+    if body_pos_w is None or body_quat_w is None:
+        return None
+
+    root_pos = torch.as_tensor(root_pos_w[0], device=device, dtype=torch.float32).unsqueeze(0)
+    root_quat = torch.as_tensor(root_quat_w[0], device=device, dtype=torch.float32).unsqueeze(0)
+    eef_pos = torch.as_tensor(body_pos_w[0, eef_body_idx], device=device, dtype=torch.float32).unsqueeze(0)
+    eef_quat = torch.as_tensor(body_quat_w[0, eef_body_idx], device=device, dtype=torch.float32).unsqueeze(0)
+
+    ee_pos_robot, ee_quat_robot = PoseUtils.subtract_frame_transforms(
+        root_pos,
+        root_quat,
+        eef_pos,
+        eef_quat,
+    )
+    return (
+        torch.cat([ee_pos_robot, ee_quat_robot], dim=-1)[0]
+        .detach()
+        .cpu()
+        .numpy()
+        .astype(np.float32, copy=False)
+    )
 
 
 def decode_ik_action_trajectory(
@@ -123,6 +164,7 @@ __all__ = [
     "are_arms_at_rest",
     "arm_root_pose_world",
     "decode_ik_action_trajectory",
+    "get_arm_eef_pose_robot_frame",
     "get_robot_eef_pose_world",
     "quat_xyzw_to_wxyz",
 ]
