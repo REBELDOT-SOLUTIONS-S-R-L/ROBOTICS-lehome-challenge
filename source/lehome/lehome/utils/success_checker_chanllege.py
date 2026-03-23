@@ -42,8 +42,24 @@ def get_object_particle_position(particle_object, index_list):
             as_numpy=True,
         )
     except Exception as exc:
-        logger.error(f"Error in get_object_particle_position: {exc}")
-        return None
+        try:
+            logger.error(f"Error in get_object_particle_position: {exc}")
+            transformed_mesh_points, _, _, _ = particle_object.get_current_mesh_points()
+        except Exception as e1:
+            try:
+                logger.error(f"Error in get_object_particle_position: {e1}")
+                transformed_mesh_points = (
+                particle_object._cloth_prim_view.get_world_positions()
+                .squeeze(0)
+                .detach()
+                .cpu()
+                .numpy()
+                )
+            except Exception as e2:
+                logger.error(f"Error in get_object_particle_position: {e2}")
+                return None
+        positions = (np.asarray(transformed_mesh_points, dtype=np.float32)[index_list] * 100).tolist()
+        return positions
     return (np.asarray(checkpoint_positions, dtype=np.float32) * 100.0).tolist()
 
 
@@ -184,7 +200,9 @@ def check_pant_short(p, success_distance):
 
 def evaluate_garment_fold_success(particle_object, garment_type: str):
     check_point_indices = particle_object.check_points  # list[int]
-    success_distance = particle_object.success_distance  # list[int]
+    raw_success_distance = particle_object.success_distance  # list[int]
+    current_scale = float(particle_object.init_scale[0])
+    success_distance = [d * current_scale for d in raw_success_distance]
     p = get_object_particle_position(particle_object, check_point_indices)
 
     if garment_type == "top-long-sleeve" or garment_type == "top-short-sleeve":

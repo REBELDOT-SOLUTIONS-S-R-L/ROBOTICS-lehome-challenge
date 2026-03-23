@@ -215,26 +215,6 @@ def load_dataset_env_args(input_file: str) -> dict[str, Any]:
         return {}
     return {}
 
-
-def _iter_demo_groups(input_file: str):
-    if h5py is None:
-        return []
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data")
-            if data_group is None:
-                return []
-            items = []
-            for demo_name in sorted(
-                [name for name in data_group.keys() if name.startswith("demo_")],
-                key=demo_sort_key,
-            ):
-                items.append((demo_name, data_group[demo_name]))
-            return items
-    except Exception:
-        return []
-
-
 def get_first_demo_garment_name(input_file: str) -> str | None:
     """Infer garment name from the first demo metadata payload available."""
     if h5py is None:

@@ -17,6 +17,8 @@ from lehome.utils.record import get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from ...utils.garment_debug_markers import GarmentKeypointDebugMarkers
+from .data_utils import as_numpy
+from .env_runtime import get_env_garment_metadata
 from .record_debug import (
     DEBUG_POSE_LOG_INTERVAL,
     SUCCESS_LOG_INTERVAL,
@@ -24,7 +26,7 @@ from .record_debug import (
     log_episode_success_snapshot,
     log_success_result,
 )
-from .recording import DirectHDF5Recorder, _as_numpy
+from .recording import DirectHDF5Recorder
 
 logger = get_logger(__name__)
 
@@ -91,20 +93,6 @@ def _safe_get_all_pose(env: DirectRLEnv) -> dict[str, Any] | None:
         return None
 
 
-def _get_episode_garment_meta(env: DirectRLEnv) -> tuple[str | None, Any | None]:
-    garment_name = None
-    if hasattr(env, "cfg") and hasattr(env.cfg, "garment_name"):
-        garment_name = env.cfg.garment_name
-
-    scale = None
-    if hasattr(env, "object") and hasattr(env.object, "init_scale"):
-        try:
-            scale = env.object.init_scale
-        except Exception:
-            logger.warning("Failed to get scale from garment object")
-    return garment_name, scale
-
-
 def _get_or_build_maintain_action(
     env: DirectRLEnv,
     args: argparse.Namespace,
@@ -113,7 +101,7 @@ def _get_or_build_maintain_action(
 ) -> torch.Tensor:
     current_state = current_obs.get("observation.state")
     if current_state is not None:
-        state_arr = _as_numpy(current_state, dtype="float32").reshape(-1)
+        state_arr = as_numpy(current_state, dtype="float32").reshape(-1)
         action_dim = int(state_arr.shape[0])
     else:
         state_arr = None
@@ -351,7 +339,7 @@ def run_recording_phase(
         flags["remove"] = False
         episode_step_count = 0
         episode_discarded = False
-        garment_name, scale = _get_episode_garment_meta(env)
+        garment_name, scale = get_env_garment_metadata(env)
         if object_initial_pose is None:
             object_initial_pose = control_state.get("cached_object_initial_pose")
         if object_initial_pose is None:

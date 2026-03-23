@@ -16,20 +16,19 @@ import torch
 from isaaclab.envs import ManagerBasedRLMimicEnv
 from isaaclab.managers import TerminationTermCfg
 from isaaclab.utils.datasets import EpisodeData
-import isaaclab.utils.math as PoseUtils
 
-from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
-from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
 from lehome.utils.env_utils import dynamic_reset_gripper_effort_limit_sim
 
 from .annotation_session import AnnotationSessionController
+from .data_utils import as_2d_tensor, as_tensor, flatten_nested_leaves
+from .env_runtime import ensure_ik_solver_ready
+from .robot_utils import are_arms_at_rest, arm_root_pose_world, decode_ik_action_trajectory
 
 try:
     from scripts.utils.annotate_utils import (
         DatagenObjectPoseCaptureError,
         ReplayPlan,
         ReplayRuntimeContext,
-        orthonormalize_rotations as _orthonormalize_rotations,
     )
 except ImportError:
     scripts_dir = Path(__file__).resolve().parents[2]
@@ -39,30 +38,7 @@ except ImportError:
         DatagenObjectPoseCaptureError,
         ReplayPlan,
         ReplayRuntimeContext,
-        orthonormalize_rotations as _orthonormalize_rotations,
     )
-
-
-def get_robot_eef_pose_world(env: ManagerBasedRLMimicEnv, eef_name: str) -> torch.Tensor | None:
-    """Fetch EEF pose from articulation link world pose when available."""
-    try:
-        arm = env.scene[eef_name]
-    except Exception:
-        return None
-
-    try:
-        if hasattr(env, "_get_eef_body_idx"):
-            eef_body_idx = int(env._get_eef_body_idx(eef_name))
-        else:
-            eef_body_idx = int(arm.data.body_link_pos_w.shape[1] - 1)
-        eef_pos_w = arm.data.body_link_pos_w[:, eef_body_idx]
-        eef_quat_w = arm.data.body_link_quat_w[:, eef_body_idx]
-        quat_norm = torch.linalg.norm(eef_quat_w, dim=-1, keepdim=True).clamp_min(1e-12)
-        eef_quat_w = eef_quat_w / quat_norm
-        pose = PoseUtils.make_pose(eef_pos_w, PoseUtils.matrix_from_quat(eef_quat_w))
-        return _orthonormalize_rotations(pose)
-    except Exception:
-        return None
 
 
 def normalize_manual_subtask_signal_name(signal_name: str | None, eef_name: str, subtask_index: int) -> str:
@@ -186,66 +162,15 @@ def _set_arm_joint_state_from_initial_state(env: ManagerBasedRLMimicEnv, initial
             arm.write_joint_velocity_to_sim(joint_vel[:1], env_ids=None)
 
 
-def _as_tensor(data, squeeze_second_dim: bool = False) -> torch.Tensor | None:
-    """Convert arrays or recorder list[tensor] buffers into a dense tensor."""
-    if data is None:
-        return None
-
-    if torch.is_tensor(data):
-        tensor = data
-    elif isinstance(data, np.ndarray):
-        tensor = torch.from_numpy(data)
-    elif isinstance(data, (list, tuple)):
-        if len(data) == 0:
-            return None
-        if any(torch.is_tensor(item) or isinstance(item, np.ndarray) for item in data):
-            elems = []
-            for item in data:
-                if item is None:
-                    return None
-                elem = item if torch.is_tensor(item) else torch.as_tensor(item)
-                elems.append(elem)
-            try:
-                tensor = torch.stack(elems, dim=0)
-            except RuntimeError:
-                return None
-        else:
-            try:
-                tensor = torch.as_tensor(data)
-            except (TypeError, ValueError):
-                return None
-    else:
-        try:
-            tensor = torch.as_tensor(data)
-        except (TypeError, ValueError):
-            return None
-
-    if squeeze_second_dim and tensor.ndim >= 3 and tensor.shape[1] == 1:
-        tensor = tensor.squeeze(1)
-    return tensor
-
-
-def _as_2d_tensor(data) -> torch.Tensor | None:
-    """Convert array-like input to a 2D tensor, or return None if unavailable."""
-    tensor = _as_tensor(data, squeeze_second_dim=True)
-    if tensor is None:
-        return None
-    if tensor.ndim == 1:
-        tensor = tensor.unsqueeze(0)
-    if tensor.ndim != 2:
-        return None
-    return tensor
-
-
 def _get_replay_actions_for_episode(episode: EpisodeData, expected_action_dim: int | None = None) -> torch.Tensor:
     """Choose the best action trajectory for replay, matching env action dimension when possible."""
     obs = episode.data.get("obs", {})
-    actions = _as_2d_tensor(episode.data.get("actions", None))
-    processed_actions = _as_2d_tensor(episode.data.get("processed_actions", None))
-    obs_actions = _as_2d_tensor(obs.get("actions", None))
+    actions = as_2d_tensor(episode.data.get("actions", None))
+    processed_actions = as_2d_tensor(episode.data.get("processed_actions", None))
+    obs_actions = as_2d_tensor(obs.get("actions", None))
 
-    left_obs = _as_2d_tensor(obs.get("left_joint_pos", None))
-    right_obs = _as_2d_tensor(obs.get("right_joint_pos", None))
+    left_obs = as_2d_tensor(obs.get("left_joint_pos", None))
+    right_obs = as_2d_tensor(obs.get("right_joint_pos", None))
     concat_joint_actions = None
     if left_obs is not None and right_obs is not None:
         if left_obs.shape[0] == right_obs.shape[0] and left_obs.shape[1] >= 6 and right_obs.shape[1] >= 6:
@@ -299,23 +224,13 @@ def _get_replay_actions_for_episode(episode: EpisodeData, expected_action_dim: i
         )
 
     return replay_actions
-
-
-def _quat_xyzw_to_wxyz(quat_xyzw: torch.Tensor) -> torch.Tensor:
-    """Convert quaternion tensor from (x, y, z, w) to (w, x, y, z)."""
-    return torch.stack(
-        [quat_xyzw[..., 3], quat_xyzw[..., 0], quat_xyzw[..., 1], quat_xyzw[..., 2]],
-        dim=-1,
-    )
-
-
 def _first_pose_translation_mean(pose_dict: dict[str, torch.Tensor], max_steps: int = 128) -> torch.Tensor | None:
     """Compute mean xyz over first timesteps from a dict of [T,4,4] tensors."""
     if not isinstance(pose_dict, dict) or len(pose_dict) == 0:
         return None
     xyz_list = []
     for pose in pose_dict.values():
-        pose_t = _as_tensor(pose, squeeze_second_dim=True)
+        pose_t = as_tensor(pose, squeeze_second_dim=True)
         if pose_t is None:
             continue
         if pose_t.ndim != 3 or tuple(pose_t.shape[-2:]) != (4, 4):
@@ -347,7 +262,7 @@ def validate_recorded_datagen_pose_contract(
         if not isinstance(pose_dict, dict) or len(pose_dict) == 0:
             raise ValueError(f"obs/datagen_info/{section_name} is empty or invalid.")
         for pose_name, pose_value in pose_dict.items():
-            pose = _as_tensor(pose_value, squeeze_second_dim=True)
+            pose = as_tensor(pose_value, squeeze_second_dim=True)
             if pose is None:
                 raise ValueError(
                     f"Invalid pose value for {section_name}/{pose_name}: unsupported type {type(pose_value)}."
@@ -413,32 +328,6 @@ def _infer_ik_action_frame(
 
     mean_z = float(z_values.float().mean().item())
     return "base" if mean_z < float(base_z_threshold) else "world"
-
-
-def _arm_root_pose_world(env: ManagerBasedRLMimicEnv, arm_name: str) -> torch.Tensor:
-    """Get arm base pose in world as 4x4 transform for env 0."""
-    arm = env.scene[arm_name]
-    pos_w = arm.data.root_pos_w[0:1]
-    quat_w = arm.data.root_quat_w[0:1]
-    return PoseUtils.make_pose(pos_w, PoseUtils.matrix_from_quat(quat_w))[0]
-
-
-def _flatten_nested_leaves(node, prefix: str = "", skip_root_keys: set[str] | None = None) -> dict[str, Any]:
-    """Flatten nested dict leaves into slash-delimited key paths."""
-    leaves: dict[str, Any] = {}
-    if isinstance(node, dict):
-        for key, value in node.items():
-            if not prefix and skip_root_keys and key in skip_root_keys:
-                continue
-            next_prefix = f"{prefix}/{key}" if prefix else key
-            leaves.update(_flatten_nested_leaves(value, prefix=next_prefix, skip_root_keys=None))
-        return leaves
-
-    if prefix:
-        leaves[prefix] = node
-    return leaves
-
-
 def merge_source_obs_into_annotated_episode(source_episode: EpisodeData, annotated_episode: EpisodeData) -> None:
     """Preserve non-datagen observation keys from source episode in annotated export."""
     source_obs = source_episode.data.get("obs", None)
@@ -446,8 +335,8 @@ def merge_source_obs_into_annotated_episode(source_episode: EpisodeData, annotat
         return
 
     annotated_obs = annotated_episode.data.get("obs", {})
-    existing_paths = {f"obs/{path}" for path in _flatten_nested_leaves(annotated_obs).keys()}
-    source_leaves = _flatten_nested_leaves(source_obs, skip_root_keys={"datagen_info"})
+    existing_paths = {f"obs/{path}" for path in flatten_nested_leaves(annotated_obs).keys()}
+    source_leaves = flatten_nested_leaves(source_obs, skip_root_keys={"datagen_info"})
 
     for rel_path, value in source_leaves.items():
         full_path = f"obs/{rel_path}"
@@ -467,11 +356,11 @@ def overwrite_annotated_actions_with_source_actions(
     annotated_episode: EpisodeData,
 ) -> None:
     """Keep top-level actions from source episode (strict IK pipeline contract)."""
-    source_actions = _as_2d_tensor(source_episode.data.get("actions", None))
+    source_actions = as_2d_tensor(source_episode.data.get("actions", None))
     if source_actions is None:
         raise ValueError("Source episode does not contain top-level actions.")
 
-    recorded_actions = _as_2d_tensor(annotated_episode.data.get("actions", None))
+    recorded_actions = as_2d_tensor(annotated_episode.data.get("actions", None))
     if recorded_actions is not None and recorded_actions.shape[0] != source_actions.shape[0]:
         raise ValueError(
             "Cannot preserve source actions: horizon mismatch between source and recorder output "
@@ -514,76 +403,6 @@ def build_replay_runtime_context(
         eef_names=eef_names,
         native_ik_action_contract=native_ik_action_contract,
     )
-
-
-def _ensure_ik_solver_ready(
-    env: ManagerBasedRLMimicEnv,
-    replay_runtime: ReplayRuntimeContext,
-) -> None:
-    """Initialize the environment IK solver once when strict IK replay needs it."""
-    if replay_runtime.native_ik_action_contract:
-        return
-    if replay_runtime.ik_solver_checked:
-        if not replay_runtime.ik_solver_ready:
-            raise RuntimeError("environment IK solver initialization previously failed")
-        return
-
-    replay_runtime.ik_solver_checked = True
-    replay_runtime.ik_solver_ready = True
-    if not hasattr(env, "_init_ik_solver_if_needed"):
-        return
-    try:
-        if not bool(env._init_ik_solver_if_needed()):
-            raise RuntimeError("environment IK solver initialization returned False")
-    except Exception as exc:
-        replay_runtime.ik_solver_ready = False
-        raise RuntimeError(
-            "Strict IK replay requires a working IK solver in the environment, "
-            f"but initialization failed: {exc}"
-        ) from exc
-
-
-def _decode_ik_action_trajectory(
-    ik_actions: torch.Tensor,
-    eef_names: list[str],
-    quat_order: str,
-    device: torch.device,
-) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
-    """Decode an entire IK action trajectory into per-arm pose and gripper tensors."""
-    if not eef_names:
-        raise ValueError("No end-effectors configured for IK replay.")
-    if len(eef_names) > 2:
-        raise ValueError(f"IK replay supports at most 2 end-effectors, got {len(eef_names)}.")
-
-    ik_actions = ik_actions.to(device=device, dtype=torch.float32)
-    action_dim = int(ik_actions.shape[1])
-    expected_dim = 8 * len(eef_names)
-    if action_dim != expected_dim:
-        raise ValueError(
-            f"IK action dimension mismatch: expected {expected_dim} for eefs={eef_names}, got {action_dim}."
-        )
-
-    pose_by_eef: dict[str, torch.Tensor] = {}
-    gripper_by_eef: dict[str, torch.Tensor] = {}
-    step_count = int(ik_actions.shape[0])
-    eye = torch.eye(4, device=device, dtype=torch.float32).unsqueeze(0).repeat(step_count, 1, 1)
-    for i, eef_name in enumerate(eef_names):
-        chunk = ik_actions[:, i * 8 : (i + 1) * 8]
-        pos = chunk[:, :3]
-        quat = chunk[:, 3:7]
-        if quat_order == "xyzw":
-            quat = _quat_xyzw_to_wxyz(quat)
-        elif quat_order != "wxyz":
-            raise ValueError(f"Unsupported quaternion order: {quat_order}")
-
-        pose = eye.clone()
-        pose[:, :3, :3] = PoseUtils.matrix_from_quat(quat)
-        pose[:, :3, 3] = pos
-        pose_by_eef[eef_name] = pose
-        gripper_by_eef[eef_name] = chunk[:, 7:8]
-    return pose_by_eef, gripper_by_eef
-
-
 def prepare_replay_plan(
     env: ManagerBasedRLMimicEnv,
     episode: EpisodeData,
@@ -596,7 +415,7 @@ def prepare_replay_plan(
 ) -> ReplayPlan:
     """Build replay inputs once per episode and reuse them across replay attempts."""
     initial_state = _rebuild_initial_state_from_episode(episode)
-    source_actions = _as_2d_tensor(episode.data.get("actions", None))
+    source_actions = as_2d_tensor(episode.data.get("actions", None))
     if source_actions is None:
         raise ValueError("Episode does not contain top-level actions for replay.")
 
@@ -647,8 +466,8 @@ def prepare_replay_plan(
     if ik_frame not in {"base", "world"}:
         raise ValueError(f"Invalid IK action frame resolved: {ik_frame}")
 
-    _ensure_ik_solver_ready(env, replay_runtime)
-    ik_pose_by_eef, ik_gripper_by_eef = _decode_ik_action_trajectory(
+    ensure_ik_solver_ready(env, replay_runtime)
+    ik_pose_by_eef, ik_gripper_by_eef = decode_ik_action_trajectory(
         replay_actions,
         eef_names=replay_runtime.eef_names,
         quat_order=str(args.ik_quat_order),
@@ -706,26 +525,6 @@ def _print_success_debug_breakdown(env: ManagerBasedRLMimicEnv) -> None:
         _report_joint_out_of_range("right_arm", right_arm)
     except Exception as exc:
         print(f"\tWarning: failed to compute success breakdown: {exc}")
-
-
-def _are_arms_at_rest(env: ManagerBasedRLMimicEnv) -> bool:
-    """Check whether available arm articulations are within rest pose ranges."""
-    try:
-        at_rest_flags = []
-        for arm_name in ("left_arm", "right_arm"):
-            try:
-                arm = env.scene[arm_name]
-            except Exception:
-                continue
-            arm_rest = is_so101_at_rest_pose(arm.data.joint_pos, arm.data.joint_names)
-            at_rest_flags.append(bool(arm_rest[0].item()))
-        if not at_rest_flags:
-            return False
-        return all(at_rest_flags)
-    except Exception:
-        return False
-
-
 def recover_from_object_pose_capture_failure(
     env: ManagerBasedRLMimicEnv,
     session: AnnotationSessionController,
@@ -798,7 +597,7 @@ def replay_episode(
         if replay_plan.ik_frame == "base":
             replay_pose_by_eef = {}
             for eef_name in replay_runtime.eef_names:
-                base_in_world = _arm_root_pose_world(env, eef_name).unsqueeze(0)
+                base_in_world = arm_root_pose_world(env, eef_name).unsqueeze(0)
                 replay_pose_by_eef[eef_name] = torch.matmul(base_in_world, replay_plan.ik_pose_by_eef[eef_name])
 
     first_action = True
@@ -860,7 +659,7 @@ def replay_episode(
 
     if success_term is not None:
         if getattr(success_term.func, "__name__", "") == "garment_folded":
-            arms_rest_final = _are_arms_at_rest(env)
+            arms_rest_final = are_arms_at_rest(env)
             if not (fold_success_seen and arms_rest_final):
                 _print_success_debug_breakdown(env)
                 print(
@@ -889,60 +688,50 @@ def _finalize_annotated_episode(
         )
 
 
-def annotate_episode_in_auto_mode(
+def annotate_episode(
     env: ManagerBasedRLMimicEnv,
     episode: EpisodeData,
     replay_plan: ReplayPlan,
     replay_runtime: ReplayRuntimeContext,
     session: AnnotationSessionController,
     args,
-    task_type: str | None,
-    success_term: TerminationTermCfg | None = None,
-) -> bool:
-    """Replay one episode and validate automatic subtask term capture."""
-    session.state.skip_episode = False
-    is_episode_annotated_successfully = replay_episode(
-        env,
-        replay_plan,
-        replay_runtime,
-        session,
-        args,
-        task_type,
-        success_term,
-    )
-    if session.state.skip_episode:
-        print("\tSkipping the episode.")
-        return False
-    if not is_episode_annotated_successfully:
-        print("\tThe final task was not completed.")
-        if not args.ignore_replay_success:
-            return False
-        print("\tContinuing because --ignore_replay_success is enabled.")
-        is_episode_annotated_successfully = True
-
-    if is_episode_annotated_successfully:
-        annotated_episode = env.recorder_manager.get_episode(0)
-        _finalize_annotated_episode(episode, annotated_episode, args)
-        subtask_term_signal_dict = annotated_episode.data["obs"]["datagen_info"]["subtask_term_signals"]
-        for signal_name, signal_flags in subtask_term_signal_dict.items():
-            if not torch.any(signal_flags):
-                is_episode_annotated_successfully = False
-                print(f'\tDid not detect completion for the subtask "{signal_name}".')
-    return is_episode_annotated_successfully
-
-
-def annotate_episode_in_manual_mode(
-    env: ManagerBasedRLMimicEnv,
-    episode: EpisodeData,
-    replay_plan: ReplayPlan,
-    replay_runtime: ReplayRuntimeContext,
-    session: AnnotationSessionController,
-    args,
+    auto: bool,
     task_type: str | None,
     success_term: TerminationTermCfg | None = None,
     subtask_term_signal_names: dict[str, list[str]] | None = None,
 ) -> bool:
-    """Replay one episode and let the user mark subtask boundaries manually."""
+    """Replay one episode and annotate subtasks in auto or manual mode."""
+    session.state.skip_episode = False
+    if auto:
+        is_episode_annotated_successfully = replay_episode(
+            env,
+            replay_plan,
+            replay_runtime,
+            session,
+            args,
+            task_type,
+            success_term,
+        )
+        if session.state.skip_episode:
+            print("\tSkipping the episode.")
+            return False
+        if not is_episode_annotated_successfully:
+            print("\tThe final task was not completed.")
+            if not args.ignore_replay_success:
+                return False
+            print("\tContinuing because --ignore_replay_success is enabled.")
+            is_episode_annotated_successfully = True
+
+        if is_episode_annotated_successfully:
+            annotated_episode = env.recorder_manager.get_episode(0)
+            _finalize_annotated_episode(episode, annotated_episode, args)
+            subtask_term_signal_dict = annotated_episode.data["obs"]["datagen_info"]["subtask_term_signals"]
+            for signal_name, signal_flags in subtask_term_signal_dict.items():
+                if not torch.any(signal_flags):
+                    is_episode_annotated_successfully = False
+                    print(f'\tDid not detect completion for the subtask "{signal_name}".')
+        return is_episode_annotated_successfully
+
     if subtask_term_signal_names is None:
         subtask_term_signal_names = {}
 
@@ -1040,10 +829,8 @@ def annotate_episode_in_manual_mode(
 
 __all__ = [
     "DatagenObjectPoseCaptureError",
-    "annotate_episode_in_auto_mode",
-    "annotate_episode_in_manual_mode",
+    "annotate_episode",
     "build_replay_runtime_context",
-    "get_robot_eef_pose_world",
     "normalize_manual_subtask_signal_name",
     "prepare_replay_plan",
     "recover_from_object_pose_capture_failure",
