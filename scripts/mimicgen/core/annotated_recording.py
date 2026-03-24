@@ -52,6 +52,15 @@ def _normalize_signal_column(value: Any) -> np.ndarray:
     return arr.astype(np.bool_, copy=False).reshape(1)
 
 
+def _normalize_joint_row(value: Any, *, expected_dim: int | None = None) -> np.ndarray:
+    arr = as_numpy(value, dtype=np.float32).reshape(-1)
+    if expected_dim is not None and arr.size != expected_dim:
+        raise ValueError(
+            f"Expected joint row with {expected_dim} values, got shape {tuple(arr.shape)}."
+        )
+    return arr.astype(np.float32, copy=False)
+
+
 class AnnotatedMimicHDF5Recorder:
     """Buffered writer for generation-ready Mimic teleoperation episodes."""
 
@@ -102,6 +111,9 @@ class AnnotatedMimicHDF5Recorder:
             "target_eef_pose": {},
             "subtask_term_signals": {},
             "gripper_actions": {},
+            "joint_actions": [],
+            "joint_pos": {},
+            "joint_vel": {},
         }
         self._validated_object_pose_once = False
 
@@ -119,6 +131,9 @@ class AnnotatedMimicHDF5Recorder:
         target_eef_pose: dict[str, Any],
         subtask_term_signals: dict[str, Any],
         gripper_actions: dict[str, Any],
+        joint_actions: Any | None,
+        joint_pos: dict[str, Any],
+        joint_vel: dict[str, Any],
     ) -> None:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode. Call begin_episode() first.")
@@ -135,6 +150,11 @@ class AnnotatedMimicHDF5Recorder:
         self._append_pose_section("target_eef_pose", target_eef_pose)
         self._append_signal_section(subtask_term_signals)
         self._append_gripper_action_section(gripper_actions)
+        self._append_joint_observation_step(
+            joint_actions=joint_actions,
+            joint_pos=joint_pos,
+            joint_vel=joint_vel,
+        )
 
     def _append_pose_section(self, section_name: str, values: dict[str, Any]) -> None:
         section = self._buffers[section_name]
@@ -151,6 +171,31 @@ class AnnotatedMimicHDF5Recorder:
         for key, value in values.items():
             section.setdefault(str(key), []).append(_normalize_signal_column(value))
 
+    def _append_joint_observation_step(
+        self,
+        *,
+        joint_actions: Any | None,
+        joint_pos: dict[str, Any],
+        joint_vel: dict[str, Any],
+    ) -> None:
+        if joint_actions is None:
+            raise RuntimeError("Annotated recorder requires joint_actions for IK->joint conversion support.")
+        self._buffers["joint_actions"].append(_normalize_joint_row(joint_actions, expected_dim=12))
+
+        pos_section = self._buffers["joint_pos"]
+        vel_section = self._buffers["joint_vel"]
+        for arm_name in ("left_arm", "right_arm"):
+            if arm_name not in joint_pos:
+                raise RuntimeError(f"Missing joint_pos for {arm_name}.")
+            if arm_name not in joint_vel:
+                raise RuntimeError(f"Missing joint_vel for {arm_name}.")
+            pos_section.setdefault(arm_name, []).append(
+                _normalize_joint_row(joint_pos[arm_name], expected_dim=6)
+            )
+            vel_section.setdefault(arm_name, []).append(
+                _normalize_joint_row(joint_vel[arm_name], expected_dim=6)
+            )
+
     def _stack_pose_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
             key: np.stack(frames, axis=0).astype(np.float32, copy=False)
@@ -161,6 +206,15 @@ class AnnotatedMimicHDF5Recorder:
         return {
             key: np.stack(frames, axis=0).astype(np.bool_, copy=False)
             for key, frames in self._buffers["subtask_term_signals"].items()
+        }
+
+    def _stack_joint_actions(self) -> np.ndarray:
+        return np.stack(self._buffers["joint_actions"], axis=0).astype(np.float32, copy=False)
+
+    def _stack_joint_section(self, section_name: str) -> dict[str, np.ndarray]:
+        return {
+            key: np.stack(frames, axis=0).astype(np.float32, copy=False)
+            for key, frames in self._buffers[section_name].items()
         }
 
     def _synthesize_native_actions(self, env: Any) -> np.ndarray:
@@ -214,6 +268,9 @@ class AnnotatedMimicHDF5Recorder:
         eef_pose_section = self._stack_pose_section("eef_pose")
         target_eef_pose_section = self._stack_pose_section("target_eef_pose")
         signal_section = self._stack_signal_section()
+        joint_actions = self._stack_joint_actions()
+        joint_pos_section = self._stack_joint_section("joint_pos")
+        joint_vel_section = self._stack_joint_section("joint_vel")
 
         demo_group = self._data_group.create_group(episode_name)
         actions = self._synthesize_native_actions(env)
@@ -222,6 +279,12 @@ class AnnotatedMimicHDF5Recorder:
         demo_group.attrs["success"] = np.bool_(True)
 
         obs_group = demo_group.create_group("obs")
+        self._write_joint_obs_section(
+            obs_group,
+            joint_actions=joint_actions,
+            joint_pos=joint_pos_section,
+            joint_vel=joint_vel_section,
+        )
         datagen_group = obs_group.create_group("datagen_info")
         self._write_pose_section(datagen_group, "object_pose", object_pose_section)
         self._write_pose_section(datagen_group, "eef_pose", eef_pose_section)
@@ -254,6 +317,34 @@ class AnnotatedMimicHDF5Recorder:
         signal_group = datagen_group.create_group("subtask_term_signals")
         for key, stacked in signal_values.items():
             signal_group.create_dataset(key, data=stacked, compression="lzf")
+
+    def _write_joint_obs_section(
+        self,
+        obs_group: Any,
+        *,
+        joint_actions: np.ndarray,
+        joint_pos: dict[str, np.ndarray],
+        joint_vel: dict[str, np.ndarray],
+    ) -> None:
+        obs_group.create_dataset("actions", data=joint_actions, compression="lzf")
+
+        left_joint_pos = joint_pos["left_arm"]
+        right_joint_pos = joint_pos["right_arm"]
+        left_joint_vel = joint_vel["left_arm"]
+        right_joint_vel = joint_vel["right_arm"]
+        left_target = joint_actions[:, :6]
+        right_target = joint_actions[:, 6:12]
+
+        obs_group.create_dataset("left_joint_pos", data=left_joint_pos, compression="lzf")
+        obs_group.create_dataset("right_joint_pos", data=right_joint_pos, compression="lzf")
+        obs_group.create_dataset("left_joint_pos_target", data=left_target, compression="lzf")
+        obs_group.create_dataset("right_joint_pos_target", data=right_target, compression="lzf")
+        obs_group.create_dataset("left_joint_pos_rel", data=(left_target - left_joint_pos), compression="lzf")
+        obs_group.create_dataset("right_joint_pos_rel", data=(right_target - right_joint_pos), compression="lzf")
+        obs_group.create_dataset("left_joint_vel", data=left_joint_vel, compression="lzf")
+        obs_group.create_dataset("right_joint_vel", data=right_joint_vel, compression="lzf")
+        obs_group.create_dataset("left_joint_vel_rel", data=left_joint_vel, compression="lzf")
+        obs_group.create_dataset("right_joint_vel_rel", data=right_joint_vel, compression="lzf")
 
     def _write_initial_garment_state(self, demo_group: Any) -> None:
         if self._episode_meta is None:

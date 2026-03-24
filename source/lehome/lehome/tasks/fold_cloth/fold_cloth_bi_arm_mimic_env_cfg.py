@@ -117,7 +117,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_left_lower",
                 subtask_term_signal="left_middle_to_lower",
-                subtask_term_offset_range=(5, 5),
+                subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
                 action_noise=0.0,

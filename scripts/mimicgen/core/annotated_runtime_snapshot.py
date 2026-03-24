@@ -24,6 +24,9 @@ class AnnotatedRuntimeSnapshot:
     eef_pose: dict[str, torch.Tensor]
     target_eef_pose: dict[str, torch.Tensor]
     gripper_actions: dict[str, torch.Tensor]
+    joint_actions: torch.Tensor | None
+    joint_pos: dict[str, torch.Tensor]
+    joint_vel: dict[str, torch.Tensor]
     observation_context: FoldClothSubtaskObservationContext
 
 
@@ -47,6 +50,13 @@ def _normalize_pose_tensor(value: torch.Tensor) -> torch.Tensor:
     if pose.ndim != 3 or pose.shape[-2:] != (4, 4):
         raise ValueError(f"Expected pose tensor shaped (N, 4, 4), got {tuple(pose.shape)}.")
     return pose
+
+
+def _slice_joint_tensor(value: Any) -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32)
+    if tensor.ndim == 1:
+        tensor = tensor.unsqueeze(0)
+    return tensor[:1].reshape(1, -1)
 
 
 def capture_annotated_runtime_snapshot(
@@ -95,11 +105,29 @@ def capture_annotated_runtime_snapshot(
         for arm_name, value in env.actions_to_gripper_actions(reference_action).items()
     }
 
+    joint_actions: torch.Tensor | None = None
+    if reference_action is not None:
+        action_tensor = torch.as_tensor(reference_action, device=env.device, dtype=torch.float32)
+        if action_tensor.ndim == 1:
+            action_tensor = action_tensor.unsqueeze(0)
+        if action_tensor.ndim == 2 and action_tensor.shape[-1] >= 12:
+            joint_actions = action_tensor[:1, :12].clone()
+
+    joint_pos: dict[str, torch.Tensor] = {}
+    joint_vel: dict[str, torch.Tensor] = {}
+
     close_threshold = float(getattr(getattr(env, "cfg", None), "subtask_gripper_close_threshold", 0.5))
     gripper_closed_by_arm: dict[str, torch.Tensor] = {}
     arm_at_rest_by_arm: dict[str, torch.Tensor] = {}
     for arm_name in ("left_arm", "right_arm"):
         arm = env.scene[arm_name]
+        joint_pos[arm_name] = _slice_joint_tensor(arm.data.joint_pos)
+        joint_vel_tensor = getattr(arm.data, "joint_vel", None)
+        if joint_vel_tensor is None:
+            joint_vel_tensor = getattr(arm.data, "joint_velocity", None)
+        if joint_vel_tensor is None:
+            joint_vel_tensor = torch.zeros_like(joint_pos[arm_name])
+        joint_vel[arm_name] = _slice_joint_tensor(joint_vel_tensor)
         gripper_joint_idx = _get_gripper_joint_index(arm)
         gripper_closed_by_arm[arm_name] = (
             arm.data.joint_pos[:1, gripper_joint_idx : gripper_joint_idx + 1] > close_threshold
@@ -129,6 +157,9 @@ def capture_annotated_runtime_snapshot(
         eef_pose=eef_pose,
         target_eef_pose=eef_pose,
         gripper_actions=gripper_actions,
+        joint_actions=joint_actions,
+        joint_pos=joint_pos,
+        joint_vel=joint_vel,
         observation_context=observation_context,
     )
 

@@ -520,6 +520,9 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         target_eef_pose=snapshot.target_eef_pose,
                         subtask_term_signals=annotator.as_tensor_dict(),
                         gripper_actions=snapshot.gripper_actions,
+                        joint_actions=snapshot.joint_actions,
+                        joint_pos=snapshot.joint_pos,
+                        joint_vel=snapshot.joint_vel,
                     )
 
                     terminated, truncated = env._get_dones()
