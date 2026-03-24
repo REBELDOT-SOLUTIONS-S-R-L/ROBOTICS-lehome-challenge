@@ -88,7 +88,7 @@ def init_action_cfg(action_cfg, device):
                 "wrist_flex",
                 "wrist_roll",
             ],
-            body_name="gripper",
+            body_name="gripper_frame_link",
             controller=mdp.DifferentialIKControllerCfg(
                 command_type="pose",
                 ik_method="dls",
@@ -110,7 +110,7 @@ def init_action_cfg(action_cfg, device):
                 "wrist_flex",
                 "wrist_roll",
             ],
-            body_name="gripper",
+            body_name="gripper_frame_link",
             controller=mdp.DifferentialIKControllerCfg(
                 command_type="pose",
                 ik_method="dls",

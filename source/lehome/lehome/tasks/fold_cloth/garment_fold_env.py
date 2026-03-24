@@ -621,6 +621,15 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 body_ids, _ = arm.find_bodies(pattern, preserve_order=True)
                 if len(body_ids) > 0:
                     self._eef_body_idx_cache[eef_name] = int(body_ids[0])
+                    try:
+                        body_name = arm.body_names[int(body_ids[0])]
+                    except Exception:
+                        body_name = f"<index {int(body_ids[0])}>"
+                    logger.info(
+                        "Resolved end-effector body for %s: %s",
+                        eef_name,
+                        body_name,
+                    )
                     return int(body_ids[0])
             except Exception:
                 continue
