@@ -187,6 +187,7 @@ def _describe_head_status(
         distance_limit_cm = context.middle_to_lower_threshold_m * 100.0
         return (
             f"{arm_label}: waiting to {signal_label}. "
+            f"Gripper open: {'no' if _bool_text(context.gripper_closed_by_arm[arm_name]) == 'yes' else 'yes'}. "
             f"Keypoint distance: {_cm_text(distance)} (need <= {distance_limit_cm:.1f} cm). "
             f"Dwell: {dwell}/{required}."
         )
@@ -202,6 +203,7 @@ def _describe_head_status(
         distance_limit_cm = context.lower_to_upper_threshold_m * 100.0
         return (
             f"{arm_label}: waiting to {signal_label}. "
+            f"Gripper open: {'no' if _bool_text(context.gripper_closed_by_arm[arm_name]) == 'yes' else 'yes'}. "
             f"Keypoint distance: {_cm_text(distance)} (need <= {distance_limit_cm:.1f} cm). "
             f"Dwell: {dwell}/{required}."
         )
@@ -530,6 +532,12 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         _log_annotation_progress(annotator, episode_index, episode_step_count)
 
                     if annotator.is_complete() and not annotation_complete_logged:
+                        log_success_result(
+                            env,
+                            episode_index=episode_index,
+                            step_in_episode=episode_step_count,
+                            context="annotation_complete",
+                        )
                         logger.info(
                             "[Annotated Recording] All subtask queues completed. "
                             "Press N to save the episode or D to re-record."

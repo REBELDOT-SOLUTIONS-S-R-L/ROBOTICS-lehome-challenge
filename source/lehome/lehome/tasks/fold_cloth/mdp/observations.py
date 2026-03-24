@@ -338,17 +338,25 @@ def get_subtask_signal_observation_from_context(
             <= context.grasp_eef_to_keypoint_threshold_m
         )
     if signal_name == "left_middle_to_lower":
-        return _context_keypoint_pair_distance(
-            context,
-            "garment_left_middle",
-            "garment_left_lower",
-        ) <= context.middle_to_lower_threshold_m
+        return (
+            ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
+        ) & (
+            _context_keypoint_pair_distance(
+                context,
+                "garment_left_middle",
+                "garment_left_lower",
+            ) <= context.middle_to_lower_threshold_m
+        )
     if signal_name == "right_middle_to_lower":
-        return _context_keypoint_pair_distance(
-            context,
-            "garment_right_middle",
-            "garment_right_lower",
-        ) <= context.middle_to_lower_threshold_m
+        return (
+            ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
+        ) & (
+            _context_keypoint_pair_distance(
+                context,
+                "garment_right_middle",
+                "garment_right_lower",
+            ) <= context.middle_to_lower_threshold_m
+        )
     if signal_name == "grasp_left_lower":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
             _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_lower")
@@ -360,17 +368,25 @@ def get_subtask_signal_observation_from_context(
             <= context.grasp_eef_to_keypoint_threshold_m
         )
     if signal_name == "left_lower_to_upper":
-        return _context_keypoint_pair_distance(
-            context,
-            "garment_left_lower",
-            "garment_left_upper",
-        ) <= context.lower_to_upper_threshold_m
+        return (
+            ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
+        ) & (
+            _context_keypoint_pair_distance(
+                context,
+                "garment_left_lower",
+                "garment_left_upper",
+            ) <= context.lower_to_upper_threshold_m
+        )
     if signal_name == "right_lower_to_upper":
-        return _context_keypoint_pair_distance(
-            context,
-            "garment_right_lower",
-            "garment_right_upper",
-        ) <= context.lower_to_upper_threshold_m
+        return (
+            ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
+        ) & (
+            _context_keypoint_pair_distance(
+                context,
+                "garment_right_lower",
+                "garment_right_upper",
+            ) <= context.lower_to_upper_threshold_m
+        )
     if signal_name == "left_return_home":
         fold_success_value = context.fold_success
         if fold_success_value is None:
@@ -535,12 +551,14 @@ def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
-    return keypoint_pair_distance(
-        env,
-        "garment_left_middle",
-        "garment_left_lower",
-        env_ids=env_ids,
-    ) <= threshold
+    return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
+        keypoint_pair_distance(
+            env,
+            "garment_left_middle",
+            "garment_left_lower",
+            env_ids=env_ids,
+        ) <= threshold
+    )
 
 
 def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -549,12 +567,14 @@ def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = 
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
-    return keypoint_pair_distance(
-        env,
-        "garment_right_middle",
-        "garment_right_lower",
-        env_ids=env_ids,
-    ) <= threshold
+    return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
+        keypoint_pair_distance(
+            env,
+            "garment_right_middle",
+            "garment_right_lower",
+            env_ids=env_ids,
+        ) <= threshold
+    )
 
 
 def grasp_left_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -585,12 +605,14 @@ def left_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = No
         "subtask_lower_to_upper_threshold_m",
         _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
     )
-    return keypoint_pair_distance(
-        env,
-        "garment_left_lower",
-        "garment_left_upper",
-        env_ids=env_ids,
-    ) <= threshold
+    return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
+        keypoint_pair_distance(
+            env,
+            "garment_left_lower",
+            "garment_left_upper",
+            env_ids=env_ids,
+        ) <= threshold
+    )
 
 
 def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -599,12 +621,14 @@ def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
         "subtask_lower_to_upper_threshold_m",
         _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
     )
-    return keypoint_pair_distance(
-        env,
-        "garment_right_lower",
-        "garment_right_upper",
-        env_ids=env_ids,
-    ) <= threshold
+    return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
+        keypoint_pair_distance(
+            env,
+            "garment_right_lower",
+            "garment_right_upper",
+            env_ids=env_ids,
+        ) <= threshold
+    )
 
 
 def left_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
