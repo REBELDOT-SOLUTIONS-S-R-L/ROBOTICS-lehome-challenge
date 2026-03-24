@@ -18,7 +18,10 @@ from lehome.utils.record import get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from .annotated_recording import AnnotatedMimicHDF5Recorder
-from .annotated_runtime_snapshot import capture_annotated_runtime_snapshot
+from .annotated_runtime_snapshot import (
+    capture_annotated_runtime_snapshot,
+    ensure_return_home_snapshot_fields,
+)
 from .env_runtime import get_env_garment_metadata
 from .online_annotation import OnlineAnnotationState
 from .record_debug import (
@@ -50,6 +53,7 @@ _ARM_LABELS = {
     "left_arm": "Left arm",
     "right_arm": "Right arm",
 }
+_RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
 
 
 def _safe_get_all_pose(env: DirectRLEnv) -> dict[str, Any] | None:
@@ -264,6 +268,14 @@ def _log_incomplete_episode_summary(
             logger.warning("%s %s", prefix, _describe_head_status(annotator, arm_name, snapshot))
 
 
+def _current_return_home_arms(annotator: OnlineAnnotationState) -> tuple[str, ...]:
+    return tuple(
+        arm_name
+        for arm_name, signal_name in annotator.current_signal_heads().items()
+        if signal_name in _RETURN_HOME_SIGNALS
+    )
+
+
 def _reset_environment_for_next_attempt(
     env: DirectRLEnv,
     args: argparse.Namespace,
@@ -342,6 +354,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
             file_path=_resolve_output_hdf5_path(getattr(args, "dataset_root", "Datasets/record")),
             env_args=_build_env_args(args),
             fps=int(getattr(args, "step_hz", 90)),
+            episode_capacity=int(env.max_episode_length) + 1,
         )
         annotator = OnlineAnnotationState.from_env(env)
         debug_pose_state: dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
@@ -397,6 +410,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     object_initial_pose=cached_object_initial_pose,
                     garment_name=garment_name,
                     scale=scale,
+                    signal_names=tuple(annotator.latched_signals.keys()),
                 )
 
                 episode_step_count = 0
@@ -455,6 +469,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                                 env,
                                 _get_hold_action(env),
                                 include_fold_success=annotator.needs_fold_success(),
+                                rest_pose_arms=_current_return_home_arms(annotator),
                             )
                             _log_incomplete_episode_summary(
                                 annotator,
@@ -496,14 +511,15 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         env,
                         action,
                         include_fold_success=annotator.needs_fold_success(),
+                        rest_pose_arms=_current_return_home_arms(annotator),
                     )
                     newly_latched = annotator.advance_from_context(snapshot.observation_context)
                     if newly_latched:
                         if annotator.needs_fold_success() and snapshot.observation_context.fold_success is None:
-                            snapshot = capture_annotated_runtime_snapshot(
+                            snapshot = ensure_return_home_snapshot_fields(
                                 env,
-                                action,
-                                include_fold_success=True,
+                                snapshot,
+                                _current_return_home_arms(annotator),
                             )
                         logger.info(
                             "[Annotated Recording][Episode %d][step %d] Latched: %s",
@@ -522,12 +538,11 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
 
                     recorder.append_step(
                         checkpoint_positions=snapshot.checkpoint_positions,
-                        eef_pose=snapshot.eef_pose,
+                        eef_pose_components=snapshot.eef_pose_components,
                         subtask_term_signals=annotator.as_bool_dict(),
                         gripper_actions=snapshot.gripper_actions,
                         joint_actions=snapshot.joint_actions,
                         joint_pos=snapshot.joint_pos,
-                        joint_vel=snapshot.joint_vel,
                     )
 
                     terminated, truncated = env._get_dones()

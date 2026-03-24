@@ -45,6 +45,13 @@ def _normalize_pose_matrix(value: Any) -> torch.Tensor:
     return tensor.detach().cpu().clone()
 
 
+def _normalize_pose_components(value: Any) -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32).reshape(-1)
+    if tensor.numel() != 7:
+        raise ValueError(f"Expected compact pose with 7 values [pos(3), quat(4)], got {tuple(tensor.shape)}.")
+    return tensor.detach().cpu().clone()
+
+
 def _normalize_checkpoint_positions(value: Any) -> torch.Tensor:
     tensor = torch.as_tensor(value, dtype=torch.float32)
     if tensor.ndim == 3 and tensor.shape[0] == 1:
@@ -99,6 +106,19 @@ def _pose_series_from_positions(positions: np.ndarray) -> np.ndarray:
     return pose_series
 
 
+def _pose_series_from_components(pose_components: np.ndarray) -> np.ndarray:
+    if pose_components.ndim != 2 or pose_components.shape[1] != 7:
+        raise ValueError(f"Expected compact pose series with shape (T, 7), got {tuple(pose_components.shape)}.")
+    num_samples = int(pose_components.shape[0])
+    pose_series = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], num_samples, axis=0)
+    pose_series[:, :3, 3] = pose_components[:, :3].astype(np.float32, copy=False)
+    rotations = PoseUtils.matrix_from_quat(
+        torch.as_tensor(pose_components[:, 3:7], dtype=torch.float32)
+    ).detach().cpu().numpy()
+    pose_series[:, :3, :3] = rotations.astype(np.float32, copy=False)
+    return pose_series
+
+
 def _build_object_pose_section(checkpoint_series: np.ndarray) -> dict[str, np.ndarray]:
     if checkpoint_series.ndim != 3 or checkpoint_series.shape[1:] != (len(CHECKPOINT_LABELS), 3):
         raise ValueError(
@@ -114,7 +134,7 @@ def _build_object_pose_section(checkpoint_series: np.ndarray) -> dict[str, np.nd
 class AnnotatedMimicHDF5Recorder:
     """Buffered writer for generation-ready Mimic teleoperation episodes."""
 
-    def __init__(self, file_path: Path, env_args: dict[str, Any], fps: int) -> None:
+    def __init__(self, file_path: Path, env_args: dict[str, Any], fps: int, episode_capacity: int) -> None:
         require_h5py("annotated Mimic HDF5 recording")
         self._file_path = Path(file_path)
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -135,6 +155,10 @@ class AnnotatedMimicHDF5Recorder:
         self._total_samples = 0
         self._validated_object_pose_once = False
         self._signal_names: tuple[str, ...] | None = None
+        self._episode_capacity = int(episode_capacity)
+        self._episode_step_count = 0
+        if self._episode_capacity <= 0:
+            raise ValueError(f"Episode capacity must be positive, got {self._episode_capacity}.")
 
     @property
     def file_path(self) -> Path:
@@ -146,6 +170,7 @@ class AnnotatedMimicHDF5Recorder:
         object_initial_pose: dict[str, Any] | None,
         garment_name: str | None,
         scale: Any | None,
+        signal_names: tuple[str, ...],
     ) -> None:
         if self._episode_index is not None:
             raise RuntimeError("Cannot begin a new episode while another episode is active.")
@@ -156,17 +181,34 @@ class AnnotatedMimicHDF5Recorder:
             "garment_name": str(garment_name) if garment_name else "unknown",
             "scale": to_json_compatible(scale),
         }
+        self._signal_names = tuple(signal_names)
+        if not self._signal_names:
+            raise RuntimeError("Annotated recorder requires at least one subtask signal name.")
         self._buffers = {
-            "checkpoint_positions": [],
-            "eef_pose": {},
-            "subtask_term_signal_vectors": [],
-            "gripper_actions": {},
-            "joint_actions": [],
-            "joint_pos": {},
-            "joint_vel": {},
+            "checkpoint_positions": torch.empty(
+                (self._episode_capacity, len(CHECKPOINT_LABELS), 3),
+                dtype=torch.float32,
+            ),
+            "eef_pose_components": {
+                "left_arm": torch.empty((self._episode_capacity, 7), dtype=torch.float32),
+                "right_arm": torch.empty((self._episode_capacity, 7), dtype=torch.float32),
+            },
+            "subtask_term_signal_vectors": torch.empty(
+                (self._episode_capacity, len(self._signal_names)),
+                dtype=torch.bool,
+            ),
+            "gripper_actions": {
+                "left_arm": torch.empty((self._episode_capacity, 1), dtype=torch.float32),
+                "right_arm": torch.empty((self._episode_capacity, 1), dtype=torch.float32),
+            },
+            "joint_actions": torch.empty((self._episode_capacity, 12), dtype=torch.float32),
+            "joint_pos": {
+                "left_arm": torch.empty((self._episode_capacity, 6), dtype=torch.float32),
+                "right_arm": torch.empty((self._episode_capacity, 6), dtype=torch.float32),
+            },
         }
         self._validated_object_pose_once = False
-        self._signal_names = None
+        self._episode_step_count = 0
 
     def discard_episode(self) -> None:
         self._episode_index = None
@@ -174,20 +216,24 @@ class AnnotatedMimicHDF5Recorder:
         self._buffers = {}
         self._validated_object_pose_once = False
         self._signal_names = None
+        self._episode_step_count = 0
 
     def append_step(
         self,
         *,
         checkpoint_positions: Any,
-        eef_pose: dict[str, Any],
+        eef_pose_components: dict[str, Any],
         subtask_term_signals: dict[str, Any],
         gripper_actions: dict[str, Any],
         joint_actions: Any | None,
         joint_pos: dict[str, Any],
-        joint_vel: dict[str, Any],
     ) -> None:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode. Call begin_episode() first.")
+        if self._episode_step_count >= self._episode_capacity:
+            raise RuntimeError(
+                f"Episode exceeded recorder capacity {self._episode_capacity}. Increase preallocated length."
+            )
 
         normalized_checkpoint_positions = _normalize_checkpoint_positions(checkpoint_positions)
         if not self._validated_object_pose_once:
@@ -199,84 +245,84 @@ class AnnotatedMimicHDF5Recorder:
             )
             self._validated_object_pose_once = True
 
-        self._buffers["checkpoint_positions"].append(normalized_checkpoint_positions)
-        self._append_pose_section("eef_pose", eef_pose)
-        self._append_signal_section(subtask_term_signals)
-        self._append_gripper_action_section(gripper_actions)
+        step_idx = self._episode_step_count
+        self._buffers["checkpoint_positions"][step_idx] = normalized_checkpoint_positions
+        self._append_pose_section("eef_pose_components", eef_pose_components, step_idx)
+        self._append_signal_section(subtask_term_signals, step_idx)
+        self._append_gripper_action_section(gripper_actions, step_idx)
         self._append_joint_observation_step(
             joint_actions=joint_actions,
             joint_pos=joint_pos,
-            joint_vel=joint_vel,
+            step_idx=step_idx,
         )
+        self._episode_step_count += 1
 
-    def _append_pose_section(self, section_name: str, values: dict[str, Any]) -> None:
+    def _append_pose_section(self, section_name: str, values: dict[str, Any], step_idx: int) -> None:
         section = self._buffers[section_name]
         for key, value in values.items():
-            section.setdefault(str(key), []).append(_normalize_pose_matrix(value))
+            section[str(key)][step_idx] = _normalize_pose_components(value)
 
-    def _append_signal_section(self, values: dict[str, Any]) -> None:
+    def _append_signal_section(self, values: dict[str, Any], step_idx: int) -> None:
         signal_names, signal_vector = _normalize_bool_signal_vector(values, self._signal_names)
         self._signal_names = signal_names
-        self._buffers["subtask_term_signal_vectors"].append(signal_vector)
+        self._buffers["subtask_term_signal_vectors"][step_idx] = signal_vector
 
-    def _append_gripper_action_section(self, values: dict[str, Any]) -> None:
+    def _append_gripper_action_section(self, values: dict[str, Any], step_idx: int) -> None:
         section = self._buffers["gripper_actions"]
         for key, value in values.items():
-            section.setdefault(str(key), []).append(_normalize_scalar_column(value))
+            section[str(key)][step_idx] = _normalize_scalar_column(value)
 
     def _append_joint_observation_step(
         self,
         *,
         joint_actions: Any | None,
         joint_pos: dict[str, Any],
-        joint_vel: dict[str, Any],
+        step_idx: int,
     ) -> None:
         if joint_actions is None:
             raise RuntimeError("Annotated recorder requires joint_actions for IK->joint conversion support.")
-        self._buffers["joint_actions"].append(_normalize_joint_row(joint_actions, expected_dim=12))
+        self._buffers["joint_actions"][step_idx] = _normalize_joint_row(joint_actions, expected_dim=12)
 
         pos_section = self._buffers["joint_pos"]
-        vel_section = self._buffers["joint_vel"]
         for arm_name in ("left_arm", "right_arm"):
             if arm_name not in joint_pos:
                 raise RuntimeError(f"Missing joint_pos for {arm_name}.")
-            if arm_name not in joint_vel:
-                raise RuntimeError(f"Missing joint_vel for {arm_name}.")
-            pos_section.setdefault(arm_name, []).append(
-                _normalize_joint_row(joint_pos[arm_name], expected_dim=6)
-            )
-            vel_section.setdefault(arm_name, []).append(
-                _normalize_joint_row(joint_vel[arm_name], expected_dim=6)
+            pos_section[arm_name][step_idx] = _normalize_joint_row(
+                joint_pos[arm_name], expected_dim=6
             )
 
-    def _stack_pose_section(self, section_name: str) -> dict[str, np.ndarray]:
+    def _used_pose_component_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
-            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
-            for key, frames in self._buffers[section_name].items()
+            key: value[: self._episode_step_count].numpy().astype(np.float32, copy=False)
+            for key, value in self._buffers[section_name].items()
         }
 
-    def _stack_signal_section(self) -> dict[str, np.ndarray]:
+    def _used_signal_section(self) -> dict[str, np.ndarray]:
         if self._signal_names is None:
             raise RuntimeError("Missing signal names for annotated recording.")
-        stacked = torch.stack(self._buffers["subtask_term_signal_vectors"], dim=0).numpy().astype(np.bool_, copy=False)
+        stacked = (
+            self._buffers["subtask_term_signal_vectors"][: self._episode_step_count]
+            .numpy()
+            .astype(np.bool_, copy=False)
+        )
         return {
             signal_name: stacked[:, idx : idx + 1]
             for idx, signal_name in enumerate(self._signal_names)
         }
 
-    def _stack_joint_actions(self) -> np.ndarray:
-        return torch.stack(self._buffers["joint_actions"], dim=0).numpy().astype(np.float32, copy=False)
+    def _used_joint_actions(self) -> np.ndarray:
+        return self._buffers["joint_actions"][: self._episode_step_count].numpy().astype(np.float32, copy=False)
 
-    def _stack_joint_section(self, section_name: str) -> dict[str, np.ndarray]:
+    def _used_joint_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
-            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
-            for key, frames in self._buffers[section_name].items()
+            key: value[: self._episode_step_count].numpy().astype(np.float32, copy=False)
+            for key, value in self._buffers[section_name].items()
         }
 
-    def _stack_gripper_actions(self) -> dict[str, np.ndarray]:
+    def _used_gripper_actions(self) -> dict[str, np.ndarray]:
         return {
-            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
-            for key, frames in self._buffers["gripper_actions"].items()
+            key: value[: self._episode_step_count].numpy().astype(np.float32, copy=False)
+            for key, value in self._buffers["gripper_actions"].items()
         }
 
     def _synthesize_native_actions(
@@ -319,7 +365,7 @@ class AnnotatedMimicHDF5Recorder:
     def finalize_episode(self, env: Any) -> None:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode to finalize.")
-        if not self._buffers.get("checkpoint_positions"):
+        if self._episode_step_count <= 0:
             raise RuntimeError("Cannot finalize an empty episode.")
 
         episode_name = f"demo_{self._episode_index}"
@@ -327,7 +373,7 @@ class AnnotatedMimicHDF5Recorder:
             del self._data_group[episode_name]
 
         checkpoint_series = (
-            torch.stack(self._buffers["checkpoint_positions"], dim=0)
+            self._buffers["checkpoint_positions"][: self._episode_step_count]
             .numpy()
             .astype(np.float32, copy=False)
         )
@@ -336,16 +382,19 @@ class AnnotatedMimicHDF5Recorder:
             object_pose_section,
             context="AnnotatedMimicHDF5Recorder.finalize_episode",
         )
-        eef_pose_section = self._stack_pose_section("eef_pose")
+        eef_pose_components = self._used_pose_component_section("eef_pose_components")
+        eef_pose_section = {
+            key: _pose_series_from_components(value)
+            for key, value in eef_pose_components.items()
+        }
         target_eef_pose_section = {
             key: value.copy()
             for key, value in eef_pose_section.items()
         }
-        signal_section = self._stack_signal_section()
-        gripper_action_section = self._stack_gripper_actions()
-        joint_actions = self._stack_joint_actions()
-        joint_pos_section = self._stack_joint_section("joint_pos")
-        joint_vel_section = self._stack_joint_section("joint_vel")
+        signal_section = self._used_signal_section()
+        gripper_action_section = self._used_gripper_actions()
+        joint_actions = self._used_joint_actions()
+        joint_pos_section = self._used_joint_section("joint_pos")
 
         demo_group = self._data_group.create_group(episode_name)
         actions = self._synthesize_native_actions(
@@ -362,7 +411,6 @@ class AnnotatedMimicHDF5Recorder:
             obs_group,
             joint_actions=joint_actions,
             joint_pos=joint_pos_section,
-            joint_vel=joint_vel_section,
         )
         datagen_group = obs_group.create_group("datagen_info")
         self._write_pose_section(datagen_group, "object_pose", object_pose_section)
@@ -403,14 +451,11 @@ class AnnotatedMimicHDF5Recorder:
         *,
         joint_actions: np.ndarray,
         joint_pos: dict[str, np.ndarray],
-        joint_vel: dict[str, np.ndarray],
     ) -> None:
         obs_group.create_dataset("actions", data=joint_actions, compression="lzf")
 
         left_joint_pos = joint_pos["left_arm"]
         right_joint_pos = joint_pos["right_arm"]
-        left_joint_vel = joint_vel["left_arm"]
-        right_joint_vel = joint_vel["right_arm"]
         left_target = joint_actions[:, :6]
         right_target = joint_actions[:, 6:12]
 
@@ -420,10 +465,6 @@ class AnnotatedMimicHDF5Recorder:
         obs_group.create_dataset("right_joint_pos_target", data=right_target, compression="lzf")
         obs_group.create_dataset("left_joint_pos_rel", data=(left_target - left_joint_pos), compression="lzf")
         obs_group.create_dataset("right_joint_pos_rel", data=(right_target - right_joint_pos), compression="lzf")
-        obs_group.create_dataset("left_joint_vel", data=left_joint_vel, compression="lzf")
-        obs_group.create_dataset("right_joint_vel", data=right_joint_vel, compression="lzf")
-        obs_group.create_dataset("left_joint_vel_rel", data=left_joint_vel, compression="lzf")
-        obs_group.create_dataset("right_joint_vel_rel", data=right_joint_vel, compression="lzf")
 
     def _write_initial_garment_state(self, demo_group: Any) -> None:
         if self._episode_meta is None:
