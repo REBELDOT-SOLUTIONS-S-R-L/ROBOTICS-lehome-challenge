@@ -220,29 +220,24 @@ def _log_annotation_progress(
     annotator: OnlineAnnotationState,
     episode_index: int,
     episode_step_count: int,
-    snapshot=None,
 ) -> None:
-    """Log current annotation progress in operator-friendly terms."""
+    """Log compact queue progress for operator-facing annotation updates."""
     prefix = f"[Annotated Recording][Episode {episode_index}][step {episode_step_count}]"
-    latched = [_format_signal_label(name) for name, state in annotator.latched_signals.items() if state]
-    latched_str = ", ".join(latched) if latched else "none yet"
-    logger.info("%s Completed subtasks: %s", prefix, latched_str)
-    if snapshot is None:
-        for arm_name, head_signal in annotator.current_signal_heads().items():
-            arm_label = _ARM_LABELS.get(arm_name, arm_name)
-            if head_signal is None:
-                logger.info("%s %s is complete.", prefix, arm_label)
-            else:
-                logger.info(
-                    "%s %s is currently waiting for: %s.",
-                    prefix,
-                    arm_label,
-                    _format_signal_label(head_signal),
-                )
-        return
-
     for arm_name in sorted(annotator.current_signal_heads().keys()):
-        logger.info("%s %s", prefix, _describe_head_status(annotator, arm_name, snapshot))
+        queue = annotator.arm_queues.get(arm_name, [])
+        completed = int(annotator.arm_queue_indices.get(arm_name, 0))
+        total = len(queue)
+        next_signal = annotator.current_signal_heads().get(arm_name)
+        arm_label = _ARM_LABELS.get(arm_name, arm_name)
+        next_label = _format_signal_label(next_signal) if next_signal is not None else "complete"
+        logger.info(
+            "%s %s: %d/%d complete | next: %s",
+            prefix,
+            arm_label,
+            completed,
+            total,
+            next_label,
+        )
 
 
 def _log_incomplete_episode_summary(
@@ -498,15 +493,12 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                                 include_fold_success=True,
                             )
                         logger.info(
-                            "[Annotated Recording] Latched subtasks: %s",
+                            "[Annotated Recording][Episode %d][step %d] Latched: %s",
+                            episode_index,
+                            episode_step_count,
                             ", ".join(_format_signal_label(signal_name) for signal_name in newly_latched),
                         )
-                        _log_annotation_progress(
-                            annotator,
-                            episode_index=episode_index,
-                            episode_step_count=episode_step_count,
-                            snapshot=snapshot,
-                        )
+                        _log_annotation_progress(annotator, episode_index, episode_step_count)
 
                     if annotator.is_complete() and not annotation_complete_logged:
                         logger.info(
