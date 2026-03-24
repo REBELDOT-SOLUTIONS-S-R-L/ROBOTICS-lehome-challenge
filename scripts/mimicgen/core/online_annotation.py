@@ -229,14 +229,10 @@ class OnlineAnnotationState:
             newly_latched.append(signal_name)
         return newly_latched
 
-    def as_tensor_dict(self) -> dict[str, torch.Tensor]:
-        """Return current latched state as float32 tensors shaped (1, 1)."""
+    def as_bool_dict(self) -> dict[str, bool]:
+        """Return current latched state as plain booleans for recorder packing."""
         return {
-            signal_name: torch.tensor(
-                [[1.0 if latched else 0.0]],
-                dtype=torch.float32,
-                device=self.device,
-            )
+            signal_name: bool(latched)
             for signal_name, latched in self.latched_signals.items()
         }
 

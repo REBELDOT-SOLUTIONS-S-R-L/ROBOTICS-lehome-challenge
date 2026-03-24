@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS, semantic_keypoints_from_positions
+from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS
 from lehome.tasks.fold_cloth.mdp.observations import (
     FoldClothSubtaskObservationContext,
     build_subtask_observation_context,
@@ -20,21 +20,13 @@ from lehome.utils.robot_utils import is_so101_at_rest_pose
 class AnnotatedRuntimeSnapshot:
     """Single-step state shared by the annotated teleop hot path."""
 
-    object_pose: dict[str, torch.Tensor]
+    checkpoint_positions: torch.Tensor
     eef_pose: dict[str, torch.Tensor]
-    target_eef_pose: dict[str, torch.Tensor]
     gripper_actions: dict[str, torch.Tensor]
     joint_actions: torch.Tensor | None
     joint_pos: dict[str, torch.Tensor]
     joint_vel: dict[str, torch.Tensor]
     observation_context: FoldClothSubtaskObservationContext
-
-
-def _pose_from_position(pos: torch.Tensor) -> torch.Tensor:
-    pose = torch.eye(4, device=pos.device, dtype=pos.dtype).unsqueeze(0)
-    pose[:, :3, 3] = pos.reshape(1, 3)
-    return pose
-
 
 def _get_gripper_joint_index(arm: Any) -> int:
     joint_names = list(getattr(arm.data, "joint_names", []) or [])
@@ -79,17 +71,16 @@ def capture_annotated_runtime_snapshot(
 
     checkpoint_positions = garment_obj.get_checkpoint_world_positions(
         check_points,
-        as_numpy=True,
+        as_numpy=False,
     )
-    semantic_points_np = semantic_keypoints_from_positions(checkpoint_positions)
     semantic_keypoints_world = {
-        name: torch.as_tensor(point, device=env.device, dtype=torch.float32).reshape(1, 3)
-        for name, point in semantic_points_np.items()
+        name: torch.as_tensor(checkpoint_positions[idx], device=env.device, dtype=torch.float32).reshape(1, 3)
+        for idx, name in enumerate(CHECKPOINT_LABELS)
     }
-    object_pose = {
-        name: _pose_from_position(pos)
-        for name, pos in semantic_keypoints_world.items()
-    }
+    checkpoint_positions = torch.stack(
+        [semantic_keypoints_world[name].reshape(3) for name in CHECKPOINT_LABELS],
+        dim=0,
+    )
 
     eef_pose = {
         "left_arm": _normalize_pose_tensor(env.get_robot_eef_pose("left_arm", env_ids=[0])),
@@ -153,9 +144,8 @@ def capture_annotated_runtime_snapshot(
     )
 
     return AnnotatedRuntimeSnapshot(
-        object_pose=object_pose,
+        checkpoint_positions=checkpoint_positions,
         eef_pose=eef_pose,
-        target_eef_pose=eef_pose,
         gripper_actions=gripper_actions,
         joint_actions=joint_actions,
         joint_pos=joint_pos,

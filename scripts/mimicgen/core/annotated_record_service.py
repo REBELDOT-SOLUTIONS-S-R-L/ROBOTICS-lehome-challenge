@@ -291,6 +291,19 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     env_cfg.garment_version = args.garment_version
     env_cfg.garment_cfg_base_path = args.garment_cfg_base_path
     env_cfg.particle_cfg_path = args.particle_cfg_path
+    if not bool(getattr(args, "enable_cameras", False)) and hasattr(env_cfg, "scene"):
+        for camera_name in ("left_camera", "right_camera", "top_camera"):
+            if hasattr(env_cfg.scene, camera_name):
+                setattr(env_cfg.scene, camera_name, None)
+        logger.info(
+            "[Annotated Recording] Cameras disabled by default for record_annotated. "
+            "Pass --enable_cameras to opt in."
+        )
+    elif bool(getattr(args, "enable_cameras", False)):
+        logger.info(
+            "[Annotated Recording] Cameras explicitly enabled. "
+            "This mode does not save camera data and FPS may drop."
+        )
     if hasattr(env_cfg, "terminations") and hasattr(env_cfg.terminations, "success"):
         env_cfg.terminations.success = None
         logger.info(
@@ -508,10 +521,9 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         annotation_complete_logged = True
 
                     recorder.append_step(
-                        object_pose=snapshot.object_pose,
+                        checkpoint_positions=snapshot.checkpoint_positions,
                         eef_pose=snapshot.eef_pose,
-                        target_eef_pose=snapshot.target_eef_pose,
-                        subtask_term_signals=annotator.as_tensor_dict(),
+                        subtask_term_signals=annotator.as_bool_dict(),
                         gripper_actions=snapshot.gripper_actions,
                         joint_actions=snapshot.joint_actions,
                         joint_pos=snapshot.joint_pos,

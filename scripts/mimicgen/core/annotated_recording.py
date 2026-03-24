@@ -10,7 +10,7 @@ import numpy as np
 import isaaclab.utils.math as PoseUtils
 import torch
 
-from lehome.tasks.fold_cloth.checkpoint_mappings import validate_semantic_object_pose_dict
+from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS, validate_semantic_object_pose_dict
 
 from .data_utils import as_numpy, to_json_compatible
 from .dataset_io import require_h5py
@@ -36,29 +36,79 @@ def _resolve_garment_pose_value(
     return next(iter(object_initial_pose.values()), None)
 
 
-def _normalize_pose_matrix(value: Any) -> np.ndarray:
-    arr = as_numpy(value, dtype=np.float32)
-    if arr.ndim == 3 and arr.shape[0] == 1:
-        arr = arr[0]
-    if arr.shape != (4, 4):
-        raise ValueError(f"Expected pose matrix shape (4, 4), got {tuple(arr.shape)}.")
-    return arr
+def _normalize_pose_matrix(value: Any) -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32)
+    if tensor.ndim == 3 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tuple(tensor.shape) != (4, 4):
+        raise ValueError(f"Expected pose matrix shape (4, 4), got {tuple(tensor.shape)}.")
+    return tensor.detach().cpu().clone()
 
 
-def _normalize_signal_column(value: Any) -> np.ndarray:
-    arr = as_numpy(value).reshape(-1)
-    if arr.size != 1:
-        raise ValueError(f"Expected scalar/column signal value, got shape {tuple(arr.shape)}.")
-    return arr.astype(np.bool_, copy=False).reshape(1)
+def _normalize_checkpoint_positions(value: Any) -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32)
+    if tensor.ndim == 3 and tensor.shape[0] == 1:
+        tensor = tensor[0]
+    if tensor.ndim != 2 or tensor.shape[0] < len(CHECKPOINT_LABELS) or tensor.shape[1] != 3:
+        raise ValueError(
+            f"Expected checkpoint positions with shape (>= {len(CHECKPOINT_LABELS)}, 3), "
+            f"got {tuple(tensor.shape)}."
+        )
+    return tensor[: len(CHECKPOINT_LABELS)].detach().cpu().clone()
+
+
+def _normalize_bool_signal_vector(
+    values: dict[str, Any],
+    signal_names: tuple[str, ...] | None = None,
+) -> tuple[tuple[str, ...], torch.Tensor]:
+    names = tuple(signal_names or values.keys())
+    if tuple(values.keys()) != names:
+        missing = [name for name in names if name not in values]
+        extra = [name for name in values if name not in names]
+        if missing or extra:
+            raise ValueError(
+                f"Signal set changed during episode. Missing={missing}, extra={extra}."
+            )
+    vector = torch.tensor(
+        [bool(values[name]) for name in names],
+        dtype=torch.bool,
+    )
+    return names, vector
+
+
+def _normalize_scalar_column(value: Any) -> torch.Tensor:
+    tensor = torch.as_tensor(value, dtype=torch.float32).reshape(-1)
+    if tensor.numel() != 1:
+        raise ValueError(f"Expected scalar/column value, got shape {tuple(tensor.shape)}.")
+    return tensor[:1].detach().cpu().clone()
 
 
 def _normalize_joint_row(value: Any, *, expected_dim: int | None = None) -> np.ndarray:
-    arr = as_numpy(value, dtype=np.float32).reshape(-1)
-    if expected_dim is not None and arr.size != expected_dim:
+    arr = torch.as_tensor(value, dtype=torch.float32).reshape(-1)
+    if expected_dim is not None and arr.numel() != expected_dim:
         raise ValueError(
             f"Expected joint row with {expected_dim} values, got shape {tuple(arr.shape)}."
         )
-    return arr.astype(np.float32, copy=False)
+    return arr.detach().cpu().clone()
+
+
+def _pose_series_from_positions(positions: np.ndarray) -> np.ndarray:
+    num_samples = int(positions.shape[0])
+    pose_series = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], num_samples, axis=0)
+    pose_series[:, :3, 3] = positions.astype(np.float32, copy=False)
+    return pose_series
+
+
+def _build_object_pose_section(checkpoint_series: np.ndarray) -> dict[str, np.ndarray]:
+    if checkpoint_series.ndim != 3 or checkpoint_series.shape[1:] != (len(CHECKPOINT_LABELS), 3):
+        raise ValueError(
+            f"Expected checkpoint series with shape (T, {len(CHECKPOINT_LABELS)}, 3), "
+            f"got {tuple(checkpoint_series.shape)}."
+        )
+    return {
+        label: _pose_series_from_positions(checkpoint_series[:, idx, :])
+        for idx, label in enumerate(CHECKPOINT_LABELS)
+    }
 
 
 class AnnotatedMimicHDF5Recorder:
@@ -84,6 +134,7 @@ class AnnotatedMimicHDF5Recorder:
         self._num_episodes = 0
         self._total_samples = 0
         self._validated_object_pose_once = False
+        self._signal_names: tuple[str, ...] | None = None
 
     @property
     def file_path(self) -> Path:
@@ -106,29 +157,29 @@ class AnnotatedMimicHDF5Recorder:
             "scale": to_json_compatible(scale),
         }
         self._buffers = {
-            "object_pose": {},
+            "checkpoint_positions": [],
             "eef_pose": {},
-            "target_eef_pose": {},
-            "subtask_term_signals": {},
+            "subtask_term_signal_vectors": [],
             "gripper_actions": {},
             "joint_actions": [],
             "joint_pos": {},
             "joint_vel": {},
         }
         self._validated_object_pose_once = False
+        self._signal_names = None
 
     def discard_episode(self) -> None:
         self._episode_index = None
         self._episode_meta = None
         self._buffers = {}
         self._validated_object_pose_once = False
+        self._signal_names = None
 
     def append_step(
         self,
         *,
-        object_pose: dict[str, Any],
+        checkpoint_positions: Any,
         eef_pose: dict[str, Any],
-        target_eef_pose: dict[str, Any],
         subtask_term_signals: dict[str, Any],
         gripper_actions: dict[str, Any],
         joint_actions: Any | None,
@@ -138,16 +189,18 @@ class AnnotatedMimicHDF5Recorder:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode. Call begin_episode() first.")
 
+        normalized_checkpoint_positions = _normalize_checkpoint_positions(checkpoint_positions)
         if not self._validated_object_pose_once:
             validate_semantic_object_pose_dict(
-                object_pose,
+                _build_object_pose_section(
+                    normalized_checkpoint_positions.unsqueeze(0).numpy().astype(np.float32, copy=False)
+                ),
                 context="AnnotatedMimicHDF5Recorder.append_step",
             )
             self._validated_object_pose_once = True
 
-        self._append_pose_section("object_pose", object_pose)
+        self._buffers["checkpoint_positions"].append(normalized_checkpoint_positions)
         self._append_pose_section("eef_pose", eef_pose)
-        self._append_pose_section("target_eef_pose", target_eef_pose)
         self._append_signal_section(subtask_term_signals)
         self._append_gripper_action_section(gripper_actions)
         self._append_joint_observation_step(
@@ -162,14 +215,14 @@ class AnnotatedMimicHDF5Recorder:
             section.setdefault(str(key), []).append(_normalize_pose_matrix(value))
 
     def _append_signal_section(self, values: dict[str, Any]) -> None:
-        section = self._buffers["subtask_term_signals"]
-        for key, value in values.items():
-            section.setdefault(str(key), []).append(_normalize_signal_column(value))
+        signal_names, signal_vector = _normalize_bool_signal_vector(values, self._signal_names)
+        self._signal_names = signal_names
+        self._buffers["subtask_term_signal_vectors"].append(signal_vector)
 
     def _append_gripper_action_section(self, values: dict[str, Any]) -> None:
         section = self._buffers["gripper_actions"]
         for key, value in values.items():
-            section.setdefault(str(key), []).append(_normalize_signal_column(value))
+            section.setdefault(str(key), []).append(_normalize_scalar_column(value))
 
     def _append_joint_observation_step(
         self,
@@ -198,28 +251,41 @@ class AnnotatedMimicHDF5Recorder:
 
     def _stack_pose_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
-            key: np.stack(frames, axis=0).astype(np.float32, copy=False)
+            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
             for key, frames in self._buffers[section_name].items()
         }
 
     def _stack_signal_section(self) -> dict[str, np.ndarray]:
+        if self._signal_names is None:
+            raise RuntimeError("Missing signal names for annotated recording.")
+        stacked = torch.stack(self._buffers["subtask_term_signal_vectors"], dim=0).numpy().astype(np.bool_, copy=False)
         return {
-            key: np.stack(frames, axis=0).astype(np.bool_, copy=False)
-            for key, frames in self._buffers["subtask_term_signals"].items()
+            signal_name: stacked[:, idx : idx + 1]
+            for idx, signal_name in enumerate(self._signal_names)
         }
 
     def _stack_joint_actions(self) -> np.ndarray:
-        return np.stack(self._buffers["joint_actions"], axis=0).astype(np.float32, copy=False)
+        return torch.stack(self._buffers["joint_actions"], dim=0).numpy().astype(np.float32, copy=False)
 
     def _stack_joint_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
-            key: np.stack(frames, axis=0).astype(np.float32, copy=False)
+            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
             for key, frames in self._buffers[section_name].items()
         }
 
-    def _synthesize_native_actions(self, env: Any) -> np.ndarray:
-        target_eef_pose = self._buffers["target_eef_pose"]
-        gripper_actions = self._buffers["gripper_actions"]
+    def _stack_gripper_actions(self) -> dict[str, np.ndarray]:
+        return {
+            key: torch.stack(frames, dim=0).numpy().astype(np.float32, copy=False)
+            for key, frames in self._buffers["gripper_actions"].items()
+        }
+
+    def _synthesize_native_actions(
+        self,
+        env: Any,
+        *,
+        target_eef_pose: dict[str, np.ndarray],
+        gripper_actions: dict[str, np.ndarray],
+    ) -> np.ndarray:
         if "left_arm" not in target_eef_pose or "right_arm" not in target_eef_pose:
             raise RuntimeError("Missing target_eef_pose buffers for one or both arms.")
         if "left_arm" not in gripper_actions or "right_arm" not in gripper_actions:
@@ -253,27 +319,40 @@ class AnnotatedMimicHDF5Recorder:
     def finalize_episode(self, env: Any) -> None:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode to finalize.")
-        if not self._buffers.get("eef_pose"):
+        if not self._buffers.get("checkpoint_positions"):
             raise RuntimeError("Cannot finalize an empty episode.")
 
         episode_name = f"demo_{self._episode_index}"
         if episode_name in self._data_group:
             del self._data_group[episode_name]
 
-        object_pose_section = self._stack_pose_section("object_pose")
+        checkpoint_series = (
+            torch.stack(self._buffers["checkpoint_positions"], dim=0)
+            .numpy()
+            .astype(np.float32, copy=False)
+        )
+        object_pose_section = _build_object_pose_section(checkpoint_series)
         validate_semantic_object_pose_dict(
             object_pose_section,
             context="AnnotatedMimicHDF5Recorder.finalize_episode",
         )
         eef_pose_section = self._stack_pose_section("eef_pose")
-        target_eef_pose_section = self._stack_pose_section("target_eef_pose")
+        target_eef_pose_section = {
+            key: value.copy()
+            for key, value in eef_pose_section.items()
+        }
         signal_section = self._stack_signal_section()
+        gripper_action_section = self._stack_gripper_actions()
         joint_actions = self._stack_joint_actions()
         joint_pos_section = self._stack_joint_section("joint_pos")
         joint_vel_section = self._stack_joint_section("joint_vel")
 
         demo_group = self._data_group.create_group(episode_name)
-        actions = self._synthesize_native_actions(env)
+        actions = self._synthesize_native_actions(
+            env,
+            target_eef_pose=target_eef_pose_section,
+            gripper_actions=gripper_action_section,
+        )
         demo_group.create_dataset("actions", data=actions, compression="lzf")
         demo_group.attrs["num_samples"] = np.int64(actions.shape[0])
         demo_group.attrs["success"] = np.bool_(True)
