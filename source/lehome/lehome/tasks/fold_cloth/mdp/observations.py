@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 
 import numpy as np
@@ -14,7 +15,10 @@ from ..checkpoint_mappings import (
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
 )
 from lehome.utils.robot_utils import is_so101_at_rest_pose
-from lehome.utils.success_checker_chanllege import success_checker_garment_fold
+from lehome.utils.success_checker_chanllege import (
+    evaluate_garment_fold_success,
+    success_checker_garment_fold,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -25,6 +29,23 @@ _DEFAULT_GRIPPER_CLOSE_THRESHOLD = 0.5
 _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M = 0.05
 _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
 _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M = 0.12
+_RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
+
+
+@dataclass
+class FoldClothSubtaskObservationContext:
+    """Precomputed state used to evaluate fold-cloth subtask predicates."""
+
+    device: torch.device | str
+    num_envs: int
+    semantic_keypoints_world: dict[str, torch.Tensor]
+    eef_world_positions: dict[str, torch.Tensor]
+    gripper_closed_by_arm: dict[str, torch.Tensor]
+    arm_at_rest_by_arm: dict[str, torch.Tensor]
+    grasp_eef_to_keypoint_threshold_m: float
+    middle_to_lower_threshold_m: float
+    lower_to_upper_threshold_m: float
+    fold_success: torch.Tensor | None = None
 
 
 def _resolve_env_ids(env: ManagerBasedEnv, env_ids: Sequence[int] | None) -> tuple[Sequence[int] | slice, int]:
@@ -72,6 +93,26 @@ def _true_bool_column(env: ManagerBasedEnv, num_envs: int) -> torch.Tensor:
 
 def _full_float_column(env: ManagerBasedEnv, num_envs: int, value: float) -> torch.Tensor:
     return torch.full((num_envs, 1), float(value), dtype=torch.float32, device=env.device)
+
+
+def _context_false_bool_column(context: FoldClothSubtaskObservationContext) -> torch.Tensor:
+    return torch.zeros((context.num_envs, 1), dtype=torch.bool, device=context.device)
+
+
+def _context_true_bool_column(context: FoldClothSubtaskObservationContext) -> torch.Tensor:
+    return torch.ones((context.num_envs, 1), dtype=torch.bool, device=context.device)
+
+
+def _context_full_float_column(
+    context: FoldClothSubtaskObservationContext,
+    value: float,
+) -> torch.Tensor:
+    return torch.full(
+        (context.num_envs, 1),
+        float(value),
+        dtype=torch.float32,
+        device=context.device,
+    )
 
 
 def _get_scene_arm(env: ManagerBasedEnv, arm: str | SceneEntityCfg):
@@ -145,12 +186,6 @@ def _get_semantic_keypoint_positions_world(
 
 
 def _fold_success_scalar(env: ManagerBasedEnv) -> bool:
-    if hasattr(env, "_check_success"):
-        try:
-            return bool(env._check_success())
-        except Exception:
-            pass
-
     garment_object = getattr(env, "object", None)
     garment_loader = getattr(env, "garment_loader", None)
     cfg = getattr(env, "cfg", None)
@@ -160,13 +195,212 @@ def _fold_success_scalar(env: ManagerBasedEnv) -> bool:
 
     try:
         garment_type = garment_loader.get_garment_type(garment_name)
-        result = success_checker_garment_fold(garment_object, garment_type)
+        result = evaluate_garment_fold_success(garment_object, garment_type)
     except Exception:
-        return False
+        try:
+            result = success_checker_garment_fold(garment_object, garment_type)
+        except Exception:
+            return False
 
     if isinstance(result, dict):
         return bool(result.get("success", False))
     return bool(result)
+
+
+def _normalize_optional_bool_column(
+    env: ManagerBasedEnv,
+    num_envs: int,
+    value: Any | None,
+) -> torch.Tensor | None:
+    if value is None:
+        return None
+    tensor = torch.as_tensor(value, device=env.device)
+    if tensor.ndim == 0:
+        scalar = bool(tensor.item())
+        return _true_bool_column(env, num_envs) if scalar else _false_bool_column(env, num_envs)
+    tensor = tensor.to(dtype=torch.bool).reshape(-1)
+    if tensor.numel() == 1:
+        scalar = bool(tensor[0].item())
+        return _true_bool_column(env, num_envs) if scalar else _false_bool_column(env, num_envs)
+    return tensor[:num_envs].reshape(num_envs, 1)
+
+
+def build_subtask_observation_context(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None = None,
+    *,
+    semantic_keypoints_world: dict[str, torch.Tensor] | None = None,
+    eef_world_positions: dict[str, torch.Tensor] | None = None,
+    gripper_closed_by_arm: dict[str, torch.Tensor] | None = None,
+    arm_at_rest_by_arm: dict[str, torch.Tensor] | None = None,
+    fold_success_value: Any | None = None,
+    include_fold_success: bool = False,
+) -> FoldClothSubtaskObservationContext:
+    """Build a shared context for evaluating one or more subtask predicates."""
+    _, num_envs = _resolve_env_ids(env, env_ids)
+    semantic_points = (
+        semantic_keypoints_world
+        if semantic_keypoints_world is not None
+        else _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    )
+    if semantic_points is None:
+        semantic_points = {}
+
+    eef_positions = eef_world_positions or {
+        "left_arm": _get_eef_world_position(env, "left_arm", env_ids=env_ids),
+        "right_arm": _get_eef_world_position(env, "right_arm", env_ids=env_ids),
+    }
+    gripper_closed_map = gripper_closed_by_arm or {
+        "left_arm": gripper_closed(env, "left_arm", env_ids=env_ids),
+        "right_arm": gripper_closed(env, "right_arm", env_ids=env_ids),
+    }
+    arm_rest_map = arm_at_rest_by_arm or {
+        "left_arm": arm_at_rest(env, "left_arm", env_ids=env_ids),
+        "right_arm": arm_at_rest(env, "right_arm", env_ids=env_ids),
+    }
+
+    fold_success_column = _normalize_optional_bool_column(
+        env,
+        num_envs,
+        fold_success_value,
+    )
+    if fold_success_column is None and include_fold_success:
+        fold_success_column = (
+            _true_bool_column(env, num_envs)
+            if _fold_success_scalar(env)
+            else _false_bool_column(env, num_envs)
+        )
+
+    return FoldClothSubtaskObservationContext(
+        device=env.device,
+        num_envs=num_envs,
+        semantic_keypoints_world=semantic_points,
+        eef_world_positions=eef_positions,
+        gripper_closed_by_arm=gripper_closed_map,
+        arm_at_rest_by_arm=arm_rest_map,
+        grasp_eef_to_keypoint_threshold_m=_cfg_float(
+            env,
+            "subtask_grasp_eef_to_keypoint_threshold_m",
+            _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M,
+        ),
+        middle_to_lower_threshold_m=_cfg_float(
+            env,
+            "subtask_middle_to_lower_threshold_m",
+            _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
+        ),
+        lower_to_upper_threshold_m=_cfg_float(
+            env,
+            "subtask_lower_to_upper_threshold_m",
+            _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
+        ),
+        fold_success=fold_success_column,
+    )
+
+
+def _context_keypoint_pair_distance(
+    context: FoldClothSubtaskObservationContext,
+    checkpoint_a: str,
+    checkpoint_b: str,
+) -> torch.Tensor:
+    pos_a = context.semantic_keypoints_world.get(checkpoint_a)
+    pos_b = context.semantic_keypoints_world.get(checkpoint_b)
+    if pos_a is None or pos_b is None:
+        return _context_full_float_column(context, float("inf"))
+    return torch.linalg.norm(pos_a - pos_b, dim=-1, keepdim=True)
+
+
+def _context_eef_to_keypoint_distance(
+    context: FoldClothSubtaskObservationContext,
+    arm_name: str,
+    checkpoint_name: str,
+) -> torch.Tensor:
+    eef_pos = context.eef_world_positions.get(arm_name)
+    kp_pos = context.semantic_keypoints_world.get(checkpoint_name)
+    if eef_pos is None or kp_pos is None:
+        return _context_full_float_column(context, float("inf"))
+    return torch.linalg.norm(eef_pos - kp_pos, dim=-1, keepdim=True)
+
+
+def get_subtask_signal_observation_from_context(
+    context: FoldClothSubtaskObservationContext,
+    signal_name: str,
+) -> torch.Tensor:
+    """Evaluate a single instantaneous subtask predicate from precomputed state."""
+    signal_name = str(signal_name)
+    if signal_name == "grasp_left_middle":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_middle")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_right_middle":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "right_arm", "garment_right_middle")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "left_middle_to_lower":
+        return _context_keypoint_pair_distance(
+            context,
+            "garment_left_middle",
+            "garment_left_lower",
+        ) <= context.middle_to_lower_threshold_m
+    if signal_name == "right_middle_to_lower":
+        return _context_keypoint_pair_distance(
+            context,
+            "garment_right_middle",
+            "garment_right_lower",
+        ) <= context.middle_to_lower_threshold_m
+    if signal_name == "grasp_left_lower":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_lower")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_right_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "right_arm", "garment_right_lower")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "left_lower_to_upper":
+        return _context_keypoint_pair_distance(
+            context,
+            "garment_left_lower",
+            "garment_left_upper",
+        ) <= context.lower_to_upper_threshold_m
+    if signal_name == "right_lower_to_upper":
+        return _context_keypoint_pair_distance(
+            context,
+            "garment_right_lower",
+            "garment_right_upper",
+        ) <= context.lower_to_upper_threshold_m
+    if signal_name == "left_return_home":
+        fold_success_value = context.fold_success
+        if fold_success_value is None:
+            return _context_false_bool_column(context)
+        return fold_success_value & context.arm_at_rest_by_arm.get(
+            "left_arm",
+            _context_false_bool_column(context),
+        )
+    if signal_name == "right_return_home":
+        fold_success_value = context.fold_success
+        if fold_success_value is None:
+            return _context_false_bool_column(context)
+        return fold_success_value & context.arm_at_rest_by_arm.get(
+            "right_arm",
+            _context_false_bool_column(context),
+        )
+    raise KeyError(
+        f"Unsupported subtask signal {signal_name!r}. "
+        f"Expected one of {tuple(SUBTASK_SIGNAL_OBSERVATION_FNS)}."
+    )
+
+
+def get_subtask_signal_observations_from_context(
+    context: FoldClothSubtaskObservationContext,
+) -> dict[str, torch.Tensor]:
+    """Evaluate all instantaneous subtask predicates from precomputed state."""
+    return {
+        signal_name: get_subtask_signal_observation_from_context(context, signal_name)
+        for signal_name in SUBTASK_SIGNAL_OBSERVATION_FNS
+    }
 
 
 def robot_rest_pose(
@@ -401,14 +635,13 @@ def get_subtask_signal_observation(
     env_ids: Sequence[int] | None = None,
 ) -> torch.Tensor:
     """Evaluate a single instantaneous subtask predicate by exact signal name."""
-    try:
-        fn = SUBTASK_SIGNAL_OBSERVATION_FNS[str(signal_name)]
-    except KeyError as exc:
-        raise KeyError(
-            f"Unsupported subtask signal {signal_name!r}. "
-            f"Expected one of {tuple(SUBTASK_SIGNAL_OBSERVATION_FNS)}."
-        ) from exc
-    return fn(env, env_ids=env_ids)
+    signal_name = str(signal_name)
+    context = build_subtask_observation_context(
+        env,
+        env_ids=env_ids,
+        include_fold_success=signal_name in _RETURN_HOME_SIGNALS,
+    )
+    return get_subtask_signal_observation_from_context(context, signal_name)
 
 
 def get_subtask_signal_observations(
@@ -416,19 +649,25 @@ def get_subtask_signal_observations(
     env_ids: Sequence[int] | None = None,
 ) -> dict[str, torch.Tensor]:
     """Evaluate all instantaneous subtask predicates."""
-    return {
-        signal_name: fn(env, env_ids=env_ids)
-        for signal_name, fn in SUBTASK_SIGNAL_OBSERVATION_FNS.items()
-    }
+    context = build_subtask_observation_context(
+        env,
+        env_ids=env_ids,
+        include_fold_success=True,
+    )
+    return get_subtask_signal_observations_from_context(context)
 
 
 __all__ = [
+    "FoldClothSubtaskObservationContext",
     "SUBTASK_SIGNAL_OBSERVATION_FNS",
     "arm_at_rest",
+    "build_subtask_observation_context",
     "eef_to_keypoint_distance",
     "fold_success",
     "get_subtask_signal_observation",
+    "get_subtask_signal_observation_from_context",
     "get_subtask_signal_observations",
+    "get_subtask_signal_observations_from_context",
     "grasp_left_lower",
     "grasp_left_middle",
     "grasp_right_lower",

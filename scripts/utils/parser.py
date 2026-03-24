@@ -169,6 +169,135 @@ def setup_record_parser(
     return parser
 
 
+def setup_record_annotated_parser(
+    subparsers: argparse.ArgumentParser, parent_parsers: list[argparse.ArgumentParser]
+) -> argparse.ArgumentParser:
+    """Setup parser for 'record_annotated' subcommand."""
+    parser = subparsers.add_parser(
+        "record_annotated",
+        help="Record generation-ready Mimic teleoperation data with online annotation",
+        parents=parent_parsers,
+        conflict_handler="resolve",
+    )
+
+    parser.add_argument(
+        "--num_envs", type=int, default=1, help="Number of environments to simulate."
+    )
+
+    parser.add_argument(
+        "--teleop_device",
+        type=str,
+        default="bi-so101leader",
+        choices=["keyboard", "bi-keyboard", "so101leader", "bi-so101leader"],
+        help="Device for interacting with environment",
+    )
+    parser.add_argument(
+        "--port",
+        type=str,
+        default="/dev/ttyACM0",
+        help="Port for the teleop device:so101leader, default is /dev/ttyACM0",
+    )
+    parser.add_argument(
+        "--left_arm_port",
+        type=str,
+        default="/dev/ttyUSB0",
+        help="Port for the left teleop device:bi-so101leader, default is /dev/ttyUSB0",
+    )
+    parser.add_argument(
+        "--right_arm_port",
+        type=str,
+        default="/dev/ttyUSB1",
+        help="Port for the right teleop device:bi-so101leader, default is /dev/ttyUSB1",
+    )
+    parser.add_argument(
+        "--recalibrate",
+        action="store_true",
+        default=False,
+        help="recalibrate SO101-Leader or Bi-SO101Leader",
+    )
+    parser.add_argument(
+        "--sensitivity", type=float, default=1.0, help="Sensitivity factor."
+    )
+
+    parser.add_argument(
+        "--task",
+        type=str,
+        default="LeHome-BiSO101-ManagerBased-Garment-v0",
+        help="Name of the task.",
+    )
+    parser.add_argument(
+        "--garment_name",
+        type=str,
+        default="Top_Long_Unseen_0",
+        help="Name of the garment.",
+    )
+    parser.add_argument(
+        "--garment_version", type=str, default="Release", help="Version of the garment."
+    )
+    parser.add_argument(
+        "--garment_cfg_base_path",
+        type=str,
+        default="Assets/objects/Challenge_Garment",
+        help="Base path of the garment configuration.",
+    )
+    parser.add_argument(
+        "--particle_cfg_path",
+        type=str,
+        default="source/lehome/lehome/tasks/bedroom/config_file/particle_garment_cfg.yaml",
+        help="Path of the particle configuration.",
+    )
+    parser.add_argument(
+        "--use_random_seed",
+        action="store_true",
+        default=False,
+        help="Use random seed for the environment.",
+    )
+    parser.add_argument(
+        "--seed", type=int, default=42, help="Seed for the environment."
+    )
+    parser.add_argument(
+        "--log_success",
+        action="store_true",
+        default=False,
+        help="Log success information.",
+    )
+    parser.add_argument(
+        "--debugging_log_pose",
+        action="store_true",
+        default=False,
+        help="Print EEF and garment checkpoint positions during teleoperation.",
+    )
+    parser.add_argument(
+        "--debugging_markers",
+        action="store_true",
+        default=False,
+        help="Show live garment semantic keypoint markers during teleoperation.",
+    )
+    parser.add_argument(
+        "--step_hz", type=int, default=90, help="Environment stepping rate in Hz."
+    )
+    parser.add_argument(
+        "--num_episode",
+        type=int,
+        default=20,
+        help="Maximum number of episodes to record",
+    )
+    parser.add_argument(
+        "--dataset_root",
+        type=str,
+        default="Datasets/hdf5_datasets/3_annotated_datasets/annotated_dataset.hdf5",
+        help="Output HDF5 path or root directory for annotated datasets.",
+    )
+    parser.add_argument(
+        "--task_description",
+        type=str,
+        default="fold the garment on the table",
+        help="Description of the task to be performed.",
+    )
+
+    return parser
+
+
 def setup_replay_parser(
     subparsers: argparse.ArgumentParser, parent_parsers: list[argparse.ArgumentParser]
 ) -> argparse.ArgumentParser:

@@ -5,11 +5,11 @@ Uses garment cloth keypoints as virtual object references so MimicGen can
 determine spatial relationships between the robot and grasp targets.
 
 Subtask phases:
-  1. Reach & grasp middle keypoints (both arms, coordinated)
+  1. Reach & grasp middle keypoints
   2. Bring middle keypoints to lower keypoints
   3. Re-grasp lower keypoints
-  4. Bring lower keypoints to upper keypoints (both arms, coordinated)
-  5. Return both arms to the home pose (both arms, coordinated)
+  4. Bring lower keypoints to upper keypoints
+  5. Return both arms to the home pose
 
 Task success in this environment is measured by:
   - Garment fold success from 6 garment check_points and garment-specific
@@ -21,9 +21,6 @@ from __future__ import annotations
 from isaaclab.envs.mimic_env_cfg import (
     MimicEnvCfg,
     SubTaskConfig,
-    SubTaskConstraintConfig,
-    SubTaskConstraintCoordinationScheme,
-    SubTaskConstraintType,
 )
 from isaaclab.managers.recorder_manager import RecorderManagerBaseCfg, RecorderTermCfg
 from isaaclab.utils import configclass
@@ -120,7 +117,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_left_lower",
                 subtask_term_signal="left_middle_to_lower",
-                subtask_term_offset_range=(5, 10),
+                subtask_term_offset_range=(5, 5),
                 selection_strategy="nearest_neighbor_object",
                 selection_strategy_kwargs={"nn_k": 1},
                 action_noise=0.0,
@@ -273,45 +270,5 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
         self.subtask_configs["right_arm"] = right_subtask_configs
 
-        # -----------------------------------------------------------------
-        # Bimanual coordination constraints
-        # -----------------------------------------------------------------
-        self.task_constraint_configs = [
-            # Grasp phase: both arms coordinate to grasp simultaneously
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 0), ("right_arm", 0)],
-                constraint_type=SubTaskConstraintType.COORDINATION,
-                # Use object-relative transform so grasp adapts to current sleeve pose
-                # instead of replaying source-space targets.
-                coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
-                coordination_synchronize_start=True,
-            ),
-            # Middle-to-lower phase
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 1), ("right_arm", 1)],
-                constraint_type=SubTaskConstraintType.COORDINATION,
-                coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
-                coordination_synchronize_start=True,
-            ),
-            # Lower re-grasp phase
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 2)],
-                constraint_type=SubTaskConstraintType.COORDINATION,
-                coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
-                coordination_synchronize_start=True,
-            ),
-            # Lower-to-upper fold phase
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 3)],
-                constraint_type=SubTaskConstraintType.COORDINATION,
-                coordination_scheme=SubTaskConstraintCoordinationScheme.TRANSFORM,
-                coordination_synchronize_start=True,
-            ),
-            # Return-home phase: replay both arms back to home together.
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 4)],
-                constraint_type=SubTaskConstraintType.COORDINATION,
-                coordination_scheme=SubTaskConstraintCoordinationScheme.REPLAY,
-                coordination_synchronize_start=True,
-            ),
-        ]
+        # Allow left and right arm subtasks to advance independently.
+        self.task_constraint_configs = []

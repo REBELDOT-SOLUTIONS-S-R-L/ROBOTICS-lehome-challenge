@@ -14,7 +14,7 @@ from pathlib import Path
 
 from isaaclab.app import AppLauncher
 
-from .utils import common, setup_record_parser, setup_replay_parser
+from .utils import common, setup_record_annotated_parser, setup_record_parser, setup_replay_parser
 from lehome.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,6 +34,7 @@ def main():
     )
 
     setup_record_parser(subparsers, [isaac_args_parser])
+    setup_record_annotated_parser(subparsers, [isaac_args_parser])
     setup_replay_parser(subparsers, [isaac_args_parser])
 
     args = parser.parse_args()
@@ -42,10 +43,16 @@ def main():
     try:
         import lehome.tasks.fold_cloth  # noqa: F401
         from .utils import dataset_replay
-        from .mimicgen import dataset_record_hdf5, dataset_replay_hdf5
+        from .mimicgen import (
+            dataset_record_annotated_hdf5,
+            dataset_record_hdf5,
+            dataset_replay_hdf5,
+        )
 
         if args.command == "record":
             dataset_record_hdf5.record_dataset(args, simulation_app)
+        elif args.command == "record_annotated":
+            dataset_record_annotated_hdf5.record_dataset(args, simulation_app)
         elif args.command == "replay":
             dataset_path = Path(args.dataset_root)
             if dataset_path.suffix.lower() in {".hdf5", ".h5"}:

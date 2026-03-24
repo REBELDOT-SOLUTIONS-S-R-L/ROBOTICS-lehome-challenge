@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
-from .terminations import is_so101_at_rest_pose
+from .observations import get_subtask_signal_observations
 from ..checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
@@ -33,16 +33,6 @@ from ..checkpoint_mappings import (
 if TYPE_CHECKING:
     from isaaclab.managers.manager_term_cfg import RecorderTermCfg
     from isaaclab.envs import ManagerBasedEnv
-
-
-# Gripper joint index (last joint in 6-DOF SO101)
-_GRIPPER_JOINT_IDX = 5
-# Gripper is considered "closed" when joint angle exceeds this (radians)
-_GRIPPER_CLOSE_THRESHOLD = 0.5
-# Distance thresholds for semantic checkpoint transitions (meters)
-_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
-_LOWER_TO_UPPER_THRESHOLD_M = 0.12
-
 
 def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
     """Convert a 3D position to a 4×4 homogeneous transform (identity rotation).
@@ -82,7 +72,6 @@ class GarmentDatagenRecorder(RecorderTerm):
 
     def __init__(self, cfg: RecorderTermCfg, env: ManagerBasedEnv):
         super().__init__(cfg, env)
-        self._fold_complete_detected = False
 
     def record_post_step(self) -> tuple[str, dict]:
         """Record datagen_info after each environment step."""
@@ -150,8 +139,7 @@ class GarmentDatagenRecorder(RecorderTerm):
         return "obs/datagen_info", datagen_info
 
     def record_pre_reset(self, env_ids: Sequence[int] | None):
-        """Reset fold detection state on environment reset."""
-        self._fold_complete_detected = False
+        """Recorder has no persistent per-episode state to reset."""
         return None, None
 
     def _compute_keypoint_object_poses(
@@ -205,125 +193,9 @@ class GarmentDatagenRecorder(RecorderTerm):
     def _compute_subtask_signals(
         self, env, device: torch.device, num_envs: int
     ) -> dict[str, torch.Tensor]:
-        """Compute binary subtask termination signals.
-
-        Signals (0 → 1 edge marks subtask completion):
-          - grasp_left_middle / grasp_right_middle: gripper closed
-          - left_middle_to_lower / right_middle_to_lower: middle-lower checkpoint distance threshold
-          - grasp_left_lower / grasp_right_lower: gripper closed after middle-to-lower
-          - left_lower_to_upper / right_lower_to_upper: lower-upper checkpoint distance threshold
-          - left_return_home / right_return_home: fold complete and both arms back at rest pose
-
-        Returns:
-            Dict mapping signal names to (num_envs, 1) tensors.
-        """
-        left_arm = env.scene["left_arm"]
-        right_arm = env.scene["right_arm"]
-
-        # Grasp detection: gripper joint exceeds threshold
-        left_gripper_pos = left_arm.data.joint_pos[:, _GRIPPER_JOINT_IDX]
-        right_gripper_pos = right_arm.data.joint_pos[:, _GRIPPER_JOINT_IDX]
-
-        grasp_left_middle = (left_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
-        grasp_right_middle = (right_gripper_pos > _GRIPPER_CLOSE_THRESHOLD).float().unsqueeze(-1)
-
-        left_middle_to_lower = torch.zeros(num_envs, 1, device=device)
-        right_middle_to_lower = torch.zeros(num_envs, 1, device=device)
-        left_lower_to_upper = torch.zeros(num_envs, 1, device=device)
-        right_lower_to_upper = torch.zeros(num_envs, 1, device=device)
-
-        garment_obj = getattr(env, "object", None)
-        if garment_obj is not None and hasattr(garment_obj, "check_points"):
-            check_points = garment_obj.check_points
-            if check_points and len(check_points) >= 6:
-                try:
-                    kp_positions = garment_obj.get_checkpoint_world_positions(
-                        check_points,
-                        as_numpy=True,
-                    )
-                except Exception:
-                    kp_positions = None
-
-                if kp_positions is not None:
-                    kp_positions = np.asarray(kp_positions, dtype=np.float32)
-                    sem = _semantic_keypoints_from_positions(kp_positions)
-                    left_middle_lower_dist = float(
-                        np.linalg.norm(sem["garment_left_middle"] - sem["garment_left_lower"])
-                    )
-                    right_middle_lower_dist = float(
-                        np.linalg.norm(sem["garment_right_middle"] - sem["garment_right_lower"])
-                    )
-                    left_lower_upper_dist = float(
-                        np.linalg.norm(sem["garment_left_lower"] - sem["garment_left_upper"])
-                    )
-                    right_lower_upper_dist = float(
-                        np.linalg.norm(sem["garment_right_lower"] - sem["garment_right_upper"])
-                    )
-
-                    left_middle_to_lower_flag = left_middle_lower_dist <= _MIDDLE_TO_LOWER_THRESHOLD_M
-                    right_middle_to_lower_flag = right_middle_lower_dist <= _MIDDLE_TO_LOWER_THRESHOLD_M
-                    lower_to_upper_flag = (
-                        left_lower_upper_dist <= _LOWER_TO_UPPER_THRESHOLD_M
-                        and right_lower_upper_dist <= _LOWER_TO_UPPER_THRESHOLD_M
-                    )
-
-                    if left_middle_to_lower_flag:
-                        left_middle_to_lower = torch.ones(num_envs, 1, device=device)
-                    if right_middle_to_lower_flag:
-                        right_middle_to_lower = torch.ones(num_envs, 1, device=device)
-                    if lower_to_upper_flag:
-                        left_lower_to_upper = torch.ones(num_envs, 1, device=device)
-                        right_lower_to_upper = torch.ones(num_envs, 1, device=device)
-
-        grasp_left_lower = (
-            (left_gripper_pos > _GRIPPER_CLOSE_THRESHOLD)
-            & (left_middle_to_lower.squeeze(-1) > 0.5)
-        ).float().unsqueeze(-1)
-        grasp_right_lower = (
-            (right_gripper_pos > _GRIPPER_CLOSE_THRESHOLD)
-            & (right_middle_to_lower.squeeze(-1) > 0.5)
-        ).float().unsqueeze(-1)
-
-        # Fold completion: use success checker
-        fold_signal = torch.zeros(num_envs, 1, device=device)
-        if not self._fold_complete_detected:
-            garment_obj = getattr(env, "object", None)
-            if garment_obj is not None and hasattr(garment_obj, "_cloth_prim_view"):
-                try:
-                    from lehome.utils.success_checker_chanllege import success_checker_garment_fold
-
-                    garment_loader = getattr(env, "garment_loader", None)
-                    garment_name = getattr(env.cfg, "garment_name", None)
-                    if garment_loader and garment_name:
-                        garment_type = garment_loader.get_garment_type(garment_name)
-                        result = success_checker_garment_fold(garment_obj, garment_type)
-                        if isinstance(result, dict) and result.get("success", False):
-                            self._fold_complete_detected = True
-                            fold_signal = torch.ones(num_envs, 1, device=device)
-                        elif isinstance(result, bool) and result:
-                            self._fold_complete_detected = True
-                            fold_signal = torch.ones(num_envs, 1, device=device)
-                except Exception:
-                    pass
-        else:
-            # Once fold is detected, keep the signal high
-            fold_signal = torch.ones(num_envs, 1, device=device)
-
-        left_at_rest = is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)
-        right_at_rest = is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)
-        return_home_signal = (
-            (fold_signal.squeeze(-1) > 0.5) & left_at_rest & right_at_rest
-        ).float().unsqueeze(-1)
-
+        """Compute instantaneous subtask termination signals from shared observation helpers."""
+        signal_map = get_subtask_signal_observations(env)
         return {
-            "grasp_left_middle": grasp_left_middle,
-            "grasp_right_middle": grasp_right_middle,
-            "left_middle_to_lower": left_middle_to_lower,
-            "right_middle_to_lower": right_middle_to_lower,
-            "grasp_left_lower": grasp_left_lower,
-            "grasp_right_lower": grasp_right_lower,
-            "left_lower_to_upper": left_lower_to_upper,
-            "right_lower_to_upper": right_lower_to_upper,
-            "left_return_home": return_home_signal,
-            "right_return_home": return_home_signal,
+            signal_name: signal.to(device=device, dtype=torch.float32).reshape(num_envs, 1)
+            for signal_name, signal in signal_map.items()
         }

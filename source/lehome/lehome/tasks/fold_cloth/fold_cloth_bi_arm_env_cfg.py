@@ -290,10 +290,12 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     # Teleop / action contract name (updated by scripts)
     task_type: str = "bi-so101leader"
     # Online subtask-observation thresholds
-    subtask_grasp_eef_to_keypoint_threshold_m: float = 0.05
+    subtask_grasp_eef_to_keypoint_threshold_m: float = 0.20
     subtask_gripper_close_threshold: float = 0.5
     subtask_middle_to_lower_threshold_m: float = 0.10
     subtask_lower_to_upper_threshold_m: float = 0.12
+    subtask_signal_min_consecutive_steps: int = 3
+    return_home_min_consecutive_steps: int = 10
 
     def __post_init__(self):
         """Post initialization."""
