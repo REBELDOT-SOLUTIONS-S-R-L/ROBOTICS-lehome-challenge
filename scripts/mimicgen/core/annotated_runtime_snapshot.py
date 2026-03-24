@@ -130,7 +130,7 @@ def capture_annotated_runtime_snapshot(
         joint_vel[arm_name] = _slice_joint_tensor(joint_vel_tensor)
         gripper_joint_idx = _get_gripper_joint_index(arm)
         gripper_closed_by_arm[arm_name] = (
-            arm.data.joint_pos[:1, gripper_joint_idx : gripper_joint_idx + 1] > close_threshold
+            arm.data.joint_pos[:1, gripper_joint_idx : gripper_joint_idx + 1] < close_threshold
         )
         arm_at_rest_by_arm[arm_name] = is_so101_at_rest_pose(
             arm.data.joint_pos[:1],

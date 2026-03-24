@@ -441,7 +441,7 @@ def gripper_closed(
     gripper_joint_idx = _get_gripper_joint_index(arm_entity)
     threshold = _cfg_float(env, "subtask_gripper_close_threshold", _DEFAULT_GRIPPER_CLOSE_THRESHOLD)
     joint_pos = arm_entity.data.joint_pos[env_ids, gripper_joint_idx].reshape(num_envs, 1)
-    return joint_pos > threshold
+    return joint_pos < threshold
 
 
 def arm_at_rest(
