@@ -15,6 +15,12 @@ from lehome.tasks.fold_cloth.mdp.observations import (
 
 
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
+_GRASP_SIGNALS = {
+    "grasp_left_middle",
+    "grasp_right_middle",
+    "grasp_left_lower",
+    "grasp_right_lower",
+}
 _DEFAULT_ARM_QUEUES = {
     "left_arm": [
         "grasp_left_middle",
@@ -44,6 +50,7 @@ class OnlineAnnotationState:
     latched_signals: dict[str, bool] = field(init=False)
     arm_queue_indices: dict[str, int] = field(init=False)
     consecutive_true_counts: dict[str, int] = field(init=False)
+    grasp_open_ready_by_arm: dict[str, bool] = field(init=False)
     _completion_announced: bool = field(init=False, default=False)
 
     def __post_init__(self) -> None:
@@ -51,6 +58,7 @@ class OnlineAnnotationState:
         self.latched_signals = {signal: False for signal in all_signals}
         self.arm_queue_indices = {arm_name: 0 for arm_name in self.arm_queues}
         self.consecutive_true_counts = {arm_name: 0 for arm_name in self.arm_queues}
+        self.grasp_open_ready_by_arm = {arm_name: False for arm_name in self.arm_queues}
 
     @classmethod
     def from_env(cls, env: Any) -> "OnlineAnnotationState":
@@ -88,6 +96,7 @@ class OnlineAnnotationState:
         for arm_name in self.arm_queue_indices:
             self.arm_queue_indices[arm_name] = 0
             self.consecutive_true_counts[arm_name] = 0
+            self.grasp_open_ready_by_arm[arm_name] = False
         self._completion_announced = False
 
     def _required_dwell(self, signal_name: str) -> int:
@@ -105,6 +114,35 @@ class OnlineAnnotationState:
             return None
         return queue[index]
 
+    def _grasp_target_name(self, signal_name: str) -> str | None:
+        mapping = {
+            "grasp_left_middle": "garment_left_middle",
+            "grasp_right_middle": "garment_right_middle",
+            "grasp_left_lower": "garment_left_lower",
+            "grasp_right_lower": "garment_right_lower",
+        }
+        return mapping.get(signal_name)
+
+    def _grasp_proximity_true(
+        self,
+        context: FoldClothSubtaskObservationContext,
+        arm_name: str,
+        signal_name: str,
+    ) -> bool:
+        target_name = self._grasp_target_name(signal_name)
+        if target_name is None:
+            return False
+        eef_pos = context.eef_world_positions.get(arm_name)
+        keypoint_pos = context.semantic_keypoints_world.get(target_name)
+        if eef_pos is None or keypoint_pos is None:
+            return False
+        distance = torch.linalg.norm(eef_pos - keypoint_pos, dim=-1, keepdim=True)
+        return bool(
+            (distance <= float(context.grasp_eef_to_keypoint_threshold_m))
+            .reshape(-1)[0]
+            .item()
+        )
+
     def needs_fold_success(self) -> bool:
         return any(
             (signal_name in _RETURN_HOME_SIGNALS)
@@ -118,6 +156,7 @@ class OnlineAnnotationState:
             signal_name = self._head_signal_for_arm(arm_name)
             if signal_name is None:
                 self.consecutive_true_counts[arm_name] = 0
+                self.grasp_open_ready_by_arm[arm_name] = False
                 continue
 
             observation = signal_reader(signal_name)
@@ -133,6 +172,7 @@ class OnlineAnnotationState:
             self.latched_signals[signal_name] = True
             self.arm_queue_indices[arm_name] += 1
             self.consecutive_true_counts[arm_name] = 0
+            self.grasp_open_ready_by_arm[arm_name] = False
             newly_latched.append(signal_name)
         return newly_latched
 
@@ -147,9 +187,47 @@ class OnlineAnnotationState:
         context: FoldClothSubtaskObservationContext,
     ) -> list[str]:
         """Advance one step of online annotation using precomputed predicate inputs."""
-        return self._advance_from_signal_reader(
-            lambda signal_name: get_subtask_signal_observation_from_context(context, signal_name)
-        )
+        newly_latched: list[str] = []
+        for arm_name in self.arm_queues:
+            signal_name = self._head_signal_for_arm(arm_name)
+            if signal_name is None:
+                self.consecutive_true_counts[arm_name] = 0
+                self.grasp_open_ready_by_arm[arm_name] = False
+                continue
+
+            if signal_name in _GRASP_SIGNALS:
+                gripper_closed = bool(
+                    torch.as_tensor(context.gripper_closed_by_arm.get(arm_name, False))
+                    .reshape(-1)[0]
+                    .item()
+                )
+                is_near_target = self._grasp_proximity_true(context, arm_name, signal_name)
+                if is_near_target and not gripper_closed:
+                    self.grasp_open_ready_by_arm[arm_name] = True
+                is_true = bool(
+                    is_near_target
+                    and gripper_closed
+                    and self.grasp_open_ready_by_arm.get(arm_name, False)
+                )
+            else:
+                self.grasp_open_ready_by_arm[arm_name] = False
+                observation = get_subtask_signal_observation_from_context(context, signal_name)
+                is_true = bool(torch.as_tensor(observation).reshape(-1)[0].item())
+
+            if is_true:
+                self.consecutive_true_counts[arm_name] += 1
+            else:
+                self.consecutive_true_counts[arm_name] = 0
+
+            if self.consecutive_true_counts[arm_name] < self._required_dwell(signal_name):
+                continue
+
+            self.latched_signals[signal_name] = True
+            self.arm_queue_indices[arm_name] += 1
+            self.consecutive_true_counts[arm_name] = 0
+            self.grasp_open_ready_by_arm[arm_name] = False
+            newly_latched.append(signal_name)
+        return newly_latched
 
     def as_tensor_dict(self) -> dict[str, torch.Tensor]:
         """Return current latched state as float32 tensors shaped (1, 1)."""

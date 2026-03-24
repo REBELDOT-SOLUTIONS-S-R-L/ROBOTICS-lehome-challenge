@@ -166,6 +166,7 @@ def _describe_head_status(
         distance_limit_cm = context.grasp_eef_to_keypoint_threshold_m * 100.0
         return (
             f"{arm_label}: waiting to {signal_label}. "
+            f"Opened at keypoint first: {'yes' if annotator.grasp_open_ready_by_arm.get(arm_name, False) else 'no'}. "
             f"Gripper closed: {_bool_text(context.gripper_closed_by_arm[arm_name])}. "
             f"EEF to keypoint: {_cm_text(distance)} (need <= {distance_limit_cm:.1f} cm). "
             f"Dwell: {dwell}/{required}."
