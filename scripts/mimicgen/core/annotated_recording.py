@@ -46,10 +46,10 @@ def _normalize_pose_matrix(value: Any) -> np.ndarray:
 
 
 def _normalize_signal_column(value: Any) -> np.ndarray:
-    arr = as_numpy(value, dtype=np.float32).reshape(-1)
+    arr = as_numpy(value).reshape(-1)
     if arr.size != 1:
         raise ValueError(f"Expected scalar/column signal value, got shape {tuple(arr.shape)}.")
-    return arr.reshape(1)
+    return arr.astype(np.bool_, copy=False).reshape(1)
 
 
 class AnnotatedMimicHDF5Recorder:
@@ -159,7 +159,7 @@ class AnnotatedMimicHDF5Recorder:
 
     def _stack_signal_section(self) -> dict[str, np.ndarray]:
         return {
-            key: np.stack(frames, axis=0).astype(np.float32, copy=False)
+            key: np.stack(frames, axis=0).astype(np.bool_, copy=False)
             for key, frames in self._buffers["subtask_term_signals"].items()
         }
 
