@@ -13,6 +13,7 @@ from isaacsim.simulation_app import SimulationApp
 
 from lehome.utils.logger import get_logger
 
+from .cuda_visual_sync import apply_cuda_fabric_render_settings
 from .teleop_runtime import (
     DEBUG_POSE_LOG_INTERVAL,
     create_dataset_if_needed,
@@ -34,6 +35,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
 
     env_cfg = parse_env_cfg(args.task, device=device)
     task_name = args.task
+    apply_cuda_fabric_render_settings(env_cfg, device, context="teleop recording")
 
     env_cfg.garment_name = args.garment_name
     env_cfg.garment_version = args.garment_version

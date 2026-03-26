@@ -17,6 +17,9 @@ from lehome.utils.record import get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from ...utils.garment_debug_markers import GarmentKeypointDebugMarkers
+from .cuda_visual_sync import cuda_visual_sync_enabled
+from .cuda_visual_sync import force_cuda_render_sync
+from .cuda_visual_sync import post_reset_cuda_visual_sync
 from .data_utils import as_numpy
 from .env_runtime import get_env_garment_metadata
 from .record_debug import (
@@ -270,6 +273,7 @@ def run_idle_phase(
 
         logger.info("[Idle Phase] Stabilizing garment after initialization...")
         stabilize_garment_after_reset(env, args)
+        post_reset_cuda_visual_sync(env)
         update_debug_markers_if_needed(
             env,
             debug_markers,
@@ -285,13 +289,17 @@ def run_idle_phase(
         current_obs = env._get_observations()
         maintain_action = _get_or_build_maintain_action(env, args, control_state, current_obs)
         env.step(maintain_action)
-        env.render()
+        if cuda_visual_sync_enabled(env):
+            force_cuda_render_sync(env)
+        else:
+            env.render()
         if object_initial_pose is None:
             object_initial_pose = control_state.get("cached_object_initial_pose")
             if object_initial_pose is None:
                 object_initial_pose = _safe_get_all_pose(env)
     else:
         env.step(actions)
+        force_cuda_render_sync(env)
         object_initial_pose = _safe_get_all_pose(env)
 
     update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
@@ -380,6 +388,7 @@ def run_recording_phase(
                 env.render()
             else:
                 env.step(actions)
+                force_cuda_render_sync(env)
 
             update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
 
@@ -415,6 +424,7 @@ def run_recording_phase(
                 try:
                     env.reset()
                     stabilize_garment_after_reset(env, args)
+                    post_reset_cuda_visual_sync(env)
                     update_debug_markers_if_needed(
                         env,
                         debug_markers,
@@ -452,6 +462,7 @@ def run_recording_phase(
         try:
             env.reset()
             stabilize_garment_after_reset(env, args)
+            post_reset_cuda_visual_sync(env)
             update_debug_markers_if_needed(
                 env,
                 debug_markers,
@@ -486,9 +497,13 @@ def run_live_control_without_record(
         current_obs = env._get_observations()
         maintain_action = _get_or_build_maintain_action(env, args, control_state, current_obs)
         env.step(maintain_action)
-        env.render()
+        if cuda_visual_sync_enabled(env):
+            force_cuda_render_sync(env)
+        else:
+            env.render()
     else:
         env.step(actions)
+        force_cuda_render_sync(env)
 
     update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
 
