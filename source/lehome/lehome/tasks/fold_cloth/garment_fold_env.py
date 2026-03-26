@@ -38,7 +38,7 @@ from lehome.utils.logger import get_logger
 
 from .checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
-    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
+    semantic_keypoints_from_positions_torch as map_semantic_keypoints_from_positions_torch,
     validate_semantic_object_pose_dict,
 )
 from .fold_cloth_bi_arm_env_cfg import GarmentFoldEnvCfg
@@ -66,6 +66,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         self._last_computed_reward = 0.0
         # Mimic pose conversion caches.
         self._eef_body_idx_cache: dict[str, int] = {}
+        self._object_pose_cache_step: int | None = None
+        self._object_pose_cache: dict[str, torch.Tensor] | None = None
         self._ik_solver: RobotKinematics | None = None
         self._ik_solver_init_failed = False
 
@@ -286,6 +288,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
         # Reset cached reward
         self._last_computed_reward = 0.0
+        self._invalidate_object_pose_cache()
 
         # Reset the garment object
         if self.object is not None:
@@ -663,6 +666,10 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             return env_ids, self.num_envs
         return env_ids, len(env_ids)
 
+    def _invalidate_object_pose_cache(self) -> None:
+        self._object_pose_cache_step = None
+        self._object_pose_cache = None
+
     def _get_eef_body_idx(self, eef_name: str) -> int:
         if eef_name in self._eef_body_idx_cache:
             return self._eef_body_idx_cache[eef_name]
@@ -726,6 +733,80 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     def _make_pose_from_pos_quat(pos_w: torch.Tensor, quat_w: torch.Tensor) -> torch.Tensor:
         rot_w = PoseUtils.matrix_from_quat(quat_w)
         return PoseUtils.make_pose(pos_w, rot_w)
+
+    def _build_batch_env_indices(self, batch_size: int, env_id: int = 0) -> torch.Tensor:
+        if batch_size <= 1:
+            return torch.full((max(1, batch_size),), int(env_id), device=self.device, dtype=torch.long)
+        return torch.arange(batch_size, device=self.device, dtype=torch.long).clamp(max=self.num_envs - 1)
+
+    def _get_arm_world_base_transform(
+        self,
+        arm_name: str,
+        env_indices: torch.Tensor,
+    ) -> torch.Tensor:
+        arm = self.scene[arm_name]
+        base_pos_w = arm.data.root_pos_w[env_indices]
+        base_quat_w = arm.data.root_quat_w[env_indices]
+        return self._make_pose_from_pos_quat(base_pos_w, base_quat_w)
+
+    def _expand_cached_object_poses(self, num_envs: int) -> dict[str, torch.Tensor]:
+        if self._object_pose_cache is None:
+            raise ClothObjectPoseUnavailableError(
+                f"Failed to query garment object poses for {type(self).__name__}: object pose cache is empty."
+            )
+        return {
+            name: pose if int(pose.shape[0]) == int(num_envs) else pose.expand(num_envs, -1, -1)
+            for name, pose in self._object_pose_cache.items()
+        }
+
+    def _get_cached_object_pose_templates(self) -> dict[str, torch.Tensor]:
+        current_step = int(getattr(self, "common_step_counter", 0))
+        if self._object_pose_cache is not None and self._object_pose_cache_step == current_step:
+            return self._object_pose_cache
+
+        def _raise_unavailable(reason: str) -> None:
+            raise ClothObjectPoseUnavailableError(
+                f"Failed to query garment object poses for {type(self).__name__}: {reason}"
+            )
+
+        garment_obj = getattr(self, "object", None)
+        if garment_obj is None or not hasattr(garment_obj, "check_points"):
+            _raise_unavailable("garment object is missing or has no check_points.")
+
+        check_points = garment_obj.check_points
+        if not check_points or len(check_points) < 6:
+            _raise_unavailable("garment check_points are missing or incomplete.")
+
+        try:
+            kp_positions = garment_obj.get_checkpoint_world_positions(
+                check_points,
+                as_numpy=False,
+            )
+        except Exception as exc:
+            _raise_unavailable(
+                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
+            )
+
+        kp_positions = torch.as_tensor(kp_positions, dtype=torch.float32, device=self.device)
+        semantic_points = map_semantic_keypoints_from_positions_torch(kp_positions)
+        object_poses = {
+            name: self._pos_to_4x4(point.reshape(1, 3))
+            for name, point in semantic_points.items()
+        }
+        validate_semantic_object_pose_dict(
+            object_poses,
+            context=f"{type(self).__name__}.get_object_poses",
+        )
+        self._object_pose_cache_step = current_step
+        self._object_pose_cache = object_poses
+        return object_poses
+
+    @staticmethod
+    def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
+        batch_shape = pos.shape[:-1]
+        pose = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
+        pose[..., :3, 3] = pos
+        return pose
 
     def _is_native_mimic_ik_action_contract(self) -> bool:
         """Return True when this env is configured to accept native 16D IK actions."""
@@ -845,6 +926,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         # Native mimic IK contract: action space is [left(pos+quat+grip=8), right(...=8)].
         if self._is_native_mimic_ik_action_contract():
             action = torch.zeros((num_envs, 16), device=self.device, dtype=torch.float32)
+            env_indices = self._build_batch_env_indices(num_envs, env_id=env_id)
 
             def _fill_arm_native(
                 arm_name: str,
@@ -858,36 +940,34 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 if target_pose.shape[0] != num_envs:
                     target_pose = target_pose[:1].expand(num_envs, -1, -1).clone()
 
-                for i in range(num_envs):
-                    env_i = env_id if num_envs == 1 else min(i, self.num_envs - 1)
-                    T_world_target = target_pose[i].detach().cpu().numpy()
-                    T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
+                T_world_base = self._get_arm_world_base_transform(arm_name, env_indices)
+                T_base_target = torch.linalg.inv(T_world_base) @ target_pose
+                pos_base = T_base_target[:, :3, 3]
+                quat_base_wxyz = PoseUtils.quat_from_matrix(T_base_target[:, :3, :3])
+                current_grip = arm.data.joint_pos[env_indices, 5]
+                grip_val = gripper if gripper is not None else current_grip
+                pose_action = torch.cat([pos_base, quat_base_wxyz], dim=-1)
 
-                    pos_base = torch.as_tensor(T_base_target[:3, 3], device=self.device, dtype=torch.float32)
-                    rot_base = torch.as_tensor(T_base_target[:3, :3], device=self.device, dtype=torch.float32)
-                    quat_base_wxyz = PoseUtils.quat_from_matrix(rot_base.unsqueeze(0))[0]
+                # Optional per-subtask action noise support used by MimicGen.
+                if action_noise_dict is not None and arm_name in action_noise_dict:
+                    noise_scale = torch.as_tensor(
+                        action_noise_dict[arm_name], device=self.device, dtype=torch.float32
+                    ).reshape(-1)
+                    if noise_scale.numel() == 1:
+                        noise_scale = noise_scale.expand(7)
+                    elif noise_scale.numel() >= 7:
+                        noise_scale = noise_scale[:7]
+                    else:
+                        noise_scale = noise_scale[-1:].expand(7)
+                    pose_action = pose_action + torch.randn_like(pose_action) * noise_scale.unsqueeze(0)
+                    pose_action[:, 3:7] = pose_action[:, 3:7] / torch.linalg.vector_norm(
+                        pose_action[:, 3:7],
+                        dim=-1,
+                        keepdim=True,
+                    ).clamp_min(1e-12)
 
-                    current_grip = float(arm.data.joint_pos[env_i, 5].item())
-                    grip_val = float(gripper[i].item()) if gripper is not None else current_grip
-                    pose_action = torch.cat([pos_base, quat_base_wxyz], dim=0)
-
-                    # Optional per-subtask action noise support used by MimicGen.
-                    if action_noise_dict is not None and arm_name in action_noise_dict:
-                        noise_scale = torch.as_tensor(
-                            action_noise_dict[arm_name], device=self.device, dtype=torch.float32
-                        ).reshape(-1)
-                        if noise_scale.numel() == 1:
-                            noise = noise_scale.expand(7) * torch.randn(7, device=self.device)
-                        elif noise_scale.numel() >= 7:
-                            noise = noise_scale[:7] * torch.randn(7, device=self.device)
-                        else:
-                            noise = noise_scale[-1:].expand(7) * torch.randn(7, device=self.device)
-                        pose_action = pose_action + noise
-                        quat = pose_action[3:7]
-                        pose_action[3:7] = quat / torch.linalg.norm(quat).clamp_min(1e-12)
-
-                    action[i, action_col_offset : action_col_offset + 7] = pose_action
-                    action[i, action_col_offset + 7] = grip_val
+                action[:, action_col_offset : action_col_offset + 7] = pose_action
+                action[:, action_col_offset + 7] = grip_val
 
             _fill_arm_native("left_arm", left_target, left_grip, 0)
             _fill_arm_native("right_arm", right_target, right_grip, 8)
@@ -967,23 +1047,14 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             action = action.unsqueeze(0)
         num_envs = action.shape[0]
         if int(action.shape[-1]) == 16:
-            left_target = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
-            right_target = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            env_indices = self._build_batch_env_indices(num_envs)
 
             def _decode_arm_target(arm_name: str, action_col_offset: int) -> torch.Tensor:
-                target_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
-                for i in range(num_envs):
-                    env_i = min(i, self.num_envs - 1)
-                    pos_base = action[i, action_col_offset : action_col_offset + 3]
-                    quat_base_wxyz = action[i, action_col_offset + 3 : action_col_offset + 7]
-                    T_base_target = torch.eye(4, device=self.device, dtype=torch.float32)
-                    T_base_target[:3, 3] = pos_base
-                    T_base_target[:3, :3] = PoseUtils.matrix_from_quat(quat_base_wxyz.unsqueeze(0))[0]
-                    T_world_target = self._base_pose_to_world_pose_np(
-                        arm_name, env_i, T_base_target.detach().cpu().numpy()
-                    )
-                    target_pose[i] = torch.as_tensor(T_world_target, device=self.device, dtype=torch.float32)
-                return target_pose
+                pos_base = action[:, action_col_offset : action_col_offset + 3]
+                quat_base_wxyz = action[:, action_col_offset + 3 : action_col_offset + 7]
+                T_base_target = self._make_pose_from_pos_quat(pos_base, quat_base_wxyz)
+                T_world_base = self._get_arm_world_base_transform(arm_name, env_indices)
+                return T_world_base @ T_base_target
 
             left_target = _decode_arm_target("left_arm", 0)
             right_target = _decode_arm_target("right_arm", 8)
@@ -1036,55 +1107,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             num_envs = self.num_envs
         else:
             num_envs = len(env_ids)
-
-        def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-            return map_semantic_keypoints_from_positions(kp_positions)
-
-        def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
-            batch_shape = pos.shape[:-1]
-            T = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
-            T[..., :3, 3] = pos
-            return T
-
-        def _raise_unavailable(reason: str) -> None:
-            raise ClothObjectPoseUnavailableError(
-                f"Failed to query garment object poses for {type(self).__name__}: {reason}"
-            )
-
-        garment_obj = getattr(self, "object", None)
-        if garment_obj is None or not hasattr(garment_obj, "check_points"):
-            _raise_unavailable("garment object is missing or has no check_points.")
-
-        check_points = garment_obj.check_points
-        if not check_points or len(check_points) < 6:
-            _raise_unavailable("garment check_points are missing or incomplete.")
-
-        try:
-            kp_positions = garment_obj.get_checkpoint_world_positions(
-                check_points,
-                as_numpy=True,
-            )
-        except Exception as exc:
-            _raise_unavailable(
-                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
-            )
-
-        kp_positions = np.asarray(kp_positions, dtype=np.float32)
-        semantic_points = _semantic_keypoints_from_positions(kp_positions)
-        object_poses = {}
-        for name, point in semantic_points.items():
-            pos = (
-                torch.tensor(point, dtype=torch.float32, device=self.device)
-                .unsqueeze(0)
-                .expand(num_envs, -1)
-            )
-            object_poses[name] = _pos_to_4x4(pos)
-
-        validate_semantic_object_pose_dict(
-            object_poses,
-            context=f"{type(self).__name__}.get_object_poses",
-        )
-        return object_poses
+        self._get_cached_object_pose_templates()
+        return self._expand_cached_object_poses(num_envs)
 
     def get_subtask_start_signals(self, env_ids: Sequence[int] | None = None) -> dict[str, torch.Tensor]:
         return {}

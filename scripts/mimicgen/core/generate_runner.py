@@ -11,8 +11,10 @@ import torch
 import carb
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
-from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
+from isaaclab.envs.mdp.recorders.recorders_cfg import InitialStateRecorderCfg
+from isaaclab.envs.mdp.recorders.recorders_cfg import PreStepActionsRecorderCfg
 from isaaclab.managers import RecorderTerm, RecorderTermCfg, TerminationTermCfg
+from isaaclab.managers.recorder_manager import RecorderManagerBaseCfg
 from isaaclab.utils import configclass
 
 import isaaclab_mimic.envs  # noqa: F401
@@ -30,10 +32,9 @@ from lehome.assets.robots.lerobot import (
 )
 
 from .dataset_meta import get_first_demo_action_dim as _get_first_demo_action_dim
-from .dataset_meta import get_first_demo_garment_name as _get_first_demo_garment_name
 from .dataset_meta import get_first_demo_object_pose_keys as _get_first_demo_object_pose_keys
+from .dataset_meta import inspect_generation_input_dataset as _inspect_generation_input_dataset
 from .dataset_meta import get_source_actions_mode as _get_source_actions_mode
-from .dataset_meta import load_dataset_env_args as _load_dataset_env_args
 from .dataset_meta import should_auto_fix_mixed_pose_frames as _should_auto_fix_mixed_pose_frames
 from .env_setup import apply_common_mimic_env_overrides
 from .env_setup import assign_env_garment_metadata
@@ -46,6 +47,7 @@ from .generation_runtime import (
     setup_async_generation,
 )
 from .generation_source import get_runtime_object_center as _get_runtime_object_center
+from lehome.tasks.fold_cloth.mdp.observations import robot_rest_pose as _robot_rest_pose
 
 try:
     import h5py
@@ -76,26 +78,39 @@ DUAL_ARM_SETTLE_ACTION = np.concatenate(
 class PreStepCameraObservationsRecorder(RecorderTerm):
     """Record camera observations into the generated HDF5 obs group."""
 
+    def __init__(self, cfg: RecorderTermCfg, env: ManagerBasedRLMimicEnv):
+        super().__init__(cfg, env)
+        self._camera_sources: tuple[tuple[Any, str], ...] | None = None
+
+    def _resolve_camera_sources(self) -> tuple[tuple[Any, str], ...]:
+        if self._camera_sources is not None:
+            return self._camera_sources
+
+        camera_sources: list[tuple[Any, str]] = []
+        for sensor_name, target_key in (
+            ("top_camera", "top"),
+            ("left_camera", "left_wrist"),
+            ("right_camera", "right_wrist"),
+        ):
+            with contextlib.suppress(Exception):
+                camera_sources.append((self._env.scene[sensor_name], target_key))
+
+        self._camera_sources = tuple(camera_sources)
+        return self._camera_sources
+
     def record_pre_step(self):
         camera_obs: dict[str, torch.Tensor] = {}
-
-        def _maybe_add(sensor_name: str, target_key: str) -> None:
+        for sensor, target_key in self._resolve_camera_sources():
             try:
-                sensor = self._env.scene[sensor_name]
                 rgb = sensor.data.output["rgb"]
             except Exception:
-                return
+                continue
 
             if rgb is None or rgb.ndim != 4:
-                return
+                continue
             if rgb.shape[-1] == 4:
                 rgb = rgb[..., :3]
             camera_obs[target_key] = rgb.clone()
-
-        _maybe_add("top_camera", "top")
-        _maybe_add("left_camera", "left_wrist")
-        _maybe_add("right_camera", "right_wrist")
-        _maybe_add("wrist_camera", "wrist")
 
         if not camera_obs:
             return None, None
@@ -109,10 +124,94 @@ class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
     class_type: type[RecorderTerm] = PreStepCameraObservationsRecorder
 
 
-@configclass
-class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
-    """Default action/state recorder plus camera observations."""
+class PreStepGenerationObservationsRecorder(RecorderTerm):
+    """Record only the observation fields needed by generated datasets."""
 
+    def __init__(self, cfg: RecorderTermCfg, env: ManagerBasedRLMimicEnv):
+        super().__init__(cfg, env)
+        self._policy_slice_layout: dict[str, slice] | None = None
+
+    def _get_policy_slice_layout(self, policy_obs: torch.Tensor) -> dict[str, slice] | None:
+        if self._policy_slice_layout is not None:
+            return self._policy_slice_layout
+
+        action_dim: int | None = None
+        with contextlib.suppress(Exception):
+            action = self._env.action_manager.action
+            if torch.is_tensor(action) and action.ndim == 2:
+                action_dim = int(action.shape[-1])
+
+        if action_dim is None:
+            inferred_action_dim = int(policy_obs.shape[-1]) - 14
+            if inferred_action_dim <= 0:
+                return None
+            action_dim = inferred_action_dim
+
+        required_width = 14 + action_dim
+        if int(policy_obs.shape[-1]) < required_width:
+            return None
+
+        self._policy_slice_layout = {
+            "left_joint_pos": slice(0, 6),
+            "right_joint_pos": slice(6, 12),
+            "actions": slice(12, 12 + action_dim),
+            "robot_rest_pose": slice(12 + action_dim, 14 + action_dim),
+        }
+        return self._policy_slice_layout
+
+    def _record_from_policy_buffer(self) -> dict[str, torch.Tensor] | None:
+        obs_buf = getattr(self._env, "obs_buf", None)
+        if not isinstance(obs_buf, dict):
+            return None
+        policy_obs = obs_buf.get("policy")
+        if not torch.is_tensor(policy_obs) or policy_obs.ndim != 2:
+            return None
+
+        policy_slice_layout = self._get_policy_slice_layout(policy_obs)
+        if policy_slice_layout is None:
+            return None
+        required_width = policy_slice_layout["robot_rest_pose"].stop
+        if int(policy_obs.shape[-1]) < int(required_width):
+            return None
+
+        return {
+            key: policy_obs[:, policy_slice].clone()
+            for key, policy_slice in policy_slice_layout.items()
+        }
+
+    def _record_fallback(self) -> dict[str, torch.Tensor]:
+        left_joint_pos = self._env.scene["left_arm"].data.joint_pos[:, :6].clone()
+        right_joint_pos = self._env.scene["right_arm"].data.joint_pos[:, :6].clone()
+        actions = self._env.action_manager.action.clone()
+        robot_rest_pose = _robot_rest_pose(self._env).clone()
+        return {
+            "left_joint_pos": left_joint_pos,
+            "right_joint_pos": right_joint_pos,
+            "actions": actions,
+            "robot_rest_pose": robot_rest_pose,
+        }
+
+    def record_pre_step(self):
+        generation_obs = self._record_from_policy_buffer()
+        if generation_obs is None:
+            generation_obs = self._record_fallback()
+        return "obs", generation_obs
+
+
+@configclass
+class PreStepGenerationObservationsRecorderCfg(RecorderTermCfg):
+    """Configuration for lean generation observation recording."""
+
+    class_type: type[RecorderTerm] = PreStepGenerationObservationsRecorder
+
+
+@configclass
+class GenerationRecorderManagerCfg(RecorderManagerBaseCfg):
+    """Lean recorder for generated datasets."""
+
+    record_initial_state = InitialStateRecorderCfg()
+    record_pre_step_actions = PreStepActionsRecorderCfg()
+    record_pre_step_generation_observations = PreStepGenerationObservationsRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
 
 
@@ -197,7 +296,7 @@ def _validate_first_demo_datagen_contract(input_file: str) -> None:
         demo_group = data_group[demo_names[0]]
         if "actions" not in demo_group:
             raise ValueError("Strict preflight failed: first demo missing top-level actions.")
-        action_shape = tuple(np.asarray(demo_group["actions"]).shape)
+        action_shape = tuple(demo_group["actions"].shape)
         if len(action_shape) != 2:
             raise ValueError(
                 f"Strict preflight failed: first demo actions must be [T,D], got {action_shape}."
@@ -220,7 +319,7 @@ def _validate_first_demo_datagen_contract(input_file: str) -> None:
             if not isinstance(pose_group, h5py.Group) or len(pose_group.keys()) == 0:
                 raise ValueError(f"Strict preflight failed: /obs/datagen_info/{key} is empty.")
             for pose_name in pose_group.keys():
-                pose_shape = tuple(np.asarray(pose_group[pose_name]).shape)
+                pose_shape = tuple(pose_group[pose_name].shape)
                 if len(pose_shape) != 3 or tuple(pose_shape[-2:]) != (4, 4):
                     raise ValueError(
                         "Strict preflight failed: invalid pose shape at "
@@ -293,7 +392,8 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
 
     output_dir, output_file_name = setup_output_paths(parsed_args.output_file)
     task_name = parsed_args.task.split(":")[-1] if parsed_args.task else None
-    dataset_env_args = _load_dataset_env_args(parsed_args.input_file)
+    dataset_summary = _inspect_generation_input_dataset(parsed_args.input_file)
+    dataset_env_args = dict(dataset_summary.env_args)
     env_name = task_name or dataset_env_args.get("env_name")
     if env_name is None:
         env_name = get_env_name_from_dataset(parsed_args.input_file)
@@ -314,12 +414,11 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         carb_settings.set_bool("/physics/fabricUpdateVelocities", True)
         carb_settings.set_bool("/physics/fabricUpdateJointStates", True)
         print("Enabled fabric-backed transform sync for CUDA generation.")
-    if bool(parsed_args.enable_cameras):
-        dataset_export_mode = env_cfg.recorders.dataset_export_mode
-        env_cfg.recorders = GenerationRecorderManagerCfg()
-        env_cfg.recorders.dataset_export_dir_path = output_dir
-        env_cfg.recorders.dataset_filename = output_file_name
-        env_cfg.recorders.dataset_export_mode = dataset_export_mode
+    dataset_export_mode = env_cfg.recorders.dataset_export_mode
+    env_cfg.recorders = GenerationRecorderManagerCfg()
+    env_cfg.recorders.dataset_export_dir_path = output_dir
+    env_cfg.recorders.dataset_filename = output_file_name
+    env_cfg.recorders.dataset_export_mode = dataset_export_mode
 
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, parsed_args.task_type))
@@ -332,7 +431,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
             env_cfg,
             parsed_args,
             dataset_env_args,
-            fallback_garment_name=_get_first_demo_garment_name(parsed_args.input_file),
+            fallback_garment_name=dataset_summary.first_demo_garment_name,
         )
         assign_env_garment_metadata(
             env_cfg,
@@ -476,6 +575,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         mimic_generation.num_attempts = 0
         asyncio = __import__("asyncio")
         asyncio.ensure_future(asyncio.gather(*async_components["tasks"]))
+        enable_pose_trace = bool(parsed_args.save_pose_trace or parsed_args.pose_output_file)
         env_loop_with_pose_output(
             env,
             async_components["reset_queue"],
@@ -483,6 +583,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
             async_components["event_loop"],
             output_file=parsed_args.output_file,
             pose_output_file=parsed_args.pose_output_file,
+            enable_pose_trace=enable_pose_trace,
             logging_interval=int(parsed_args.logging_interval),
             log_success=bool(parsed_args.log_success),
         )

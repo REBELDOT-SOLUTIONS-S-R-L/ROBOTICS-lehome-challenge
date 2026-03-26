@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
+from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +23,17 @@ try:
     import h5py
 except ImportError:
     h5py = None
+
+
+@dataclass(frozen=True)
+class GenerationInputDatasetSummary:
+    """Cached summary of the source dataset fields used during generation setup."""
+
+    env_args: dict[str, Any]
+    first_demo_garment_name: str | None
+    source_actions_mode: str | None
+    first_demo_action_dim: int | None
+    object_pose_keys: frozenset[str]
 
 
 def find_pose_list_in_obj(obj: Any) -> list[float] | None:
@@ -198,65 +212,69 @@ def load_initial_pose_from_json(
 
 def load_dataset_env_args(input_file: str) -> dict[str, Any]:
     """Read dataset-level env_args from /data attrs."""
-    if h5py is None:
-        return {}
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data")
-            if data_group is None:
-                return {}
-            raw = data_group.attrs.get("env_args")
-            if raw is None:
-                return {}
-            raw = decode_attr(raw)
-            if isinstance(raw, str):
-                return json.loads(raw)
-    except Exception:
-        return {}
-    return {}
+    return dict(inspect_generation_input_dataset(input_file).env_args)
 
-def get_first_demo_garment_name(input_file: str) -> str | None:
-    """Infer garment name from the first demo metadata payload available."""
+
+@lru_cache(maxsize=None)
+def inspect_generation_input_dataset(input_file: str) -> GenerationInputDatasetSummary:
+    """Read generation-relevant dataset metadata in a single HDF5 pass."""
     if h5py is None:
-        return None
+        return GenerationInputDatasetSummary(
+            env_args={},
+            first_demo_garment_name=None,
+            source_actions_mode=None,
+            first_demo_action_dim=None,
+            object_pose_keys=frozenset(),
+        )
+
+    env_args: dict[str, Any] = {}
+    garment_name: str | None = None
+    source_actions_mode: str | None = None
+    first_demo_action_dim: int | None = None
+    object_pose_keys: set[str] = set()
+
     try:
         with h5py.File(input_file, "r") as file:
             data_group = file.get("data")
             if data_group is None:
-                return None
+                return GenerationInputDatasetSummary(
+                    env_args={},
+                    first_demo_garment_name=None,
+                    source_actions_mode=None,
+                    first_demo_action_dim=None,
+                    object_pose_keys=frozenset(),
+                )
+
+            raw_env_args = data_group.attrs.get("env_args")
+            if raw_env_args is not None:
+                decoded_env_args = decode_attr(raw_env_args)
+                if isinstance(decoded_env_args, str):
+                    with contextlib.suppress(json.JSONDecodeError):
+                        env_args = json.loads(decoded_env_args)
+
+            raw_actions_mode = data_group.attrs.get("actions_mode")
+            if raw_actions_mode is not None:
+                decoded_actions_mode = decode_attr(raw_actions_mode)
+                if decoded_actions_mode is not None:
+                    source_actions_mode = str(decoded_actions_mode)
+
             demo_names = sorted(
                 [name for name in data_group.keys() if name.startswith("demo_")],
                 key=demo_sort_key,
             )
             for demo_name in demo_names:
                 demo_group = data_group[demo_name]
-                if "meta" not in demo_group:
-                    continue
-                meta = read_hdf5_node(demo_group["meta"])
-                if isinstance(meta, dict):
-                    garment_name = extract_garment_name_from_episode_meta(meta)
-                    if garment_name:
-                        return garment_name
-    except Exception:
-        return None
-    return None
 
+                if first_demo_action_dim is None and "actions" in demo_group:
+                    shape = tuple(demo_group["actions"].shape)
+                    if len(shape) == 2:
+                        first_demo_action_dim = int(shape[1])
 
-def get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
-    """Read the union of source datagen object_pose keys across available demos."""
-    if h5py is None:
-        return None
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data")
-            if data_group is None:
-                return None
-            all_keys: set[str] = set()
-            for demo_name in sorted(
-                [name for name in data_group.keys() if name.startswith("demo_")],
-                key=demo_sort_key,
-            ):
-                demo_group = data_group[demo_name]
+                if garment_name is None and "meta" in demo_group:
+                    meta = read_hdf5_node(demo_group["meta"])
+                    if isinstance(meta, dict):
+                        garment_name = extract_garment_name_from_episode_meta(meta)
+
                 obs_group = demo_group.get("obs")
                 if obs_group is None:
                     continue
@@ -264,57 +282,44 @@ def get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
                 if datagen_group is None:
                     continue
                 object_pose_group = datagen_group.get("object_pose")
-                if object_pose_group is None:
-                    continue
-                all_keys.update(object_pose_group.keys())
-            if all_keys:
-                return all_keys
+                if object_pose_group is not None:
+                    object_pose_keys.update(object_pose_group.keys())
     except Exception:
-        return None
-    return None
+        return GenerationInputDatasetSummary(
+            env_args={},
+            first_demo_garment_name=None,
+            source_actions_mode=None,
+            first_demo_action_dim=None,
+            object_pose_keys=frozenset(),
+        )
+
+    return GenerationInputDatasetSummary(
+        env_args=env_args,
+        first_demo_garment_name=garment_name,
+        source_actions_mode=source_actions_mode,
+        first_demo_action_dim=first_demo_action_dim,
+        object_pose_keys=frozenset(object_pose_keys),
+    )
+
+def get_first_demo_garment_name(input_file: str) -> str | None:
+    """Infer garment name from the first demo metadata payload available."""
+    return inspect_generation_input_dataset(input_file).first_demo_garment_name
+
+
+def get_first_demo_object_pose_keys(input_file: str) -> set[str] | None:
+    """Read the union of source datagen object_pose keys across available demos."""
+    object_pose_keys = inspect_generation_input_dataset(input_file).object_pose_keys
+    return set(object_pose_keys) if object_pose_keys else None
 
 
 def get_source_actions_mode(input_file: str) -> str | None:
     """Read /data attrs['actions_mode'] when present."""
-    if h5py is None:
-        return None
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data")
-            if data_group is None:
-                return None
-            mode = data_group.attrs.get("actions_mode")
-            if mode is None:
-                return None
-            mode = decode_attr(mode)
-            return str(mode) if mode is not None else None
-    except Exception:
-        return None
+    return inspect_generation_input_dataset(input_file).source_actions_mode
 
 
 def get_first_demo_action_dim(input_file: str) -> int | None:
     """Read top-level /data/demo_*/actions second dimension from the first demo."""
-    if h5py is None:
-        return None
-    try:
-        with h5py.File(input_file, "r") as file:
-            data_group = file.get("data")
-            if data_group is None:
-                return None
-            for demo_name in sorted(
-                [name for name in data_group.keys() if name.startswith("demo_")],
-                key=demo_sort_key,
-            ):
-                demo_group = data_group[demo_name]
-                if "actions" not in demo_group:
-                    continue
-                shape = tuple(np.asarray(demo_group["actions"]).shape)
-                if len(shape) != 2:
-                    continue
-                return int(shape[1])
-    except Exception:
-        return None
-    return None
+    return inspect_generation_input_dataset(input_file).first_demo_action_dim
 
 
 def get_first_demo_pose_frame_stats(

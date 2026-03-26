@@ -19,39 +19,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
-import numpy as np
 import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
 from .observations import get_subtask_signal_observations
 from ..checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
-    semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
     validate_semantic_object_pose_dict,
 )
 
 if TYPE_CHECKING:
     from isaaclab.managers.manager_term_cfg import RecorderTermCfg
     from isaaclab.envs import ManagerBasedEnv
-
-def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
-    """Convert a 3D position to a 4×4 homogeneous transform (identity rotation).
-
-    Args:
-        pos: Position tensor of shape (..., 3).
-
-    Returns:
-        4×4 transform of shape (..., 4, 4).
-    """
-    batch_shape = pos.shape[:-1]
-    T = torch.eye(4, device=pos.device, dtype=pos.dtype).expand(*batch_shape, 4, 4).clone()
-    T[..., :3, 3] = pos
-    return T
-
-
-def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
-    """Map six garment checkpoints using the shared semantic checkpoint order."""
-    return map_semantic_keypoints_from_positions(kp_positions)
 
 
 class GarmentDatagenRecorder(RecorderTerm):
@@ -121,7 +100,7 @@ class GarmentDatagenRecorder(RecorderTerm):
         # ---------------------------------------------------------------
         # 4. Object poses — garment keypoints as virtual objects
         # ---------------------------------------------------------------
-        object_poses = self._compute_keypoint_object_poses(env, device, num_envs)
+        object_poses = self._compute_keypoint_object_poses(env, num_envs)
 
         # ---------------------------------------------------------------
         # 5. Subtask termination signals
@@ -143,7 +122,7 @@ class GarmentDatagenRecorder(RecorderTerm):
         return None, None
 
     def _compute_keypoint_object_poses(
-        self, env, device: torch.device, num_envs: int
+        self, env, num_envs: int
     ) -> dict[str, torch.Tensor]:
         """Compute virtual 4×4 object poses from garment keypoints.
 
@@ -155,35 +134,17 @@ class GarmentDatagenRecorder(RecorderTerm):
         Returns:
             Dict mapping object names to (num_envs, 4, 4) tensors.
         """
-        def _raise_unavailable(reason: str) -> None:
-            raise ClothObjectPoseUnavailableError(
-                f"GarmentDatagenRecorder could not capture cloth object poses: {reason}"
-            )
-
-        garment_obj = getattr(env, "object", None)
-        if garment_obj is None or not hasattr(garment_obj, "check_points"):
-            _raise_unavailable("garment object is missing or has no check_points.")
-
-        check_points = garment_obj.check_points
-        if not check_points or len(check_points) < 6:
-            _raise_unavailable("garment check_points are missing or incomplete.")
-
         try:
-            kp_positions = garment_obj.get_checkpoint_world_positions(
-                check_points,
-                as_numpy=True,
-            )
+            object_poses = env.get_object_poses()
         except Exception as exc:
-            _raise_unavailable(
-                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
+            raise ClothObjectPoseUnavailableError(
+                f"GarmentDatagenRecorder could not capture cloth object poses: {exc}"
             )
 
-        kp_positions = np.asarray(kp_positions, dtype=np.float32)
-        semantic_points = _semantic_keypoints_from_positions(kp_positions)
-        object_poses: dict[str, torch.Tensor] = {}
-        for name, point in semantic_points.items():
-            pos = torch.tensor(point, dtype=torch.float32, device=device).unsqueeze(0).expand(num_envs, -1)
-            object_poses[name] = _pos_to_4x4(pos)
+        object_poses = {
+            name: pose if int(pose.shape[0]) == int(num_envs) else pose.expand(num_envs, -1, -1)
+            for name, pose in object_poses.items()
+        }
         validate_semantic_object_pose_dict(
             object_poses,
             context="GarmentDatagenRecorder._compute_keypoint_object_poses",

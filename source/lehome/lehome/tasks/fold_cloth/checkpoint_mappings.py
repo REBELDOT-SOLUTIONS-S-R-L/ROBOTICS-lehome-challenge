@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import torch
 
 
 DEFAULT_GARMENT_CFG_BASE_PATH = "Assets/objects/Challenge_Garment"
@@ -159,6 +160,26 @@ def semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.
             np.stack([semantic_points[name] for name in member_names], axis=0),
             axis=0,
         )
+    return semantic_points
+
+
+def semantic_keypoints_from_positions_torch(kp_positions: torch.Tensor) -> dict[str, torch.Tensor]:
+    """Torch-native variant of semantic garment checkpoint mapping."""
+    kp_positions = torch.as_tensor(kp_positions, dtype=torch.float32)
+    if kp_positions.ndim != 2 or kp_positions.shape[0] < len(CHECKPOINT_LABELS) or kp_positions.shape[1] < 3:
+        raise ValueError(
+            f"Expected kp_positions with shape (>=6, 3), got {tuple(kp_positions.shape)}"
+        )
+
+    semantic_points = {
+        checkpoint_name: kp_positions[idx, :3]
+        for idx, checkpoint_name in enumerate(CHECKPOINT_LABELS)
+    }
+    for group_name, member_names in CENTER_GROUPS.items():
+        semantic_points[group_name] = torch.stack(
+            [semantic_points[name] for name in member_names],
+            dim=0,
+        ).mean(dim=0)
     return semantic_points
 
 

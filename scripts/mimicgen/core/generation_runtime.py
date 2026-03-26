@@ -34,6 +34,56 @@ logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
 
 
+async def _wait_for_next_generation_item(
+    env_reset_queue: asyncio.Queue,
+    env_action_queue: asyncio.Queue,
+) -> tuple[str, Any, tuple[int, Any] | None]:
+    """Wait for either a reset request or an action item."""
+    reset_task = asyncio.create_task(env_reset_queue.get())
+    action_task = asyncio.create_task(env_action_queue.get())
+    done, pending = await asyncio.wait(
+        {reset_task, action_task},
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+
+    for task in pending:
+        task.cancel()
+    for task in pending:
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+    if reset_task in done:
+        extra_action = action_task.result() if action_task in done else None
+        return "reset", reset_task.result(), extra_action
+    return "action", action_task.result(), None
+
+
+def _coerce_action_tensor(
+    action: Any,
+    *,
+    device: torch.device | str,
+    dtype: torch.dtype,
+    action_dim: int,
+) -> torch.Tensor:
+    """Convert a queued action into a flat device tensor with the expected size."""
+    if torch.is_tensor(action):
+        action_tensor = action
+        if action_tensor.device != torch.device(device):
+            action_tensor = action_tensor.to(device=device)
+        if action_tensor.dtype != dtype:
+            action_tensor = action_tensor.to(dtype=dtype)
+    else:
+        action_tensor = torch.as_tensor(action, device=device, dtype=dtype)
+
+    action_tensor = action_tensor.reshape(-1)
+    if int(action_tensor.numel()) != int(action_dim):
+        raise ValueError(
+            "Invalid action size from generator: "
+            f"expected {action_dim}, received {action_tensor.numel()}."
+        )
+    return action_tensor
+
+
 def _cuda_runtime_enabled(env: ManagerBasedRLMimicEnv) -> bool:
     """Return whether generation is running on a CUDA-backed env device."""
     return "cuda" in str(env.device)
@@ -315,6 +365,7 @@ def env_loop_with_pose_output(
     asyncio_event_loop: asyncio.AbstractEventLoop,
     output_file: str,
     pose_output_file: str | None,
+    enable_pose_trace: bool = False,
     logging_interval: int = 1,
     log_success: bool = False,
 ) -> None:
@@ -323,27 +374,54 @@ def env_loop_with_pose_output(
     prev_num_attempts = 0
     step_count = 0
     action_dim = int(env.single_action_space.shape[0])
-    pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
-    pose_writer = PoseTraceCsvWriter(pose_output_path)
+    pose_writer: PoseTraceCsvWriter | None = None
+    if enable_pose_trace:
+        pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
+        pose_writer = PoseTraceCsvWriter(pose_output_path)
+        print(f"Pose trace CSV: {pose_output_path}")
     episode_indices = {env_id: -1 for env_id in range(int(env.num_envs))}
     episode_steps = {env_id: -1 for env_id in range(int(env.num_envs))}
-    print(f"Pose trace CSV: {pose_output_path}")
+    actions = torch.empty((env.num_envs, action_dim), device=env.device, dtype=torch.float32)
 
     try:
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
+            stashed_action_items: list[tuple[int, Any]] = []
             while True:
-                while env_action_queue.qsize() != env.num_envs:
-                    asyncio_event_loop.run_until_complete(asyncio.sleep(0))
-                    while not env_reset_queue.empty():
-                        reset_env_id = int(env_reset_queue.get_nowait())
+                actions.zero_()
+                ready_env_ids: set[int] = set()
+                consumed_action_items = 0
+
+                while len(ready_env_ids) < env.num_envs:
+                    if not env_reset_queue.empty():
+                        item_type = "reset"
+                        payload = env_reset_queue.get_nowait()
+                        extra_action = None
+                    elif stashed_action_items:
+                        item_type = "action"
+                        payload = stashed_action_items.pop(0)
+                        extra_action = None
+                    else:
+                        item_type, payload, extra_action = asyncio_event_loop.run_until_complete(
+                            _wait_for_next_generation_item(env_reset_queue, env_action_queue)
+                        )
+                        if extra_action is not None:
+                            stashed_action_items.append(extra_action)
+
+                    if item_type == "reset":
+                        reset_env_id = int(payload)
+                        stashed_action_items = [
+                            item for item in stashed_action_items if int(item[0]) != reset_env_id
+                        ]
                         env_id_tensor[0] = reset_env_id
                         env.reset(env_ids=env_id_tensor)
                         _restore_cuda_cloth_visual_pose_to_initial(env)
                         _force_cuda_render_sync(env)
+                        ready_env_ids.discard(reset_env_id)
+                        actions[reset_env_id].zero_()
                         episode_indices[reset_env_id] += 1
                         episode_steps[reset_env_id] = 0
                         env_reset_queue.task_done()
-                        if reset_env_id == 0:
+                        if reset_env_id == 0 and (enable_pose_trace or log_success):
                             row = _write_pose_snapshot(
                                 env,
                                 step_count=step_count,
@@ -353,24 +431,33 @@ def env_loop_with_pose_output(
                                 episode_step=episode_steps[0],
                                 completed_attempts=int(mimic_generation.num_attempts),
                                 completed_successes=int(mimic_generation.num_success),
+                            ) if enable_pose_trace else _build_pose_snapshot(
+                                env,
+                                step_count=step_count,
+                                env_id=0,
+                                episode_index=episode_indices[0],
+                                episode_step=episode_steps[0],
+                                completed_attempts=int(mimic_generation.num_attempts),
+                                completed_successes=int(mimic_generation.num_success),
                             )
                             if log_success:
                                 _log_success_snapshot(env, row)
+                        continue
 
-                actions = torch.zeros((env.num_envs, action_dim), device=env.device)
-                for _ in range(env.num_envs):
-                    env_id, action = asyncio_event_loop.run_until_complete(env_action_queue.get())
-                    action_tensor = torch.as_tensor(action, device=env.device).reshape(-1)
-                    if action_tensor.numel() != action_dim:
-                        raise ValueError(
-                            "Invalid action size from generator: "
-                            f"expected {action_dim}, received {action_tensor.numel()}."
-                        )
-                    actions[env_id] = action_tensor
+                    env_id, action = payload
+                    action_tensor = _coerce_action_tensor(
+                        action,
+                        device=env.device,
+                        dtype=torch.float32,
+                        action_dim=action_dim,
+                    )
+                    actions[int(env_id)].copy_(action_tensor)
+                    ready_env_ids.add(int(env_id))
+                    consumed_action_items += 1
 
                 env.step(actions)
                 _force_cuda_render_sync(env)
-                for _ in range(env.num_envs):
+                for _ in range(consumed_action_items):
                     env_action_queue.task_done()
 
                 step_count += 1
@@ -378,7 +465,7 @@ def env_loop_with_pose_output(
                     if episode_steps[env_id] >= 0:
                         episode_steps[env_id] += 1
                 row: dict[str, Any] | None = None
-                if step_count % logging_interval == 0:
+                if enable_pose_trace and step_count % logging_interval == 0:
                     row = _write_pose_snapshot(
                         env,
                         step_count=step_count,
@@ -431,7 +518,8 @@ def env_loop_with_pose_output(
                 if env.sim.is_stopped():
                     break
     finally:
-        pose_writer.close()
+        if pose_writer is not None:
+            pose_writer.close()
         env.close()
 
 

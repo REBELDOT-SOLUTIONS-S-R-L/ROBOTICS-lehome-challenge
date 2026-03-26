@@ -172,20 +172,31 @@ def build_pose_snapshot(
 class PoseTraceCsvWriter:
     """Append flat pose snapshots to CSV for later plotting."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, flush_interval: int = 128):
         self.path = path
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._file = self.path.open("w", newline="", encoding="utf-8")
         self._writer: csv.DictWriter | None = None
+        self._buffer: list[dict[str, Any]] = []
+        self._flush_interval = max(1, int(flush_interval))
 
-    def write(self, row: dict[str, Any]) -> None:
+    def flush(self) -> None:
+        if not self._buffer:
+            return
         if self._writer is None:
-            self._writer = csv.DictWriter(self._file, fieldnames=list(row.keys()))
+            self._writer = csv.DictWriter(self._file, fieldnames=list(self._buffer[0].keys()))
             self._writer.writeheader()
-        self._writer.writerow(row)
+        self._writer.writerows(self._buffer)
+        self._buffer.clear()
         self._file.flush()
 
+    def write(self, row: dict[str, Any]) -> None:
+        self._buffer.append(row)
+        if len(self._buffer) >= self._flush_interval:
+            self.flush()
+
     def close(self) -> None:
+        self.flush()
         self._file.close()
 
 
