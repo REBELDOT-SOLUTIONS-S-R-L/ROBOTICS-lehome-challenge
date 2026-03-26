@@ -23,7 +23,7 @@ import isaaclab.sim as sim_utils
 import isaaclab.utils.math as PoseUtils
 from isaaclab.envs import ManagerBasedRLMimicEnv
 
-from pxr import UsdShade, Sdf
+from pxr import UsdShade, Sdf, UsdPhysics
 import omni.kit.commands
 from isaacsim.core.utils.prims import is_prim_path_valid
 
@@ -82,6 +82,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             self.garment_rng = np.random.RandomState(cfg.random_seed)
 
         super().__init__(cfg, render_mode, **kwargs)
+        self._filter_inter_arm_collisions()
 
         # Create garment object AFTER super().__init__() which sets up the scene.
         # Note: ManagerBasedEnv.__init__() creates the scene via InteractiveScene()
@@ -217,6 +218,63 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         if was_playing:
             world.play()
         self.object = None
+
+    def _get_rigid_body_prim_paths(self, root_prim_path: str) -> list[str]:
+        """Return all rigid body prim paths below a robot root."""
+        stage = self.scene.stage
+        root_prim = stage.GetPrimAtPath(root_prim_path)
+        if not root_prim.IsValid():
+            logger.warning(
+                f"[Collision Filter] Robot root prim not found while gathering rigid bodies: {root_prim_path}"
+            )
+            return []
+
+        rigid_body_paths: list[str] = []
+        stack = [root_prim]
+        while stack:
+            prim = stack.pop()
+            if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+                rigid_body_paths.append(prim.GetPath().pathString)
+            stack.extend(reversed(list(prim.GetChildren())))
+        return rigid_body_paths
+
+    def _apply_filtered_pairs(self, source_paths: Sequence[str], target_paths: Sequence[str]) -> None:
+        """Apply USD filtered-pairs collision exclusions from each source to all targets."""
+        stage = self.scene.stage
+        for source_path in source_paths:
+            source_prim = stage.GetPrimAtPath(source_path)
+            if not source_prim.IsValid():
+                continue
+            filtered_pairs_api = UsdPhysics.FilteredPairsAPI.Apply(source_prim)
+            rel = filtered_pairs_api.CreateFilteredPairsRel()
+            existing_targets = set(rel.GetTargets())
+            for target_path in target_paths:
+                if target_path == source_path:
+                    continue
+                target_sdf_path = Sdf.Path(target_path)
+                if target_sdf_path not in existing_targets:
+                    rel.AddTarget(target_sdf_path)
+
+    def _filter_inter_arm_collisions(self) -> None:
+        """Disable collisions between left and right robot rigid bodies."""
+        left_root_path = "/World/Robot/Left_Robot"
+        right_root_path = "/World/Robot/Right_Robot"
+        left_body_paths = self._get_rigid_body_prim_paths(left_root_path)
+        right_body_paths = self._get_rigid_body_prim_paths(right_root_path)
+        if not left_body_paths or not right_body_paths:
+            logger.warning(
+                "[Collision Filter] Skipping inter-arm collision filtering because rigid body paths "
+                f"were incomplete. left={len(left_body_paths)} right={len(right_body_paths)}"
+            )
+            return
+
+        self._apply_filtered_pairs(left_body_paths, right_body_paths)
+        self._apply_filtered_pairs(right_body_paths, left_body_paths)
+        logger.info(
+            "[Collision Filter] Disabled inter-arm collisions between %d left-arm and %d right-arm rigid bodies.",
+            len(left_body_paths),
+            len(right_body_paths),
+        )
 
     # ------------------------------------------------------------------
     # Reset
