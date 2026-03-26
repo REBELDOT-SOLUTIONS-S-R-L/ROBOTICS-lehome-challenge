@@ -8,7 +8,6 @@ import sys
 import traceback
 from typing import Any
 
-import numpy as np
 import torch
 import isaaclab.sim as sim_utils
 
@@ -32,7 +31,6 @@ from .pose_trace import write_pose_snapshot as _write_pose_snapshot
 
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
-CUDA_VISUAL_LOG_INTERVAL = 50
 
 
 def _force_cuda_render_sync(env: ManagerBasedRLMimicEnv) -> None:
@@ -109,13 +107,6 @@ def _sync_cuda_robot_visuals_to_usd(env: ManagerBasedRLMimicEnv) -> None:
                 prim.GetAttribute("xformOp:orient").Set(local_quat)
 
 
-def _format_vec3(values: Any) -> str:
-    arr = np.asarray(values, dtype=np.float64).reshape(-1)
-    if arr.size < 3:
-        return str(arr.tolist())
-    return f"({arr[0]:+.4f}, {arr[1]:+.4f}, {arr[2]:+.4f})"
-
-
 def _restore_cuda_cloth_visual_pose_to_initial(env: ManagerBasedRLMimicEnv) -> None:
     """Keep CUDA cloth visuals aligned with the initial particle-buffer frame after env.reset()."""
     if "cuda" not in str(env.device):
@@ -129,94 +120,6 @@ def _restore_cuda_cloth_visual_pose_to_initial(env: ManagerBasedRLMimicEnv) -> N
         return
     with contextlib.suppress(Exception):
         obj.set_world_pose(position=init_pos, orientation=init_ori)
-
-
-def _log_cuda_cloth_visual_debug(
-    env: ManagerBasedRLMimicEnv,
-    *,
-    episode_index: int | None,
-    episode_step: int | None,
-    step_count: int,
-    reason: str,
-) -> None:
-    if "cuda" not in str(env.device):
-        return
-
-    obj = getattr(env, "object", None)
-    if obj is None:
-        return
-
-    stage = env.scene.stage
-    root_prim_path = getattr(obj, "usd_prim_path", None)
-    root_prim = stage.GetPrimAtPath(root_prim_path) if root_prim_path else None
-    mesh_prim_path = getattr(obj, "mesh_prim_path", None)
-    mesh_prim = stage.GetPrimAtPath(mesh_prim_path) if mesh_prim_path else None
-    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
-
-    root_local_t = root_local_q = root_world_t = mesh_world_t = None
-    mesh_points_center = mesh_points_first = None
-    if root_prim is not None and root_prim.IsValid():
-        translate_attr = root_prim.GetAttribute("xformOp:translate")
-        orient_attr = root_prim.GetAttribute("xformOp:orient")
-        if translate_attr.IsValid():
-            root_local_t = translate_attr.Get()
-        if orient_attr.IsValid():
-            root_local_q = orient_attr.Get()
-        with contextlib.suppress(Exception):
-            root_world_t = xform_cache.GetLocalToWorldTransform(root_prim).ExtractTranslation()
-
-    if mesh_prim is not None and mesh_prim.IsValid():
-        with contextlib.suppress(Exception):
-            mesh_world_t = xform_cache.GetLocalToWorldTransform(mesh_prim).ExtractTranslation()
-        with contextlib.suppress(Exception):
-            mesh_points_attr = UsdGeom.Mesh(mesh_prim).GetPointsAttr().Get()
-            mesh_points_np = np.asarray(mesh_points_attr, dtype=np.float64)
-            if mesh_points_np.ndim == 2 and mesh_points_np.shape[0] > 0:
-                mesh_points_center = mesh_points_np.mean(axis=0)
-                mesh_points_first = mesh_points_np[0]
-
-    cloth_center = cloth_first = None
-    with contextlib.suppress(Exception):
-        checkpoints = obj.get_checkpoint_world_positions(as_numpy=True)
-        checkpoints_np = np.asarray(checkpoints, dtype=np.float64)
-        if checkpoints_np.ndim == 2 and checkpoints_np.shape[0] > 0:
-            cloth_center = checkpoints_np.mean(axis=0)
-            cloth_first = checkpoints_np[0]
-
-    root_pose_pos = root_pose_quat = None
-    with contextlib.suppress(Exception):
-        root_pose_pos, root_pose_quat = obj.get_world_pose()
-        root_pose_pos = np.asarray(root_pose_pos.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
-        root_pose_quat = np.asarray(root_pose_quat.detach().cpu().numpy(), dtype=np.float64).reshape(-1)
-
-    reset_pose = getattr(obj, "reset_pose", None)
-    reset_pos = None if reset_pose is None else np.asarray(reset_pose, dtype=np.float64).reshape(-1)[:3]
-    init_pos = getattr(obj, "init_pos", None)
-    init_pos = None if init_pos is None else np.asarray(init_pos, dtype=np.float64).reshape(-1)[:3]
-
-    prefix = (
-        f"[CUDA Cloth Visual][{reason}]"
-        f"[Episode {episode_index if episode_index is not None else 'N/A'}]"
-        f"[step {episode_step if episode_step is not None else 'N/A'}]"
-        f"[global_step {step_count}]"
-    )
-    logger.info(
-        "%s root_local_t=%s root_local_q=%s root_world_t=%s mesh_world_t=%s mesh_points_center=%s mesh_points_first=%s "
-        "cloth_center=%s cloth_first=%s obj_world_pos=%s reset_pos=%s init_pos=%s mesh_prim=%s",
-        prefix,
-        root_local_t,
-        root_local_q,
-        root_world_t,
-        mesh_world_t,
-        _format_vec3(mesh_points_center) if mesh_points_center is not None else "unavailable",
-        _format_vec3(mesh_points_first) if mesh_points_first is not None else "unavailable",
-        _format_vec3(cloth_center) if cloth_center is not None else "unavailable",
-        _format_vec3(cloth_first) if cloth_first is not None else "unavailable",
-        _format_vec3(root_pose_pos) if root_pose_pos is not None else "unavailable",
-        _format_vec3(reset_pos) if reset_pos is not None else "unavailable",
-        _format_vec3(init_pos) if init_pos is not None else "unavailable",
-        mesh_prim_path,
-    )
 
 
 async def run_data_generator_with_object_pose_failures(
@@ -420,13 +323,6 @@ def env_loop_with_pose_output(
                         episode_steps[reset_env_id] = 0
                         env_reset_queue.task_done()
                         if reset_env_id == 0:
-                            _log_cuda_cloth_visual_debug(
-                                env,
-                                episode_index=episode_indices[0],
-                                episode_step=episode_steps[0],
-                                step_count=step_count,
-                                reason="reset",
-                            )
                             row = _write_pose_snapshot(
                                 env,
                                 step_count=step_count,
@@ -471,14 +367,6 @@ def env_loop_with_pose_output(
                         episode_step=episode_steps.get(0),
                         completed_attempts=int(mimic_generation.num_attempts),
                         completed_successes=int(mimic_generation.num_success),
-                    )
-                if step_count % CUDA_VISUAL_LOG_INTERVAL == 0:
-                    _log_cuda_cloth_visual_debug(
-                        env,
-                        episode_index=episode_indices.get(0),
-                        episode_step=episode_steps.get(0),
-                        step_count=step_count,
-                        reason="periodic",
                     )
                 if log_success and step_count % SUCCESS_LOG_INTERVAL == 0:
                     if row is None:
