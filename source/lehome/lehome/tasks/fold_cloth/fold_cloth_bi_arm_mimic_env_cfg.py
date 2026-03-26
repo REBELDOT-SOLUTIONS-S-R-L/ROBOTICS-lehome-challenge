@@ -81,7 +81,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         self.datagen_config.generation_keep_failed = True
         self.datagen_config.generation_num_trials = 10
         # Keep generation deterministic/stable by default.
-        self.datagen_config.generation_select_src_per_subtask = False
+        self.datagen_config.generation_select_src_per_subtask = True
         self.datagen_config.generation_select_src_per_arm = False
         self.datagen_config.generation_transform_first_robot_pose = False
         self.datagen_config.generation_interpolate_from_last_target_pose = True
