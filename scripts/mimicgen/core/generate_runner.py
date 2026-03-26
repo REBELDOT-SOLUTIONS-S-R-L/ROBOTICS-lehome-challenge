@@ -8,6 +8,7 @@ import gymnasium as gym
 import numpy as np
 import omni
 import torch
+import carb
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
@@ -305,6 +306,14 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         device=parsed_args.device,
         generation_num_trials=parsed_args.generation_num_trials,
     )
+    if str(parsed_args.device).startswith("cuda"):
+        # CUDA cloth rendering needs the render delegate to consume live fabric transforms.
+        env_cfg.sim.use_fabric = True
+        carb_settings = carb.settings.get_settings()
+        carb_settings.set_bool("/physics/fabricUpdateTransformations", True)
+        carb_settings.set_bool("/physics/fabricUpdateVelocities", True)
+        carb_settings.set_bool("/physics/fabricUpdateJointStates", True)
+        print("Enabled fabric-backed transform sync for CUDA generation.")
     if bool(parsed_args.enable_cameras):
         dataset_export_mode = env_cfg.recorders.dataset_export_mode
         env_cfg.recorders = GenerationRecorderManagerCfg()

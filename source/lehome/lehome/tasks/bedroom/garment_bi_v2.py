@@ -20,7 +20,7 @@ import isaacsim.core.utils.prims as prims_utils
 from lehome.tasks.bedroom.garment_bi_cfg_v2 import GarmentEnvCfg
 from lehome.utils.success_checker_chanllege import success_checker_garment_fold
 from lehome.utils.depth_to_pointcloud import generate_pointcloud_from_data
-from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_USD_PATH
+from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_CFG
 from lehome.devices.action_process import preprocess_device_action
 from lehome.assets.object.Garment import GarmentObject
 from lehome.tasks.bedroom.challenge_garment_loader import ChallengeGarmentLoader
@@ -69,12 +69,12 @@ class GarmentEnv(DirectRLEnv):
         self.top_camera = TiledCamera(self.cfg.top_camera)
         self.left_camera = TiledCamera(self.cfg.left_wrist)
         self.right_camera = TiledCamera(self.cfg.right_wrist)
-        cfg = sim_utils.UsdFileCfg(usd_path=f"{MARBLE_BEDROOM_USD_PATH}")
-        cfg.func(
-            "/World/Scene",
-            cfg,
-            translation=(0.0, 0.0, 0.0),
-            orientation=(0.0, 0.0, 0.0, 0.0),
+        scene_cfg = MARBLE_BEDROOM_CFG.replace(prim_path="/World/Scene")
+        scene_cfg.spawn.func(
+            scene_cfg.prim_path,
+            scene_cfg.spawn,
+            translation=scene_cfg.init_state.pos,
+            orientation=scene_cfg.init_state.rot,
         )
 
         # Create garment object with selected asset

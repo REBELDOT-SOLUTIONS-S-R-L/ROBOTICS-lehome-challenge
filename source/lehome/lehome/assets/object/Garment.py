@@ -244,6 +244,7 @@ class GarmentObject(SingleClothPrim):
         self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
         logger.debug("[GarmentObject] Garment object initialized successfully")
         self.initial_points_positions = None
+        self._initial_particle_count = None
         self._initial_points_incompatible = False
         self._checkpoint_index_numpy_cache: dict[tuple[int, ...], np.ndarray] = {}
         self._checkpoint_index_tensor_cache: dict[tuple[str, tuple[int, ...]], torch.Tensor] = {}
@@ -388,17 +389,15 @@ class GarmentObject(SingleClothPrim):
             points_np = np.asarray(points)
         points_np = np.asarray(points_np, dtype=np.float32)
 
-        points_attr = self._prim.GetAttribute("points")
-        current_points = points_attr.Get()
-        if current_points is not None:
-            expected_count = len(current_points)
-            if expected_count != len(points_np):
-                logger.warning(
-                    f"[GarmentObject] Skip mesh points update due to vertex count mismatch "
-                    f"(expected {expected_count}, got {len(points_np)})."
-                )
-                return False
+        if not self._is_mesh_topology_compatible(points_np):
+            expected_count = self._get_mesh_vertex_count()
+            logger.warning(
+                f"[GarmentObject] Skip mesh points update due to vertex count mismatch "
+                f"(expected {expected_count}, got {len(points_np)})."
+            )
+            return False
 
+        points_attr = self._prim.GetAttribute("points")
         points_attr.Set(Vt.Vec3fArray.FromNumpy(points_np))
         return True
 
@@ -413,8 +412,8 @@ class GarmentObject(SingleClothPrim):
             return None
         return None
 
-    def _is_points_topology_compatible(self, points) -> bool:
-        """Check whether given points count matches current mesh topology."""
+    def _is_mesh_topology_compatible(self, points) -> bool:
+        """Check whether given points count matches current render mesh topology."""
         points_count = self._get_points_count(points)
         if points_count is None:
             return False
@@ -422,6 +421,30 @@ class GarmentObject(SingleClothPrim):
         expected_count = self._get_mesh_vertex_count()
         if expected_count is None:
             return True
+        return points_count == expected_count
+
+    def _get_particle_buffer_count(self) -> int | None:
+        """Return the current cloth particle buffer size if available."""
+        cloth_view = getattr(self, "_cloth_prim_view", None)
+        if cloth_view is None:
+            return None
+
+        try:
+            current_points = cloth_view.get_world_positions()
+        except Exception:
+            return None
+
+        return self._get_points_count(current_points)
+
+    def _is_particle_topology_compatible(self, points) -> bool:
+        """Check whether given points count matches current cloth particle topology."""
+        points_count = self._get_points_count(points)
+        if points_count is None:
+            return False
+
+        expected_count = self._get_particle_buffer_count()
+        if expected_count is None:
+            return False
         return points_count == expected_count
 
     def _get_points_count(self, points) -> int | None:
@@ -592,11 +615,14 @@ class GarmentObject(SingleClothPrim):
             # Reset Points Positions
             if has_initial_points and self._device == "cpu":
                 self._set_mesh_points_if_compatible(self.initial_points_positions)
-            elif has_initial_points and self._is_points_topology_compatible(self.initial_points_positions):
+            elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
                 self._cloth_prim_view.set_world_positions(self.initial_points_positions)
             elif has_initial_points:
+                expected = self._get_particle_buffer_count()
+                got = self._get_points_count(self.initial_points_positions)
                 logger.warning(
-                    "[GarmentObject] Skipping GPU particle reset due to mesh/particle topology mismatch."
+                    f"[GarmentObject] Skipping GPU particle reset due to particle topology mismatch "
+                    f"(expected {expected}, got {got})."
                 )
             else:
                 logger.warning(
@@ -875,20 +901,33 @@ class GarmentObject(SingleClothPrim):
             self.initial_points_positions = (
                 self._get_points_pose().detach().cpu().numpy()
             )
+            self._initial_particle_count = None
             self._initial_points_incompatible = False
         else:
-            gpu_points = self._cloth_prim_view.get_world_positions()
-            if self._is_points_topology_compatible(gpu_points):
+            try:
+                gpu_points = self._cloth_prim_view.get_world_positions()
+            except Exception as exc:
+                self.initial_points_positions = None
+                self._initial_particle_count = None
+                self._initial_points_incompatible = True
+                logger.warning(
+                    f"[GarmentObject] Failed to capture initial particle buffer. "
+                    f"Will skip particle position reset ({exc})."
+                )
+                return
+
+            particle_count = self._get_points_count(gpu_points)
+            if particle_count is not None:
                 self.initial_points_positions = gpu_points
+                self._initial_particle_count = particle_count
                 self._initial_points_incompatible = False
             else:
                 self.initial_points_positions = None
+                self._initial_particle_count = None
                 self._initial_points_incompatible = True
-                expected = self._get_mesh_vertex_count()
-                got = self._get_points_count(gpu_points)
                 logger.warning(
-                    f"[GarmentObject] Incompatible initial particle buffer size (expected {expected}, got {got}). "
-                    "Will skip particle position reset to avoid invalid mesh state."
+                    "[GarmentObject] Unable to determine initial particle buffer size. "
+                    "Will skip particle position reset to avoid invalid cloth state."
                 )
 
     def _ensure_initial_points_positions(self) -> bool:
@@ -962,11 +1001,14 @@ class GarmentObject(SingleClothPrim):
             has_initial_points = self._ensure_initial_points_positions()
             if has_initial_points and self._device == "cpu":
                 self._set_mesh_points_if_compatible(self.initial_points_positions)
-            elif has_initial_points and self._is_points_topology_compatible(self.initial_points_positions):
+            elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
                 self._cloth_prim_view.set_world_positions(self.initial_points_positions)
             elif has_initial_points:
+                expected = self._get_particle_buffer_count()
+                got = self._get_points_count(self.initial_points_positions)
                 logger.warning(
-                    "[GarmentObject] Skipping GPU particle reset in set_all_pose due to mesh/particle topology mismatch."
+                    f"[GarmentObject] Skipping GPU particle reset in set_all_pose due to particle topology mismatch "
+                    f"(expected {expected}, got {got})."
                 )
             else:
                 logger.warning(
