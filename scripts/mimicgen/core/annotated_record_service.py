@@ -29,6 +29,9 @@ from .record_debug import (
     log_debug_pose_snapshot_if_enabled,
     log_success_result,
 )
+from .cuda_visual_sync import apply_cuda_fabric_render_settings
+from .cuda_visual_sync import force_cuda_render_sync
+from .cuda_visual_sync import post_reset_cuda_visual_sync
 from .teleop_runtime import (
     create_teleop_interface,
     register_teleop_callbacks,
@@ -284,6 +287,7 @@ def _reset_environment_for_next_attempt(
 ) -> dict[str, Any] | None:
     env.reset()
     stabilize_garment_after_reset(env, args)
+    post_reset_cuda_visual_sync(env)
     return _safe_get_all_pose(env)
 
 
@@ -300,6 +304,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
         )
 
     env_cfg = parse_env_cfg(runtime_task, device=device)
+    apply_cuda_fabric_render_settings(env_cfg, device, context="annotated teleop")
     env_cfg.task_type = args.teleop_device
     env_cfg.garment_name = args.garment_name
     env_cfg.garment_version = args.garment_version
@@ -377,6 +382,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     env.initialize_obs()
                     logger.info("[Idle Phase] Stabilizing garment after initialization...")
                     stabilize_garment_after_reset(env, args)
+                    post_reset_cuda_visual_sync(env)
                     cached_object_initial_pose = _safe_get_all_pose(env)
                     logger.info("[Idle Phase] Ready for annotated recording")
                     initialized = True
@@ -396,6 +402,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         else _normalize_action_tensor(env, input_action)
                     )
                     env.step(action)
+                    force_cuda_render_sync(env)
                     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
                     continue
 
@@ -507,6 +514,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         else _normalize_action_tensor(env, input_action)
                     )
                     env.step(action)
+                    force_cuda_render_sync(env)
                     episode_step_count += 1
                     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
                     snapshot = capture_annotated_runtime_snapshot(

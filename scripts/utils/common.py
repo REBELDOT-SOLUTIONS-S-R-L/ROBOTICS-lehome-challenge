@@ -163,7 +163,26 @@ def stabilize_garment_after_reset(
             pass
         home_action = torch.zeros(1, action_dim, dtype=torch.float32, device=env.device)
 
+    force_cuda_render_sync = None
+    cuda_visual_sync_enabled = None
+    with torch.inference_mode():
+        try:
+            from scripts.mimicgen.core.cuda_visual_sync import cuda_visual_sync_enabled as _cuda_visual_sync_enabled
+            from scripts.mimicgen.core.cuda_visual_sync import force_cuda_render_sync as _force_cuda_render_sync
+
+            cuda_visual_sync_enabled = _cuda_visual_sync_enabled
+            force_cuda_render_sync = _force_cuda_render_sync
+        except Exception:
+            force_cuda_render_sync = None
+            cuda_visual_sync_enabled = None
+
     for step_idx in range(num_steps):
         env.step(home_action)
-        if (step_idx + 1) % 10 == 0 or step_idx == num_steps - 1:
+        if (
+            force_cuda_render_sync is not None
+            and cuda_visual_sync_enabled is not None
+            and cuda_visual_sync_enabled(env)
+        ):
+            force_cuda_render_sync(env)
+        elif (step_idx + 1) % 10 == 0 or step_idx == num_steps - 1:
             env.render()
