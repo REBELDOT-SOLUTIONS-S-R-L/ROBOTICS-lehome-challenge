@@ -50,7 +50,10 @@ We offer two installation methods: UV and Docker for submission and local evalua
 
 #### Use UV
 
-The simulation environment is based on the IssacLab and LeRobot repositories; please refer to [UV installation guide](docs/installation.md).
+The simulation environment is based on IsaacLab and LeRobot. For the MimicGen
+workflow in this repository, clone
+`alex-luci/IsaacLab` branch `lehome-cloth-mimic-compat` into `third_party/IsaacLab`,
+then follow the [UV installation guide](docs/installation.md).
 
 #### Use Docker
 

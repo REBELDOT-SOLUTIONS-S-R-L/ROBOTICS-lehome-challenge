@@ -246,6 +246,9 @@ class GarmentObject(SingleClothPrim):
         self.initial_points_positions = None
         self._initial_particle_count = None
         self._initial_points_incompatible = False
+        self._checkpoint_index_numpy_cache: dict[tuple[int, ...], np.ndarray] = {}
+        self._checkpoint_index_tensor_cache: dict[tuple[str, tuple[int, ...]], torch.Tensor] = {}
+        self._warned_checkpoint_slow_path = False
 
         # refresh visibility
         # set_single_prim_visible(self.mesh_prim_path, visible=False)
@@ -457,6 +460,135 @@ class GarmentObject(SingleClothPrim):
             return int(points_np.shape[0])
         except Exception:
             return None
+
+    def _normalize_checkpoint_indices(
+        self,
+        checkpoint_indices: Sequence[int] | None = None,
+    ) -> tuple[int, ...]:
+        """Normalize checkpoint indices into a stable tuple."""
+        if checkpoint_indices is None:
+            checkpoint_indices = self.check_points
+        normalized = tuple(int(idx) for idx in checkpoint_indices)
+        if not normalized:
+            raise ValueError("No garment checkpoint indices are available.")
+        return normalized
+
+    def _get_cached_checkpoint_index_numpy(
+        self,
+        checkpoint_indices: tuple[int, ...],
+    ) -> np.ndarray:
+        """Return cached numpy checkpoint indices."""
+        cached = self._checkpoint_index_numpy_cache.get(checkpoint_indices)
+        if cached is None:
+            cached = np.asarray(checkpoint_indices, dtype=np.int64)
+            self._checkpoint_index_numpy_cache[checkpoint_indices] = cached
+        return cached
+
+    def _get_cached_checkpoint_index_tensor(
+        self,
+        checkpoint_indices: tuple[int, ...],
+        device: torch.device | str,
+    ) -> torch.Tensor:
+        """Return cached tensor checkpoint indices for the requested device."""
+        device_str = str(device)
+        cache_key = (device_str, checkpoint_indices)
+        cached = self._checkpoint_index_tensor_cache.get(cache_key)
+        if cached is None or str(cached.device) != device_str:
+            cached = torch.tensor(checkpoint_indices, dtype=torch.long, device=device)
+            self._checkpoint_index_tensor_cache[cache_key] = cached
+        return cached
+
+    def _get_checkpoint_world_positions_slow(
+        self,
+        checkpoint_indices: tuple[int, ...],
+    ) -> np.ndarray:
+        """Fallback checkpoint query using the full mesh path."""
+        world_points, _, _, _ = self.get_current_mesh_points()
+        world_points = np.asarray(world_points, dtype=np.float32)
+        return world_points[self._get_cached_checkpoint_index_numpy(checkpoint_indices)]
+
+    def get_checkpoint_world_positions(
+        self,
+        checkpoint_indices: Sequence[int] | None = None,
+        *,
+        as_numpy: bool = True,
+        clone: bool = False,
+    ) -> np.ndarray | torch.Tensor:
+        """Return garment checkpoint positions in world space.
+
+        The fast path reads only the requested checkpoints from the active backend buffer.
+        If that path fails, the method falls back once to the slower full-mesh path.
+        """
+        normalized_indices = self._normalize_checkpoint_indices(checkpoint_indices)
+
+        try:
+            if "cuda" in str(self._device):
+                world_positions = self._cloth_prim_view.get_world_positions(clone=clone)
+                if not torch.is_tensor(world_positions):
+                    world_positions = torch.as_tensor(
+                        world_positions,
+                        dtype=torch.float32,
+                        device=self._device,
+                    )
+                point_indices = self._get_cached_checkpoint_index_tensor(
+                    normalized_indices,
+                    world_positions.device,
+                )
+                selected_positions = world_positions[0].index_select(0, point_indices)
+                if as_numpy:
+                    return (
+                        selected_positions.detach()
+                        .cpu()
+                        .numpy()
+                        .astype(np.float32, copy=False)
+                    )
+                return selected_positions.clone() if clone else selected_positions
+
+            local_points = self._get_points_pose()
+            point_indices = self._get_cached_checkpoint_index_tensor(
+                normalized_indices,
+                local_points.device,
+            )
+            selected_local_points = (
+                local_points.index_select(0, point_indices)
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32, copy=False)
+            )
+            pos_world, ori_world = self.get_world_pose()
+            scale_world = self.get_world_scale()
+            pos_world_np = np.asarray(pos_world.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
+            ori_world_np = np.asarray(ori_world.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
+            scale_world_np = np.asarray(scale_world.detach().cpu().numpy(), dtype=np.float32).reshape(-1)
+            transformed_points = self.transform_points(
+                selected_local_points,
+                pos_world_np,
+                ori_world_np,
+                scale_world_np,
+            ).astype(np.float32, copy=False)
+            if as_numpy:
+                return transformed_points
+            return torch.as_tensor(
+                transformed_points,
+                dtype=torch.float32,
+                device=local_points.device,
+            )
+        except Exception as fast_exc:
+            if not self._warned_checkpoint_slow_path:
+                logger.warning(
+                    "[GarmentObject] Falling back to slow checkpoint world-position query: "
+                    f"{fast_exc}"
+                )
+                self._warned_checkpoint_slow_path = True
+            slow_positions = self._get_checkpoint_world_positions_slow(normalized_indices)
+            if as_numpy:
+                return slow_positions
+            return torch.as_tensor(
+                slow_positions,
+                dtype=torch.float32,
+                device=self._device,
+            )
 
     def reset(self):
         """
