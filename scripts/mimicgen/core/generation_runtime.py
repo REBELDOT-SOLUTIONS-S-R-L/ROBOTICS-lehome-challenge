@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 
 import isaaclab_mimic.datagen.generation as mimic_generation
 from isaaclab.envs import ManagerBasedRLMimicEnv
@@ -33,38 +34,57 @@ logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
 
 
+def _cuda_runtime_enabled(env: ManagerBasedRLMimicEnv) -> bool:
+    """Return whether generation is running on a CUDA-backed env device."""
+    return "cuda" in str(env.device)
+
+
+def _cuda_visual_sync_enabled(env: ManagerBasedRLMimicEnv) -> bool:
+    """Return whether CUDA generation currently needs render-facing USD sync."""
+    if not _cuda_runtime_enabled(env):
+        return False
+    with contextlib.suppress(Exception):
+        return bool(env.sim.has_gui() or env.sim.has_rtx_sensors())
+    return False
+
+
 def _force_cuda_render_sync(env: ManagerBasedRLMimicEnv) -> None:
     """Force a render refresh for CUDA generation and mirror robot visuals to USD."""
-    if "cuda" not in str(env.device):
+    if not _cuda_visual_sync_enabled(env):
         return
-    with contextlib.suppress(Exception):
-        env.sim.forward()
     with contextlib.suppress(Exception):
         _sync_cuda_robot_visuals_to_usd(env)
     with contextlib.suppress(Exception):
         env.sim.render()
 
 
-def _ensure_cuda_robot_visual_sync_initialized(env: ManagerBasedRLMimicEnv) -> dict[str, list[Any]]:
+def _ensure_cuda_robot_visual_sync_initialized(
+    env: ManagerBasedRLMimicEnv,
+) -> dict[str, list[tuple[Any, Any, Any]]]:
     cache = getattr(env, "_cuda_robot_visual_sync_cache", None)
     if cache is not None:
         return cache
 
     stage = env.scene.stage
     cache = {}
-    for arm_name in ("left_arm", "right_arm", "robot"):
+    for arm_name in ("left_arm", "right_arm"):
         with contextlib.suppress(Exception):
             arm = env.scene[arm_name]
-            prims = []
+            prim_entries = []
             for prim_path in arm.root_physx_view.link_paths[0]:
                 prim = stage.GetPrimAtPath(prim_path)
                 if not prim.IsValid():
                     continue
                 with contextlib.suppress(Exception):
                     sim_utils.standardize_xform_ops(prim)
-                prims.append(prim)
-            if prims:
-                cache[arm_name] = prims
+                translate_attr = prim.GetAttribute("xformOp:translate")
+                orient_attr = prim.GetAttribute("xformOp:orient")
+                if not translate_attr.IsValid() or not orient_attr.IsValid():
+                    continue
+                parent_prim = prim.GetParent() if prim.GetParent().IsValid() else None
+                prim_entries.append((translate_attr, orient_attr, parent_prim))
+            if prim_entries:
+                cache[arm_name] = prim_entries
 
     setattr(env, "_cuda_robot_visual_sync_cache", cache)
     return cache
@@ -77,21 +97,22 @@ def _sync_cuda_robot_visuals_to_usd(env: ManagerBasedRLMimicEnv) -> None:
 
     xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
     with Sdf.ChangeBlock():
-        for arm_name, prims in cache.items():
+        for arm_name, prim_entries in cache.items():
             arm = env.scene[arm_name]
-            poses = arm.data.body_link_pose_w[0]
-            count = min(len(prims), int(poses.shape[0]))
+            poses = arm.root_physx_view.get_link_transforms()[0]
+            count = min(len(prim_entries), int(poses.shape[0]))
+            poses_cpu = poses[:count].detach().cpu()
+            positions_cpu = poses_cpu[:, :3].numpy()
+            orientations_cpu = math_utils.convert_quat(poses_cpu[:, 3:7], to="wxyz").numpy()
             for body_idx in range(count):
-                prim = prims[body_idx]
-                pose = poses[body_idx].detach().cpu()
-                world_pos = Gf.Vec3d(float(pose[0]), float(pose[1]), float(pose[2]))
+                translate_attr, orient_attr, parent_prim = prim_entries[body_idx]
+                world_pos = Gf.Vec3d(*positions_cpu[body_idx].tolist())
                 world_quat = Gf.Quatd(
-                    float(pose[3]),
-                    Gf.Vec3d(float(pose[4]), float(pose[5]), float(pose[6])),
+                    float(orientations_cpu[body_idx, 0]),
+                    Gf.Vec3d(*orientations_cpu[body_idx, 1:].tolist()),
                 )
 
-                parent_prim = prim.GetParent()
-                if parent_prim.IsValid() and parent_prim.GetPath() != Sdf.Path.absoluteRootPath:
+                if parent_prim is not None and parent_prim.GetPath() != Sdf.Path.absoluteRootPath:
                     prim_tf = Gf.Matrix4d()
                     prim_tf.SetTranslateOnly(world_pos)
                     prim_tf.SetRotateOnly(world_quat)
@@ -103,13 +124,13 @@ def _sync_cuda_robot_visuals_to_usd(env: ManagerBasedRLMimicEnv) -> None:
                     local_pos = world_pos
                     local_quat = world_quat
 
-                prim.GetAttribute("xformOp:translate").Set(local_pos)
-                prim.GetAttribute("xformOp:orient").Set(local_quat)
+                translate_attr.Set(local_pos)
+                orient_attr.Set(local_quat)
 
 
 def _restore_cuda_cloth_visual_pose_to_initial(env: ManagerBasedRLMimicEnv) -> None:
     """Keep CUDA cloth visuals aligned with the initial particle-buffer frame after env.reset()."""
-    if "cuda" not in str(env.device):
+    if not _cuda_visual_sync_enabled(env):
         return
     obj = getattr(env, "object", None)
     if obj is None:
