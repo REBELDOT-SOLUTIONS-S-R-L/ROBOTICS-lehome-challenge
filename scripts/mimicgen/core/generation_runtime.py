@@ -315,6 +315,7 @@ def env_loop_with_pose_output(
     asyncio_event_loop: asyncio.AbstractEventLoop,
     output_file: str,
     pose_output_file: str | None,
+    enable_pose_trace: bool = False,
     logging_interval: int = 1,
     log_success: bool = False,
 ) -> None:
@@ -323,11 +324,13 @@ def env_loop_with_pose_output(
     prev_num_attempts = 0
     step_count = 0
     action_dim = int(env.single_action_space.shape[0])
-    pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
-    pose_writer = PoseTraceCsvWriter(pose_output_path)
+    pose_writer: PoseTraceCsvWriter | None = None
+    if enable_pose_trace:
+        pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
+        pose_writer = PoseTraceCsvWriter(pose_output_path)
+        print(f"Pose trace CSV: {pose_output_path}")
     episode_indices = {env_id: -1 for env_id in range(int(env.num_envs))}
     episode_steps = {env_id: -1 for env_id in range(int(env.num_envs))}
-    print(f"Pose trace CSV: {pose_output_path}")
 
     try:
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
@@ -343,7 +346,7 @@ def env_loop_with_pose_output(
                         episode_indices[reset_env_id] += 1
                         episode_steps[reset_env_id] = 0
                         env_reset_queue.task_done()
-                        if reset_env_id == 0:
+                        if reset_env_id == 0 and (enable_pose_trace or log_success):
                             row = _write_pose_snapshot(
                                 env,
                                 step_count=step_count,
@@ -378,7 +381,7 @@ def env_loop_with_pose_output(
                     if episode_steps[env_id] >= 0:
                         episode_steps[env_id] += 1
                 row: dict[str, Any] | None = None
-                if step_count % logging_interval == 0:
+                if enable_pose_trace and step_count % logging_interval == 0:
                     row = _write_pose_snapshot(
                         env,
                         step_count=step_count,

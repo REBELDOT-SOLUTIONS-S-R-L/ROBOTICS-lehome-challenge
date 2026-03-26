@@ -476,6 +476,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         mimic_generation.num_attempts = 0
         asyncio = __import__("asyncio")
         asyncio.ensure_future(asyncio.gather(*async_components["tasks"]))
+        enable_pose_trace = bool(parsed_args.save_pose_trace or parsed_args.pose_output_file)
         env_loop_with_pose_output(
             env,
             async_components["reset_queue"],
@@ -483,6 +484,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
             async_components["event_loop"],
             output_file=parsed_args.output_file,
             pose_output_file=parsed_args.pose_output_file,
+            enable_pose_trace=enable_pose_trace,
             logging_interval=int(parsed_args.logging_interval),
             log_success=bool(parsed_args.log_success),
         )
