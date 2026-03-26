@@ -71,7 +71,7 @@ def clean_episodes_table(table: pa.Table, rm_col_name: str) -> pa.Table:
 
 
 def main():
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description="[Internal] Remove a column from a parquet-based dataset copy.")
     parser.add_argument("--dataset_root", type=str, required=True)
     parser.add_argument("--output_root", type=str, required=True)
     parser.add_argument("--column_to_remove", type=str, default="observation.top_depth")

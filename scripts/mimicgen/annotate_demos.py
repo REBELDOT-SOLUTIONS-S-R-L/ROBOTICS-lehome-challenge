@@ -14,79 +14,65 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 try:
+    from scripts.mimicgen.core.cli_parser import (
+        add_config_argument,
+        add_garment_override_arguments,
+        add_mimic_ik_orientation_weight_argument,
+        add_task_type_argument,
+        warn_on_deprecated_flags,
+    )
     from scripts.utils.arg_config import expand_cli_args_with_config
 except ImportError:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.append(str(repo_root))
+    from scripts.mimicgen.core.cli_parser import (
+        add_config_argument,
+        add_garment_override_arguments,
+        add_mimic_ik_orientation_weight_argument,
+        add_task_type_argument,
+        warn_on_deprecated_flags,
+    )
     from scripts.utils.arg_config import expand_cli_args_with_config
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Annotate demonstrations for Isaac Lab environments.",
+        description="[Support Tool] Annotate demonstrations for Isaac Lab environments.",
         fromfile_prefix_chars="@",
     )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help=(
-            "Optional config file that expands to CLI args before parsing. "
-            "Supports .json, .yaml, .yml, .csv, .txt, and .args."
-        ),
-    )
-    parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-    parser.add_argument(
-        "--garment_name",
-        type=str,
-        default=None,
-        help="Garment name (for garment tasks), e.g. Top_Long_Unseen_0.",
-    )
-    parser.add_argument(
-        "--garment_version",
-        type=str,
-        default=None,
-        help="Garment version (for garment tasks), e.g. Release or Holdout.",
-    )
-    parser.add_argument(
+    add_config_argument(parser)
+
+    core_group = parser.add_argument_group("core workflow")
+    core_group.add_argument("--task", type=str, default=None, help="Name of the task.")
+    core_group.add_argument(
         "--input_file", type=str, default="./datasets/dataset.hdf5", help="File name of the dataset to be annotated."
     )
-    parser.add_argument(
+    core_group.add_argument(
         "--output_file",
         type=str,
         default="./datasets/dataset_annotated.hdf5",
         help="File name of the annotated output dataset file.",
     )
-    parser.add_argument(
-        "--task_type",
-        type=str,
-        default=None,
-        help=(
-            "Specify task type. If your dataset is recorded with keyboard, you should set it to 'keyboard', otherwise not"
-            " to set it and keep default value None."
-        ),
-    )
-    parser.add_argument("--auto", action="store_true", default=False, help="Automatically annotate subtasks.")
-    parser.add_argument(
-        "--enable_pinocchio",
-        action="store_true",
-        default=False,
-        help="Enable Pinocchio.",
-    )
-    parser.add_argument(
-        "--garment_info_json",
-        type=str,
-        default=None,
-        help="Path to garment_info.json for per-episode initial cloth pose replay.",
-    )
-    parser.add_argument(
+    core_group.add_argument("--auto", action="store_true", default=False, help="Automatically annotate subtasks.")
+    core_group.add_argument(
         "--step_hz",
         type=int,
         default=30,
         help="Replay speed in Hz for annotation (set <=0 to disable throttling).",
     )
-    parser.add_argument(
+
+    garment_group = parser.add_argument_group("garment and environment overrides")
+    add_garment_override_arguments(garment_group)
+
+    runtime_group = parser.add_argument_group("runtime and debugging")
+    runtime_group.add_argument(
+        "--garment_info_json",
+        type=str,
+        default=None,
+        help="Path to garment_info.json for per-episode initial cloth pose replay.",
+    )
+    runtime_group.add_argument(
         "--ignore_replay_success",
         action="store_true",
         default=False,
@@ -95,7 +81,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Useful for stochastic cloth scenes where deterministic replay can fail."
         ),
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--sanitize_datagen_poses",
         action="store_true",
         default=False,
@@ -104,19 +90,15 @@ def build_parser() -> argparse.ArgumentParser:
             "Disabled by default to expose upstream pose issues."
         ),
     )
+
+    compatibility_group = parser.add_argument_group("compatibility and legacy")
     parser.add_argument(
-        "--garment_cfg_base_path",
-        type=str,
-        default="Assets/objects/Challenge_Garment",
-        help="Base path of garment assets (for garment tasks).",
+        "--enable_pinocchio",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--particle_cfg_path",
-        type=str,
-        default="source/lehome/lehome/tasks/bedroom/config_file/particle_garment_cfg.yaml",
-        help="Path to particle garment config yaml (for garment tasks).",
-    )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--require_ik_actions",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -125,20 +107,20 @@ def build_parser() -> argparse.ArgumentParser:
             "Disable with --no-require-ik-actions to allow joint-action replay."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--ik_action_dim",
         type=int,
         default=16,
         help="Expected IK action dimension (16 for bimanual cloth, 8 for single-arm).",
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--ik_quat_order",
         type=str,
         choices=["xyzw", "wxyz"],
         default="xyzw",
         help="Quaternion order used inside IK actions.",
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--legacy_joint_replay",
         action="store_true",
         default=False,
@@ -147,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Disabled by default."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--strict_pose_z_gap_threshold",
         type=float,
         default=0.55,
@@ -156,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Used only when --require-ik-actions is enabled."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--ik_action_frame",
         type=str,
         choices=["auto", "base", "world"],
@@ -168,7 +150,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'auto' tries dataset metadata and then a numeric heuristic."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--ik_auto_base_z_threshold",
         type=float,
         default=0.35,
@@ -177,15 +159,8 @@ def build_parser() -> argparse.ArgumentParser:
             "actions are treated as base-frame."
         ),
     )
-    parser.add_argument(
-        "--mimic_ik_orientation_weight",
-        type=float,
-        default=0.01,
-        help=(
-            "Orientation weight forwarded to env IK conversion (target_eef_pose_to_action). "
-            "Higher values enforce source wrist orientation more strongly; 0 disables orientation tracking."
-        ),
-    )
+    add_task_type_argument(compatibility_group)
+    add_mimic_ik_orientation_weight_argument(compatibility_group)
     AppLauncher.add_app_launcher_args(parser)
     return parser
 
@@ -193,7 +168,16 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> None:
     parser = build_parser()
     raw_argv = sys.argv[1:] if argv is None else argv
-    args_cli = parser.parse_args(expand_cli_args_with_config(raw_argv, parser))
+    expanded_argv = expand_cli_args_with_config(raw_argv, parser)
+    warn_on_deprecated_flags(
+        expanded_argv,
+        {
+            "--enable_pinocchio": (
+                "`--enable_pinocchio` is deprecated and kept only for compatibility."
+            ),
+        },
+    )
+    args_cli = parser.parse_args(expanded_argv)
 
     if args_cli.enable_pinocchio:
         import pinocchio  # noqa: F401

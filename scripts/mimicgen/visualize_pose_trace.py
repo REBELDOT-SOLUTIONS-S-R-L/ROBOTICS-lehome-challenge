@@ -247,7 +247,7 @@ def _plot_episode(fig, axes, ax3d, trace_file: Path, rows: list[dict[str, Any]],
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Offline viewer for garment generation pose trace CSV.")
+    parser = argparse.ArgumentParser(description="[Support Tool] Offline viewer for garment generation pose trace CSV.")
     parser.add_argument("--trace_file", type=str, required=True, help="Path to pose trace CSV.")
     parser.add_argument(
         "--episode",

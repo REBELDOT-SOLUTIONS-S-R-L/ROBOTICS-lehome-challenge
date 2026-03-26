@@ -1,4 +1,5 @@
 import multiprocessing
+import sys
 
 if multiprocessing.get_start_method() != "spawn":
     multiprocessing.set_start_method("spawn", force=True)
@@ -6,6 +7,7 @@ if multiprocessing.get_start_method() != "spawn":
 from isaaclab.app import AppLauncher
 
 from .utils import common
+from .utils.arg_config import expand_cli_args_with_config
 from .utils.parser import setup_eval_parser
 from .utils.common import launch_app_from_args
 from lehome.utils.logger import get_logger
@@ -17,7 +19,7 @@ def main():
     """Main entry point for evaluation script."""
     parser = setup_eval_parser()
     AppLauncher.add_app_launcher_args(parser)
-    args = parser.parse_args()
+    args = parser.parse_args(expand_cli_args_with_config(sys.argv[1:], parser))
     simulation_app = launch_app_from_args(args)
     try:
         import lehome.tasks.bedroom
