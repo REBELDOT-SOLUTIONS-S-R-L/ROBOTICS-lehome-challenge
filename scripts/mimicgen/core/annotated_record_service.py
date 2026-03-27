@@ -123,6 +123,31 @@ def _get_hold_action(env: DirectRLEnv) -> torch.Tensor:
     return torch.zeros((1, action_dim), device=env.device, dtype=torch.float32)
 
 
+def _capture_camera_frames(env: DirectRLEnv) -> dict[str, torch.Tensor] | None:
+    camera_frames: dict[str, torch.Tensor] = {}
+
+    def _maybe_add(sensor_name: str, target_key: str) -> None:
+        try:
+            sensor = env.scene[sensor_name]
+            rgb = sensor.data.output["rgb"]
+        except Exception:
+            return
+        if rgb is None:
+            return
+        if rgb.ndim == 4:
+            rgb = rgb[0]
+        if rgb.ndim != 3 or rgb.shape[-1] not in (3, 4):
+            return
+        if rgb.shape[-1] == 4:
+            rgb = rgb[..., :3]
+        camera_frames[target_key] = rgb.clone()
+
+    _maybe_add("top_camera", "top")
+    _maybe_add("left_camera", "left_wrist")
+    _maybe_add("right_camera", "right_wrist")
+    return camera_frames or None
+
+
 def _format_signal_label(signal_name: str | None) -> str:
     if signal_name is None:
         return "complete"
@@ -321,7 +346,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     elif bool(getattr(args, "enable_cameras", False)):
         logger.info(
             "[Annotated Recording] Cameras explicitly enabled. "
-            "This mode does not save camera data and FPS may drop."
+            "Camera frames will be saved in the annotated HDF5 and FPS may drop."
         )
     if hasattr(env_cfg, "terminations") and hasattr(env_cfg.terminations, "success"):
         env_cfg.terminations.success = None
@@ -362,6 +387,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
             env_args=_build_env_args(args),
             fps=int(getattr(args, "step_hz", 90)),
             episode_capacity=int(env.max_episode_length) + 1,
+            record_camera_streams=bool(getattr(args, "enable_cameras", False)),
         )
         annotator = OnlineAnnotationState.from_env(env)
         debug_pose_state: dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
@@ -559,6 +585,9 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         gripper_actions=snapshot.gripper_actions,
                         joint_actions=snapshot.joint_actions,
                         joint_pos=snapshot.joint_pos,
+                        camera_frames=_capture_camera_frames(env)
+                        if bool(getattr(args, "enable_cameras", False))
+                        else None,
                     )
 
                     terminated, truncated = env._get_dones()

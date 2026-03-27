@@ -99,6 +99,19 @@ def _normalize_joint_row(value: Any, *, expected_dim: int | None = None) -> np.n
     return arr.detach().cpu().clone()
 
 
+def _normalize_rgb_frame(frame_value: Any) -> np.ndarray | None:
+    if frame_value is None:
+        return None
+    rgb = as_numpy(frame_value, dtype=np.uint8)
+    if rgb.ndim == 4:
+        rgb = rgb.squeeze(0)
+    if rgb.ndim != 3 or rgb.shape[-1] not in (3, 4):
+        return None
+    if rgb.shape[-1] == 4:
+        rgb = rgb[..., :3]
+    return rgb
+
+
 def _pose_series_from_positions(positions: np.ndarray) -> np.ndarray:
     num_samples = int(positions.shape[0])
     pose_series = np.repeat(np.eye(4, dtype=np.float32)[None, :, :], num_samples, axis=0)
@@ -134,7 +147,14 @@ def _build_object_pose_section(checkpoint_series: np.ndarray) -> dict[str, np.nd
 class AnnotatedMimicHDF5Recorder:
     """Buffered writer for generation-ready Mimic teleoperation episodes."""
 
-    def __init__(self, file_path: Path, env_args: dict[str, Any], fps: int, episode_capacity: int) -> None:
+    def __init__(
+        self,
+        file_path: Path,
+        env_args: dict[str, Any],
+        fps: int,
+        episode_capacity: int,
+        record_camera_streams: bool = False,
+    ) -> None:
         require_h5py("annotated Mimic HDF5 recording")
         self._file_path = Path(file_path)
         self._file_path.parent.mkdir(parents=True, exist_ok=True)
@@ -157,6 +177,9 @@ class AnnotatedMimicHDF5Recorder:
         self._signal_names: tuple[str, ...] | None = None
         self._episode_capacity = int(episode_capacity)
         self._episode_step_count = 0
+        self._record_camera_streams = bool(record_camera_streams)
+        self._camera_stream_names = ("top", "left_wrist", "right_wrist")
+        self._camera_buffers: dict[str, list[np.ndarray]] = {}
         if self._episode_capacity <= 0:
             raise ValueError(f"Episode capacity must be positive, got {self._episode_capacity}.")
 
@@ -209,6 +232,10 @@ class AnnotatedMimicHDF5Recorder:
         }
         self._validated_object_pose_once = False
         self._episode_step_count = 0
+        self._camera_buffers = {
+            name: []
+            for name in self._camera_stream_names
+        } if self._record_camera_streams else {}
 
     def discard_episode(self) -> None:
         self._episode_index = None
@@ -217,6 +244,7 @@ class AnnotatedMimicHDF5Recorder:
         self._validated_object_pose_once = False
         self._signal_names = None
         self._episode_step_count = 0
+        self._camera_buffers = {}
 
     def append_step(
         self,
@@ -227,6 +255,7 @@ class AnnotatedMimicHDF5Recorder:
         gripper_actions: dict[str, Any],
         joint_actions: Any | None,
         joint_pos: dict[str, Any],
+        camera_frames: dict[str, Any] | None = None,
     ) -> None:
         if self._episode_index is None or self._episode_meta is None:
             raise RuntimeError("No active episode. Call begin_episode() first.")
@@ -255,6 +284,7 @@ class AnnotatedMimicHDF5Recorder:
             joint_pos=joint_pos,
             step_idx=step_idx,
         )
+        self._append_camera_step(camera_frames=camera_frames, step_idx=step_idx)
         self._episode_step_count += 1
 
     def _append_pose_section(self, section_name: str, values: dict[str, Any], step_idx: int) -> None:
@@ -290,6 +320,24 @@ class AnnotatedMimicHDF5Recorder:
             pos_section[arm_name][step_idx] = _normalize_joint_row(
                 joint_pos[arm_name], expected_dim=6
             )
+
+    def _append_camera_step(
+        self,
+        *,
+        camera_frames: dict[str, Any] | None,
+        step_idx: int,
+    ) -> None:
+        if not self._record_camera_streams:
+            return
+        if camera_frames is None:
+            raise RuntimeError("Annotated recorder expected camera frames when camera recording is enabled.")
+        for key in self._camera_stream_names:
+            frame = _normalize_rgb_frame(camera_frames.get(key))
+            if frame is None:
+                raise RuntimeError(
+                    f"Annotated recorder expected RGB camera frame for '{key}' at step {step_idx}."
+                )
+            self._camera_buffers[key].append(frame)
 
     def _used_pose_component_section(self, section_name: str) -> dict[str, np.ndarray]:
         return {
@@ -412,6 +460,7 @@ class AnnotatedMimicHDF5Recorder:
             joint_actions=joint_actions,
             joint_pos=joint_pos_section,
         )
+        self._write_camera_obs_section(obs_group)
         datagen_group = obs_group.create_group("datagen_info")
         self._write_pose_section(datagen_group, "object_pose", object_pose_section)
         self._write_pose_section(datagen_group, "eef_pose", eef_pose_section)
@@ -465,6 +514,19 @@ class AnnotatedMimicHDF5Recorder:
         obs_group.create_dataset("right_joint_pos_target", data=right_target, compression="lzf")
         obs_group.create_dataset("left_joint_pos_rel", data=(left_target - left_joint_pos), compression="lzf")
         obs_group.create_dataset("right_joint_pos_rel", data=(right_target - right_joint_pos), compression="lzf")
+
+    def _write_camera_obs_section(self, obs_group: Any) -> None:
+        if not self._record_camera_streams:
+            return
+        for key in self._camera_stream_names:
+            frames = self._camera_buffers.get(key, [])
+            if not frames:
+                continue
+            obs_group.create_dataset(
+                key,
+                data=np.stack(frames, axis=0).astype(np.uint8, copy=False),
+                compression="lzf",
+            )
 
     def _write_initial_garment_state(self, demo_group: Any) -> None:
         if self._episode_meta is None:
