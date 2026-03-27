@@ -590,6 +590,33 @@ class GarmentObject(SingleClothPrim):
                 device=self._device,
             )
 
+    def _transform_particles_to_pose(self, positions, new_pos, new_ori_quat):
+        """Transform particle positions from init-pose frame to a new world pose.
+
+        On CUDA, particles live in absolute world space.  The captured
+        ``initial_points_positions`` encode the init XForm
+        (``init_pos`` / ``init_ori``).  To place the garment at a different
+        pose we undo the init rotation, apply the new rotation, and shift
+        to the new translation::
+
+            P_new = (P_old - init_pos) @ R_init @ R_new^T + new_pos
+        """
+        init_pos_np = np.asarray(self.init_pos, dtype=np.float32).reshape(3)
+        init_ori_np = np.asarray(self.init_ori, dtype=np.float32).reshape(-1)
+        new_pos_np = np.asarray(new_pos, dtype=np.float32).reshape(3)
+        new_ori_np = np.asarray(new_ori_quat, dtype=np.float32).reshape(-1)
+
+        R_init = np.asarray(quat_to_rot_matrix(init_ori_np), dtype=np.float32)
+        R_new = np.asarray(quat_to_rot_matrix(new_ori_np), dtype=np.float32)
+        # R_delta such that  P_new = (P_old - p_old) @ R_delta^T + p_new
+        R_delta = (R_new @ R_init.T).astype(np.float32)
+
+        R_t = torch.as_tensor(R_delta, dtype=torch.float32, device=positions.device)
+        p_old = torch.as_tensor(init_pos_np, dtype=torch.float32, device=positions.device)
+        p_new = torch.as_tensor(new_pos_np, dtype=torch.float32, device=positions.device)
+
+        return torch.matmul(positions - p_old, R_t.T) + p_new
+
     def reset(self):
         """
         Perform soft reset by randomly modifying the object's position and orientation.
@@ -619,48 +646,77 @@ class GarmentObject(SingleClothPrim):
         try:
             has_initial_points = self._ensure_initial_points_positions()
 
-            # Reset Points Positions
-            if has_initial_points and self._device == "cpu":
-                self._set_mesh_points_if_compatible(self.initial_points_positions)
-            elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
-                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
-                if is_cuda:
-                    # Zero particle velocities so residual motion from the
-                    # previous episode doesn't interfere with settling.
-                    try:
-                        self._cloth_prim_view.set_velocities(
-                            torch.zeros_like(self.initial_points_positions)
-                        )
-                    except Exception:
-                        pass
-            elif has_initial_points:
-                expected = self._get_particle_buffer_count()
-                got = self._get_points_count(self.initial_points_positions)
-                logger.warning(
-                    f"[GarmentObject] Skipping GPU particle reset due to particle topology mismatch "
-                    f"(expected {expected}, got {got})."
-                )
-            else:
-                logger.warning(
-                    "[GarmentObject] initial_points_positions unavailable; skipping particle reset."
-                )
-
             # ------------------------------------------------------------------
             # CUDA path: particle positions live in world space and are NOT
-            # affected by XForm changes.  Restore the XForm to the original
-            # init pose so the USD scene graph stays consistent with the
-            # physics particle positions, then return — the calling code
+            # affected by XForm changes.  Generate a random pose, transform
+            # the initial particle positions into that pose, and write them
+            # to the GPU buffer exactly once.  The calling code
             # (stabilize_garment_after_reset) will step physics to let the
             # cloth settle under gravity.
             # ------------------------------------------------------------------
             if is_cuda:
-                self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
-                logger.info("[GarmentObject] CUDA reset complete - restored to init pose")
+                pos_reset_range, _ = self._get_config_value("soft_reset_pos_range", "common")
+                rot_reset_range, _ = self._get_config_value("soft_reset_rot_range", "common")
+                if self.rng is not None:
+                    pos = [
+                        self.rng.uniform(pos_reset_range[0], pos_reset_range[3]),
+                        self.rng.uniform(pos_reset_range[1], pos_reset_range[4]),
+                        self.rng.uniform(pos_reset_range[2], pos_reset_range[5]),
+                    ]
+                    ori = [
+                        self.rng.uniform(rot_reset_range[0], rot_reset_range[3]),
+                        self.rng.uniform(rot_reset_range[1], rot_reset_range[4]),
+                        self.rng.uniform(rot_reset_range[2], rot_reset_range[5]),
+                    ]
+                else:
+                    pos = [
+                        random.uniform(pos_reset_range[0], pos_reset_range[3]),
+                        random.uniform(pos_reset_range[1], pos_reset_range[4]),
+                        random.uniform(pos_reset_range[2], pos_reset_range[5]),
+                    ]
+                    ori = [
+                        random.uniform(rot_reset_range[0], rot_reset_range[3]),
+                        random.uniform(rot_reset_range[1], rot_reset_range[4]),
+                        random.uniform(rot_reset_range[2], rot_reset_range[5]),
+                    ]
+                new_ori_quat = euler_angles_to_quat(ori, degrees=True)
+
+                if has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
+                    transformed = self._transform_particles_to_pose(
+                        self.initial_points_positions, pos, new_ori_quat
+                    )
+                    self._cloth_prim_view.set_world_positions(transformed)
+                    try:
+                        self._cloth_prim_view.set_velocities(
+                            torch.zeros_like(transformed)
+                        )
+                    except Exception:
+                        pass
+                elif has_initial_points:
+                    logger.warning(
+                        "[GarmentObject] Skipping CUDA particle reset due to topology mismatch."
+                    )
+                else:
+                    logger.warning(
+                        "[GarmentObject] initial_points_positions unavailable; skipping CUDA particle reset."
+                    )
+
+                self.set_world_pose(pos, new_ori_quat)
+                self.reset_pose = np.concatenate(
+                    [np.array(pos, dtype=np.float32), np.array(ori, dtype=np.float32)]
+                )
+                logger.info(f"[GarmentObject] CUDA reset complete - pos: {pos}, ori: {ori}")
                 return
 
             # ------------------------------------------------------------------
-            # CPU path: randomize position / orientation via XForm as before.
+            # CPU path: restore local mesh points, then randomize via XForm.
             # ------------------------------------------------------------------
+            if has_initial_points:
+                self._set_mesh_points_if_compatible(self.initial_points_positions)
+            else:
+                logger.warning(
+                    "[GarmentObject] initial_points_positions unavailable; skipping particle reset."
+                )
 
             # Get position range from configuration
             pos_reset_range, pos_source = self._get_config_value(
@@ -1029,21 +1085,29 @@ class GarmentObject(SingleClothPrim):
             pos = pose[:3]
             ori = pose[3:]
             is_cuda = "cuda" in self._device
-            self.set_world_pose(
-                [0.0, 0.0, 0.0], euler_angles_to_quat([0.0, 0.0, 0.0], degrees=True)
-            )
+            new_ori_quat = euler_angles_to_quat(ori, degrees=True)
+
+            if not is_cuda:
+                self.set_world_pose(
+                    [0.0, 0.0, 0.0], euler_angles_to_quat([0.0, 0.0, 0.0], degrees=True)
+                )
+
             has_initial_points = self._ensure_initial_points_positions()
             if has_initial_points and self._device == "cpu":
                 self._set_mesh_points_if_compatible(self.initial_points_positions)
+            elif has_initial_points and is_cuda and self._is_particle_topology_compatible(self.initial_points_positions):
+                transformed = self._transform_particles_to_pose(
+                    self.initial_points_positions, pos, new_ori_quat
+                )
+                self._cloth_prim_view.set_world_positions(transformed)
+                try:
+                    self._cloth_prim_view.set_velocities(
+                        torch.zeros_like(transformed)
+                    )
+                except Exception:
+                    pass
             elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
                 self._cloth_prim_view.set_world_positions(self.initial_points_positions)
-                if is_cuda:
-                    try:
-                        self._cloth_prim_view.set_velocities(
-                            torch.zeros_like(self.initial_points_positions)
-                        )
-                    except Exception:
-                        pass
             elif has_initial_points:
                 expected = self._get_particle_buffer_count()
                 got = self._get_points_count(self.initial_points_positions)
@@ -1055,14 +1119,8 @@ class GarmentObject(SingleClothPrim):
                 logger.warning(
                     "[GarmentObject] initial_points_positions unavailable in set_all_pose; skipping particle reset."
                 )
-            if is_cuda:
-                # On CUDA particle positions are in world space at the init
-                # pose.  Restore the XForm to match rather than applying the
-                # recorded Euler pose (which would only move the USD XForm
-                # without affecting physics particles).
-                self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
-            else:
-                self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
+
+            self.set_world_pose(pos, new_ori_quat)
             self.reset_pose = np.array(pose, dtype=np.float32)
 
             logger.info(
