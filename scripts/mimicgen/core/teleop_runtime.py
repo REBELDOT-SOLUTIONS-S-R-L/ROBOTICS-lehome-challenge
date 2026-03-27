@@ -13,7 +13,7 @@ from isaaclab.envs import DirectRLEnv
 
 from lehome.devices import BiKeyboard, BiSO101Leader, SO101Leader, Se3Keyboard
 from lehome.utils.logger import get_logger
-from lehome.utils.record import get_next_experiment_path_with_gap
+from lehome.utils.record import RateLimiter, get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from ...utils.garment_debug_markers import GarmentKeypointDebugMarkers
@@ -32,6 +32,14 @@ from .record_debug import (
 from .recording import DirectHDF5Recorder
 
 logger = get_logger(__name__)
+
+
+def create_rate_limiter(args: argparse.Namespace) -> RateLimiter | None:
+    """Create a real-time step limiter when --step_hz is positive."""
+    step_hz = int(getattr(args, "step_hz", 0) or 0)
+    if step_hz <= 0:
+        return None
+    return RateLimiter(step_hz)
 
 
 def create_debug_markers_if_needed(
@@ -253,6 +261,7 @@ def run_idle_phase(
     count_render: int,
     debug_pose_state: dict[str, Any],
     control_state: dict[str, Any],
+    rate_limiter: RateLimiter | None = None,
     debug_markers: GarmentKeypointDebugMarkers | None = None,
     debug_marker_state: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
@@ -308,6 +317,8 @@ def run_idle_phase(
         control_state["cached_object_initial_pose"] = object_initial_pose
 
     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
+    if rate_limiter is not None:
+        rate_limiter.sleep(env)
     return object_initial_pose, count_render
 
 
@@ -318,6 +329,7 @@ def run_recording_phase(
     flags: dict[str, bool],
     dataset: DirectHDF5Recorder,
     initial_object_pose: dict[str, Any] | None,
+    rate_limiter: RateLimiter | None = None,
     control_state: dict[str, Any] | None = None,
     debug_markers: GarmentKeypointDebugMarkers | None = None,
     debug_marker_state: dict[str, Any] | None = None,
@@ -417,6 +429,8 @@ def run_recording_phase(
                     frame[key] = observations[key]
 
             dataset.append_frame(frame)
+            if rate_limiter is not None:
+                rate_limiter.sleep(env)
 
             if truncated or flags["remove"]:
                 dataset.discard_episode()
@@ -488,6 +502,7 @@ def run_live_control_without_record(
     args: argparse.Namespace,
     debug_pose_state: dict[str, Any],
     control_state: dict[str, Any],
+    rate_limiter: RateLimiter | None = None,
     debug_markers: GarmentKeypointDebugMarkers | None = None,
     debug_marker_state: dict[str, Any] | None = None,
 ) -> None:
@@ -510,12 +525,15 @@ def run_live_control_without_record(
     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
     if args.log_success:
         _ = env._get_success()
+    if rate_limiter is not None:
+        rate_limiter.sleep(env)
 
 
 __all__ = [
     "DEBUG_POSE_LOG_INTERVAL",
     "create_dataset_if_needed",
     "create_debug_markers_if_needed",
+    "create_rate_limiter",
     "create_teleop_interface",
     "register_teleop_callbacks",
     "run_idle_phase",

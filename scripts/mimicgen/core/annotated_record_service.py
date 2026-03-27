@@ -14,7 +14,7 @@ from isaaclab_tasks.utils import parse_env_cfg
 from isaacsim.simulation_app import SimulationApp
 
 from lehome.utils.logger import get_logger
-from lehome.utils.record import get_next_experiment_path_with_gap
+from lehome.utils.record import RateLimiter, get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from .annotated_recording import AnnotatedMimicHDF5Recorder
@@ -146,6 +146,13 @@ def _capture_camera_frames(env: DirectRLEnv) -> dict[str, torch.Tensor] | None:
     _maybe_add("left_camera", "left_wrist")
     _maybe_add("right_camera", "right_wrist")
     return camera_frames or None
+
+
+def _create_rate_limiter(args: argparse.Namespace) -> RateLimiter | None:
+    step_hz = int(getattr(args, "step_hz", 0) or 0)
+    if step_hz <= 0:
+        return None
+    return RateLimiter(step_hz)
 
 
 def _format_signal_label(signal_name: str | None) -> str:
@@ -389,6 +396,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
             episode_capacity=int(env.max_episode_length) + 1,
             record_camera_streams=bool(getattr(args, "enable_cameras", False)),
         )
+        rate_limiter = _create_rate_limiter(args)
         annotator = OnlineAnnotationState.from_env(env)
         debug_pose_state: dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
         cached_object_initial_pose: dict[str, Any] | None = None
@@ -430,6 +438,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     env.step(action)
                     force_cuda_render_sync(env)
                     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
+                    if rate_limiter is not None:
+                        rate_limiter.sleep(env)
                     continue
 
                 flags["success"] = False
@@ -589,6 +599,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         if bool(getattr(args, "enable_cameras", False))
                         else None,
                     )
+                    if rate_limiter is not None:
+                        rate_limiter.sleep(env)
 
                     terminated, truncated = env._get_dones()
                     done = bool(torch.any(terminated).item() or torch.any(truncated).item())
