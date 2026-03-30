@@ -17,9 +17,7 @@ from lehome.utils.record import RateLimiter, get_next_experiment_path_with_gap
 
 from ...utils.common import stabilize_garment_after_reset
 from ...utils.garment_debug_markers import GarmentKeypointDebugMarkers
-from .cuda_visual_sync import cuda_visual_sync_enabled
-from .cuda_visual_sync import force_cuda_render_sync
-from .cuda_visual_sync import post_reset_cuda_visual_sync
+from .cuda_visual_sync import cuda_visual_sync_enabled, force_cuda_render_sync, post_reset_cuda_visual_sync
 from .data_utils import as_numpy
 from .env_runtime import get_env_garment_metadata
 from .record_debug import (
