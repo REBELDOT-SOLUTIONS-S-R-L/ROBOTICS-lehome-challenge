@@ -598,141 +598,68 @@ class GarmentObject(SingleClothPrim):
         logger.debug("[GarmentObject] Performing soft reset")
         is_cuda = "cuda" in self._device
 
-        # On CPU, pause physics while we modify mesh points directly.
-        # On CUDA, skip pause/play entirely — suspending and resuming the
-        # PhysX GPU solver leaves the cloth particle state inconsistent,
-        # causing particles to freeze in mid-air after resume.
+        # Pause physics so the solver does not overwrite the particle
+        # positions we are about to set.  This is needed on both CPU
+        # (local mesh points) and CUDA (world-space GPU buffer).
         world = None
         was_playing = False
-        if not is_cuda:
-            try:
-                from isaacsim.core.api import World
+        try:
+            from isaacsim.core.api import World
 
-                world = World.instance()
-                if world is not None:
-                    was_playing = world.is_playing()
-                    if was_playing:
-                        world.pause()
-            except Exception:
-                world = None
+            world = World.instance()
+            if world is not None:
+                was_playing = world.is_playing()
+                if was_playing:
+                    world.pause()
+        except Exception:
+            world = None
 
         try:
             has_initial_points = self._ensure_initial_points_positions()
 
-            # Reset Points Positions
-            if has_initial_points and self._device == "cpu":
-                self._set_mesh_points_if_compatible(self.initial_points_positions)
-            elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
-                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
-                if is_cuda:
-                    # Zero particle velocities so residual motion from the
-                    # previous episode doesn't interfere with settling.
+            pos, ori = self._sample_reset_pose()
+            ori_quat = euler_angles_to_quat(ori, degrees=True)
+
+            if is_cuda:
+                # CUDA: particle positions live in world space.  Compute
+                # the final randomised positions from the stored initial
+                # snapshot and write them in a single set_world_positions
+                # call (no need to restore initial positions first).
+                if has_initial_points and self._is_particle_topology_compatible(
+                    self.initial_points_positions
+                ):
+                    transformed = self._transform_particles_rigid(pos, ori_quat)
+                    self._cloth_prim_view.set_world_positions(transformed)
                     try:
                         self._cloth_prim_view.set_velocities(
-                            torch.zeros_like(self.initial_points_positions)
+                            torch.zeros_like(transformed)
                         )
                     except Exception:
                         pass
-            elif has_initial_points:
-                expected = self._get_particle_buffer_count()
-                got = self._get_points_count(self.initial_points_positions)
-                logger.warning(
-                    f"[GarmentObject] Skipping GPU particle reset due to particle topology mismatch "
-                    f"(expected {expected}, got {got})."
-                )
-            else:
-                logger.warning(
-                    "[GarmentObject] initial_points_positions unavailable; skipping particle reset."
-                )
-
-            # ------------------------------------------------------------------
-            # CUDA path: particle positions live in world space and are NOT
-            # affected by XForm changes.  Restore the XForm to the original
-            # init pose so the USD scene graph stays consistent with the
-            # physics particle positions, then return — the calling code
-            # (stabilize_garment_after_reset) will step physics to let the
-            # cloth settle under gravity.
-            # ------------------------------------------------------------------
-            if is_cuda:
-                self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
-                logger.info("[GarmentObject] CUDA reset complete - restored to init pose")
-                return
-
-            # ------------------------------------------------------------------
-            # CPU path: randomize position / orientation via XForm as before.
-            # ------------------------------------------------------------------
-
-            # Get position range from configuration
-            pos_reset_range, pos_source = self._get_config_value(
-                "soft_reset_pos_range", "common"
-            )
-            logger.debug(f"[GarmentObject] Using soft_reset_pos_range from {pos_source}")
-
-            # Check if position range is valid (min != max for at least one dimension)
-            pos_range_valid = (
-                pos_reset_range[0] != pos_reset_range[3]
-                or pos_reset_range[1] != pos_reset_range[4]
-                or pos_reset_range[2] != pos_reset_range[5]
-            )
-            if not pos_range_valid:
-                if not hasattr(self, "_warned_zero_pos_range"):
+                elif has_initial_points:
+                    expected = self._get_particle_buffer_count()
+                    got = self._get_points_count(self.initial_points_positions)
                     logger.warning(
-                        f"[GarmentObject] WARNING: soft_reset_pos_range has zero range "
-                        f"(min == max for all dimensions). Reset position will always be the same: "
-                        f"[{pos_reset_range[0]}, {pos_reset_range[1]}, {pos_reset_range[2]}]"
+                        f"[GarmentObject] Skipping GPU particle reset due to "
+                        f"particle topology mismatch "
+                        f"(expected {expected}, got {got})."
                     )
-                    self._warned_zero_pos_range = True
-
-            # Get rotation range from configuration
-            rot_reset_range, rot_source = self._get_config_value(
-                "soft_reset_rot_range", "common"
-            )
-            logger.debug(f"[GarmentObject] Using soft_reset_rot_range from {rot_source}")
-
-            # Check if rotation range is valid (min != max for at least one dimension)
-            rot_range_valid = (
-                rot_reset_range[0] != rot_reset_range[3]
-                or rot_reset_range[1] != rot_reset_range[4]
-                or rot_reset_range[2] != rot_reset_range[5]
-            )
-            if not rot_range_valid:
-                if not hasattr(self, "_warned_zero_rot_range"):
+                else:
                     logger.warning(
-                        f"[GarmentObject] WARNING: soft_reset_rot_range has zero range "
-                        f"(min == max for all dimensions). Reset rotation will always be the same: "
-                        f"[{rot_reset_range[0]}, {rot_reset_range[1]}, {rot_reset_range[2]}]"
+                        "[GarmentObject] initial_points_positions unavailable; "
+                        "skipping particle reset."
                     )
-                    self._warned_zero_rot_range = True
-
-            # Generate random initial position/rotation within range
-            if self.rng is not None:
-                pos = [
-                    self.rng.uniform(pos_reset_range[0], pos_reset_range[3]),
-                    self.rng.uniform(pos_reset_range[1], pos_reset_range[4]),
-                    self.rng.uniform(pos_reset_range[2], pos_reset_range[5]),
-                ]
-                ori = [
-                    self.rng.uniform(rot_reset_range[0], rot_reset_range[3]),
-                    self.rng.uniform(rot_reset_range[1], rot_reset_range[4]),
-                    self.rng.uniform(rot_reset_range[2], rot_reset_range[5]),
-                ]
-                logger.debug(
-                    f"[GarmentObject] Using RandomState for reset (rng state: {self.rng.get_state()[1][:3] if hasattr(self.rng, 'get_state') else 'N/A'})"
-                )
+                # Do NOT call set_world_pose() on CUDA.  The fabric
+                # renderer drives the cloth visual directly from the
+                # solver's particle buffer.  Changing the USD XForm
+                # while paused causes the renderer to latch onto the
+                # XForm position and stop tracking the live particles.
             else:
-                pos = [
-                    random.uniform(pos_reset_range[0], pos_reset_range[3]),
-                    random.uniform(pos_reset_range[1], pos_reset_range[4]),
-                    random.uniform(pos_reset_range[2], pos_reset_range[5]),
-                ]
-                ori = [
-                    random.uniform(rot_reset_range[0], rot_reset_range[3]),
-                    random.uniform(rot_reset_range[1], rot_reset_range[4]),
-                    random.uniform(rot_reset_range[2], rot_reset_range[5]),
-                ]
-                logger.debug(f"[GarmentObject] Using global random module for reset")
+                # CPU: restore local mesh points and apply XForm.
+                if has_initial_points:
+                    self._set_mesh_points_if_compatible(self.initial_points_positions)
+                self.set_world_pose(pos, ori_quat)
 
-            self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
             self.reset_pose = np.concatenate(
                 [np.array(pos, dtype=np.float32), np.array(ori, dtype=np.float32)]
             )
@@ -923,6 +850,80 @@ class GarmentObject(SingleClothPrim):
         # Set initial pose
         return pos, euler_angles_to_quat(ori, degrees=True), scale
 
+    def _sample_reset_pose(self):
+        """Sample a random position and orientation from the soft-reset config ranges.
+
+        Returns:
+            tuple[list[float], list[float]]: ``(pos, ori_euler_degrees)``
+        """
+        pos_reset_range, pos_source = self._get_config_value(
+            "soft_reset_pos_range", "common"
+        )
+        logger.debug(f"[GarmentObject] Using soft_reset_pos_range from {pos_source}")
+
+        pos_range_valid = (
+            pos_reset_range[0] != pos_reset_range[3]
+            or pos_reset_range[1] != pos_reset_range[4]
+            or pos_reset_range[2] != pos_reset_range[5]
+        )
+        if not pos_range_valid:
+            if not hasattr(self, "_warned_zero_pos_range"):
+                logger.warning(
+                    f"[GarmentObject] WARNING: soft_reset_pos_range has zero range "
+                    f"(min == max for all dimensions). Reset position will always be the same: "
+                    f"[{pos_reset_range[0]}, {pos_reset_range[1]}, {pos_reset_range[2]}]"
+                )
+                self._warned_zero_pos_range = True
+
+        rot_reset_range, rot_source = self._get_config_value(
+            "soft_reset_rot_range", "common"
+        )
+        logger.debug(f"[GarmentObject] Using soft_reset_rot_range from {rot_source}")
+
+        rot_range_valid = (
+            rot_reset_range[0] != rot_reset_range[3]
+            or rot_reset_range[1] != rot_reset_range[4]
+            or rot_reset_range[2] != rot_reset_range[5]
+        )
+        if not rot_range_valid:
+            if not hasattr(self, "_warned_zero_rot_range"):
+                logger.warning(
+                    f"[GarmentObject] WARNING: soft_reset_rot_range has zero range "
+                    f"(min == max for all dimensions). Reset rotation will always be the same: "
+                    f"[{rot_reset_range[0]}, {rot_reset_range[1]}, {rot_reset_range[2]}]"
+                )
+                self._warned_zero_rot_range = True
+
+        if self.rng is not None:
+            pos = [
+                self.rng.uniform(pos_reset_range[0], pos_reset_range[3]),
+                self.rng.uniform(pos_reset_range[1], pos_reset_range[4]),
+                self.rng.uniform(pos_reset_range[2], pos_reset_range[5]),
+            ]
+            ori = [
+                self.rng.uniform(rot_reset_range[0], rot_reset_range[3]),
+                self.rng.uniform(rot_reset_range[1], rot_reset_range[4]),
+                self.rng.uniform(rot_reset_range[2], rot_reset_range[5]),
+            ]
+            logger.debug(
+                f"[GarmentObject] Using RandomState for reset (rng state: "
+                f"{self.rng.get_state()[1][:3] if hasattr(self.rng, 'get_state') else 'N/A'})"
+            )
+        else:
+            pos = [
+                random.uniform(pos_reset_range[0], pos_reset_range[3]),
+                random.uniform(pos_reset_range[1], pos_reset_range[4]),
+                random.uniform(pos_reset_range[2], pos_reset_range[5]),
+            ]
+            ori = [
+                random.uniform(rot_reset_range[0], rot_reset_range[3]),
+                random.uniform(rot_reset_range[1], rot_reset_range[4]),
+                random.uniform(rot_reset_range[2], rot_reset_range[5]),
+            ]
+            logger.debug("[GarmentObject] Using global random module for reset")
+
+        return pos, ori
+
     def _get_initial_info(self):
         """
         Return the initial positions of all particles that make up the object.
@@ -1020,6 +1021,40 @@ class GarmentObject(SingleClothPrim):
         original_points = rotated_points / scale
         return original_points
 
+    def _transform_particles_rigid(self, new_pos, new_ori_quat):
+        """
+        Rigidly transform ``initial_points_positions`` from the init pose to
+        a new target pose.  All heavy per-particle work runs on the GPU.
+
+        Args:
+            new_pos: target translation (list/array, length 3)
+            new_ori_quat: target orientation quaternion (array, length 4)
+
+        Returns:
+            torch.Tensor with the same shape as ``initial_points_positions``
+            containing world-space positions at the new pose.
+        """
+        R_init = quat_to_rot_matrix(np.asarray(self.init_ori, dtype=np.float64))
+        R_new = quat_to_rot_matrix(np.asarray(new_ori_quat, dtype=np.float64))
+        R_delta = (R_new @ R_init.T).astype(np.float32)
+
+        R_delta_t = torch.as_tensor(R_delta, device=self._device)
+        t_init = torch.as_tensor(
+            np.asarray(self.init_pos, dtype=np.float32), device=self._device
+        )
+        t_new = torch.as_tensor(
+            np.asarray(new_pos, dtype=np.float32), device=self._device
+        )
+
+        pts = self.initial_points_positions
+        orig_shape = pts.shape
+        if pts.dim() == 3:
+            pts = pts.reshape(-1, 3)
+
+        new_world = (pts - t_init) @ R_delta_t.T + t_new
+
+        return new_world.reshape(orig_shape)
+
     def get_all_pose(self):
         return {"Garment": self.reset_pose}
 
@@ -1028,43 +1063,53 @@ class GarmentObject(SingleClothPrim):
             pose = pose_dict["Garment"]
             pos = pose[:3]
             ori = pose[3:]
+            ori_quat = euler_angles_to_quat(ori, degrees=True)
             is_cuda = "cuda" in self._device
-            self.set_world_pose(
-                [0.0, 0.0, 0.0], euler_angles_to_quat([0.0, 0.0, 0.0], degrees=True)
-            )
-            has_initial_points = self._ensure_initial_points_positions()
-            if has_initial_points and self._device == "cpu":
-                self._set_mesh_points_if_compatible(self.initial_points_positions)
-            elif has_initial_points and self._is_particle_topology_compatible(self.initial_points_positions):
-                self._cloth_prim_view.set_world_positions(self.initial_points_positions)
+
+            world = None
+            was_playing = False
+            try:
+                from isaacsim.core.api import World
+
+                world = World.instance()
+                if world is not None:
+                    was_playing = world.is_playing()
+                    if was_playing:
+                        world.pause()
+            except Exception:
+                world = None
+
+            try:
+                has_initial_points = self._ensure_initial_points_positions()
+
                 if is_cuda:
+                    if has_initial_points and self._is_particle_topology_compatible(
+                        self.initial_points_positions
+                    ):
+                        transformed = self._transform_particles_rigid(pos, ori_quat)
+                        self._cloth_prim_view.set_world_positions(transformed)
+                        try:
+                            self._cloth_prim_view.set_velocities(
+                                torch.zeros_like(transformed)
+                            )
+                        except Exception:
+                            pass
+                else:
+                    self.set_world_pose(
+                        [0.0, 0.0, 0.0],
+                        euler_angles_to_quat([0.0, 0.0, 0.0], degrees=True),
+                    )
+                    if has_initial_points:
+                        self._set_mesh_points_if_compatible(self.initial_points_positions)
+                    self.set_world_pose(pos, ori_quat)
+
+                self.reset_pose = np.array(pose, dtype=np.float32)
+                logger.info(
+                    f"[GarmentObject] set_all_pose complete - pos: {pos}, ori: {ori}"
+                )
+            finally:
+                if world is not None and was_playing:
                     try:
-                        self._cloth_prim_view.set_velocities(
-                            torch.zeros_like(self.initial_points_positions)
-                        )
+                        world.play()
                     except Exception:
                         pass
-            elif has_initial_points:
-                expected = self._get_particle_buffer_count()
-                got = self._get_points_count(self.initial_points_positions)
-                logger.warning(
-                    f"[GarmentObject] Skipping GPU particle reset in set_all_pose due to particle topology mismatch "
-                    f"(expected {expected}, got {got})."
-                )
-            else:
-                logger.warning(
-                    "[GarmentObject] initial_points_positions unavailable in set_all_pose; skipping particle reset."
-                )
-            if is_cuda:
-                # On CUDA particle positions are in world space at the init
-                # pose.  Restore the XForm to match rather than applying the
-                # recorded Euler pose (which would only move the USD XForm
-                # without affecting physics particles).
-                self.set_world_pose(position=self.init_pos, orientation=self.init_ori)
-            else:
-                self.set_world_pose(pos, euler_angles_to_quat(ori, degrees=True))
-            self.reset_pose = np.array(pose, dtype=np.float32)
-
-            logger.info(
-                f"[GarmentObject] set_all_pose Reset complete - pos: {pos}, ori: {ori}"
-            )

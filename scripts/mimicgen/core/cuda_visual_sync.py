@@ -125,18 +125,13 @@ def force_cuda_render_sync(env: Any) -> None:
 
 
 def restore_cuda_cloth_visual_pose_to_initial(env: Any) -> None:
-    """Restore the cloth visual pose after reset to the initial particle-buffer frame."""
-    if not cuda_visual_sync_enabled(env):
-        return
-    obj = getattr(env, "object", None)
-    if obj is None:
-        return
-    init_pos = getattr(obj, "init_pos", None)
-    init_ori = getattr(obj, "init_ori", None)
-    if init_pos is None or init_ori is None:
-        return
-    with contextlib.suppress(Exception):
-        obj.set_world_pose(position=init_pos, orientation=init_ori)
+    """No-op for CUDA cloth.
+
+    On CUDA the fabric renderer drives the cloth visual directly from
+    the solver's particle buffer.  Calling set_world_pose() on the
+    cloth prim disrupts this and causes the visual mesh to freeze at
+    the XForm position instead of tracking the live particles.
+    """
 
 
 def post_reset_cuda_visual_sync(env: Any) -> None:
