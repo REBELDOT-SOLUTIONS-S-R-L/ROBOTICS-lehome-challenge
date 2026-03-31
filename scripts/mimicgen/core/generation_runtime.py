@@ -318,6 +318,7 @@ def env_loop_with_pose_output(
     enable_pose_trace: bool = False,
     logging_interval: int = 1,
     log_success: bool = False,
+    worker_tasks: list[asyncio.Task] | None = None,
 ) -> None:
     """Main async loop for generation with CSV logging and optional success logging."""
     env_id_tensor = torch.tensor([0], dtype=torch.int64, device=env.device)
@@ -434,6 +435,14 @@ def env_loop_with_pose_output(
                 if env.sim.is_stopped():
                     break
     finally:
+        # Cancel worker coroutines *before* closing the env so that the
+        # event loop and queues are still alive to process CancelledErrors.
+        if worker_tasks:
+            for task in worker_tasks:
+                task.cancel()
+            asyncio_event_loop.run_until_complete(
+                asyncio.gather(*worker_tasks, return_exceptions=True)
+            )
         pose_writer.close()
         env.close()
 
