@@ -233,28 +233,34 @@ def main(argv: list[str] | None = None) -> None:
 
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
+    generation_finished = False
     try:
         from scripts.mimicgen.core.generate_runner import run_generation
 
         run_generation(args_cli, simulation_app)
+        generation_finished = True
     except KeyboardInterrupt:
+        generation_finished = True
         print("\nProgram interrupted by user. Exiting...")
     finally:
-        import os
-        import threading
+        if generation_finished:
+            import os
+            import threading
 
-        close_done = threading.Event()
+            close_done = threading.Event()
 
-        def _close_app():
-            try:
-                simulation_app.close()
-            finally:
-                close_done.set()
+            def _close_app():
+                try:
+                    simulation_app.close()
+                finally:
+                    close_done.set()
 
-        threading.Thread(target=_close_app, daemon=True).start()
-        if not close_done.wait(timeout=10):
-            print("Warning: simulation_app.close() timed out — forcing exit.")
-            os._exit(0)
+            threading.Thread(target=_close_app, daemon=True).start()
+            if not close_done.wait(timeout=10):
+                print("Warning: simulation_app.close() timed out — forcing exit.")
+                os._exit(0)
+        else:
+            simulation_app.close()
 
 
 if __name__ == "__main__":
