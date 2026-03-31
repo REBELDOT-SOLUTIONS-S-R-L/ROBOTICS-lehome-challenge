@@ -468,14 +468,18 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         post_reset_hold_action=post_reset_hold_action,
     )
 
+    import asyncio as _asyncio
+
+    gather_future: _asyncio.Future | None = None
     try:
         import isaaclab_mimic.datagen.generation as mimic_generation
 
         mimic_generation.num_success = 0
         mimic_generation.num_failures = 0
         mimic_generation.num_attempts = 0
-        asyncio = __import__("asyncio")
-        asyncio.ensure_future(asyncio.gather(*async_components["tasks"]))
+        gather_future = _asyncio.ensure_future(
+            _asyncio.gather(*async_components["tasks"])
+        )
         enable_pose_trace = bool(parsed_args.save_pose_trace or parsed_args.pose_output_file)
         env_loop_with_pose_output(
             env,
@@ -488,18 +492,20 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
             logging_interval=int(parsed_args.logging_interval),
             log_success=bool(parsed_args.log_success),
         )
-    except __import__("asyncio").CancelledError:
+    except _asyncio.CancelledError:
         print("Tasks were cancelled.")
     finally:
         # Cancel the worker coroutines so the process can exit cleanly
         # (they run `while True` and would otherwise keep the event loop alive).
-        import asyncio as _asyncio
-
         for task in async_components.get("tasks", []):
             task.cancel()
+        if gather_future is not None:
+            gather_future.cancel()
         loop = async_components.get("event_loop")
         if loop is not None:
-            loop.run_until_complete(_asyncio.gather(*async_components["tasks"], return_exceptions=True))
+            loop.run_until_complete(
+                _asyncio.gather(*async_components["tasks"], return_exceptions=True)
+            )
 
 
 __all__ = ["run_generation"]
