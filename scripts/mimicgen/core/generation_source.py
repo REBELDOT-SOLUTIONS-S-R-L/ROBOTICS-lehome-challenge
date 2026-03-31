@@ -81,6 +81,7 @@ class RobustDataGenInfoPool(DataGenInfoPool):
             )
         self._runtime_object_center = self._get_runtime_object_center()
         self.invalid_episode_names: list[str] = []
+        self.episode_names: list[str] = []
 
     def _get_runtime_object_center(self) -> torch.Tensor | None:
         """Get current env object center from runtime world-frame object poses."""
@@ -243,6 +244,7 @@ class RobustDataGenInfoPool(DataGenInfoPool):
                     self._align_legacy_source_datagen_poses_to_runtime_if_needed(episode, episode_name)
                     self._validate_episode_object_pose(episode, episode_name)
                     self._add_episode(episode)
+                    self.episode_names.append(episode_name)
                 except ClothObjectPoseValidationError as exc:
                     self.invalid_episode_names.append(episode_name)
                     print(

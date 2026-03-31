@@ -193,6 +193,7 @@ def setup_async_generation(
     align_object_pose_to_runtime: bool = False,
     align_object_pose_mode: str = "object_only",
     pause_subtask: bool = False,
+    log_success: bool = False,
     post_reset_settle_steps: int = 0,
     post_reset_hold_action: torch.Tensor | None = None,
     motion_planners: Any = None,
@@ -232,6 +233,7 @@ def setup_async_generation(
         post_reset_settle_steps=post_reset_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
     )
+    setattr(data_generator, "_log_source_demo_selection", bool(log_success))
     data_generator_asyncio_tasks = []
     for i in range(num_envs):
         env_motion_planner = motion_planners[i] if motion_planners else None

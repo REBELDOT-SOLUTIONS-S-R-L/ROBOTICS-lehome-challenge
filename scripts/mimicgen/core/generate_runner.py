@@ -464,6 +464,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         align_object_pose_to_runtime=(explicit_object_alignment or auto_object_alignment),
         align_object_pose_mode=object_alignment_mode,
         pause_subtask=parsed_args.pause_subtask,
+        log_success=bool(parsed_args.log_success),
         post_reset_settle_steps=int(parsed_args.garment_settle_steps),
         post_reset_hold_action=post_reset_hold_action,
     )
