@@ -490,6 +490,16 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         )
     except __import__("asyncio").CancelledError:
         print("Tasks were cancelled.")
+    finally:
+        # Cancel the worker coroutines so the process can exit cleanly
+        # (they run `while True` and would otherwise keep the event loop alive).
+        import asyncio as _asyncio
+
+        for task in async_components.get("tasks", []):
+            task.cancel()
+        loop = async_components.get("event_loop")
+        if loop is not None:
+            loop.run_until_complete(_asyncio.gather(*async_components["tasks"], return_exceptions=True))
 
 
 __all__ = ["run_generation"]
