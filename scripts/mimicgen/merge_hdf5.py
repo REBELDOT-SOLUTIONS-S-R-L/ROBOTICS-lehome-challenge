@@ -1,8 +1,9 @@
-"""Merge multiple MimicGen HDF5 datasets by appending demos from source files into a target."""
+"""Merge multiple MimicGen HDF5 datasets into one."""
 
 from __future__ import annotations
 
 import argparse
+import shutil
 import sys
 from pathlib import Path
 
@@ -21,7 +22,7 @@ def _copy_group(src: h5py.Group, dst: h5py.Group) -> None:
             src.copy(src[key], dst, name=key)
 
 
-def merge(target_path: str, source_paths: list[str]) -> None:
+def _append_sources(target_path: str, source_paths: list[str]) -> None:
     """Append all demos from each source file into *target_path*."""
     with h5py.File(target_path, "a") as target:
         target_data = target["data"]
@@ -62,17 +63,28 @@ def merge(target_path: str, source_paths: list[str]) -> None:
 
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(
-        description="Append demos from one or more source HDF5 datasets into a target."
+        description="Merge demos from one or more HDF5 datasets into a single file."
     )
-    parser.add_argument("target", type=str, help="Path to the target HDF5 file (modified in place).")
-    parser.add_argument("sources", type=str, nargs="+", help="Paths to source HDF5 files (read only).")
+    parser.add_argument("target", type=str, help="Path to the first / base HDF5 file.")
+    parser.add_argument("sources", type=str, nargs="+", help="Paths to source HDF5 files to append.")
+    parser.add_argument(
+        "-o", "--output", type=str, default=None,
+        help="Write merged result to a new file instead of modifying the target in place.",
+    )
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     for path in [args.target] + args.sources:
         if not Path(path).is_file():
             parser.error(f"File not found: {path}")
 
-    merge(args.target, args.sources)
+    if args.output:
+        output_path = Path(args.output)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        print(f"Copying {args.target} -> {args.output}")
+        shutil.copy2(args.target, args.output)
+        _append_sources(args.output, args.sources)
+    else:
+        _append_sources(args.target, args.sources)
 
 
 if __name__ == "__main__":
