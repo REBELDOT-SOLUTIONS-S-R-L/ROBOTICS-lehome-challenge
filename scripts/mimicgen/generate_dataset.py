@@ -240,7 +240,21 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         print("\nProgram interrupted by user. Exiting...")
     finally:
-        simulation_app.close()
+        import os
+        import threading
+
+        close_done = threading.Event()
+
+        def _close_app():
+            try:
+                simulation_app.close()
+            finally:
+                close_done.set()
+
+        threading.Thread(target=_close_app, daemon=True).start()
+        if not close_done.wait(timeout=10):
+            print("Warning: simulation_app.close() timed out — forcing exit.")
+            os._exit(0)
 
 
 if __name__ == "__main__":
