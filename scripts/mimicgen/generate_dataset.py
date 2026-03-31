@@ -242,6 +242,12 @@ def main(argv: list[str] | None = None) -> None:
     except KeyboardInterrupt:
         generation_finished = True
         print("\nProgram interrupted by user. Exiting...")
+    except Exception:
+        # Print the traceback now — simulation_app.close() may kill the process
+        # before Python gets a chance to display it.
+        import traceback
+
+        traceback.print_exc()
     finally:
         if generation_finished:
             import os
