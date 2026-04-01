@@ -23,6 +23,7 @@ import numpy as np
 import torch
 
 from isaaclab.managers.recorder_manager import RecorderTerm
+from .observations import _DEFAULT_GRIPPER_JOINT_IDX as _GRIPPER_JOINT_IDX
 from .observations import get_subtask_signal_observations
 from ..checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
@@ -52,6 +53,82 @@ def _pos_to_4x4(pos: torch.Tensor) -> torch.Tensor:
 def _semantic_keypoints_from_positions(kp_positions: np.ndarray) -> dict[str, np.ndarray]:
     """Map six garment checkpoints using the shared semantic checkpoint order."""
     return map_semantic_keypoints_from_positions(kp_positions)
+
+
+def compute_garment_keypoint_object_poses(
+    env,
+    device: torch.device,
+    num_envs: int,
+    *,
+    context: str,
+) -> dict[str, torch.Tensor]:
+    """Compute semantic 4x4 object poses from the garment checkpoints."""
+
+    def _raise_unavailable(reason: str) -> None:
+        raise ClothObjectPoseUnavailableError(f"{context}: {reason}")
+
+    garment_obj = getattr(env, "object", None)
+    if garment_obj is None or not hasattr(garment_obj, "check_points"):
+        _raise_unavailable("garment object is missing or has no check_points.")
+
+    check_points = garment_obj.check_points
+    if not check_points or len(check_points) < 6:
+        _raise_unavailable("garment check_points are missing or incomplete.")
+
+    try:
+        kp_positions = garment_obj.get_checkpoint_world_positions(
+            check_points,
+            as_numpy=True,
+        )
+    except Exception as exc:
+        _raise_unavailable(
+            f"unable to read garment checkpoint positions from GarmentObject: {exc}"
+        )
+
+    kp_positions = np.asarray(kp_positions, dtype=np.float32)
+    semantic_points = _semantic_keypoints_from_positions(kp_positions)
+    object_poses: dict[str, torch.Tensor] = {}
+    for name, point in semantic_points.items():
+        pos = torch.tensor(point, dtype=torch.float32, device=device).unsqueeze(0).expand(num_envs, -1)
+        object_poses[name] = _pos_to_4x4(pos)
+
+    validate_semantic_object_pose_dict(
+        object_poses,
+        context=context,
+    )
+    return object_poses
+
+
+class GenerationPoseRecorder(RecorderTerm):
+    """Record realized EEF and garment object poses into generated HDF5 obs."""
+
+    def record_pre_step(self) -> tuple[str | None, dict | None]:
+        env = self._env
+        obs: dict[str, dict[str, torch.Tensor]] = {}
+
+        try:
+            eef_pose = {
+                "left_arm": env.get_robot_eef_pose("left_arm"),
+                "right_arm": env.get_robot_eef_pose("right_arm"),
+            }
+        except Exception:
+            eef_pose = None
+
+        if eef_pose is not None:
+            obs["eef_pose"] = eef_pose
+
+        if hasattr(env, "object") and getattr(env.object, "check_points", None):
+            object_poses = compute_garment_keypoint_object_poses(
+                env,
+                device=env.device,
+                num_envs=int(env.num_envs),
+                context="GenerationPoseRecorder.record_pre_step",
+            )
+            obs["object_pose"] = object_poses
+
+        if not obs:
+            return None, None
+        return "obs", obs
 
 
 class GarmentDatagenRecorder(RecorderTerm):
@@ -155,40 +232,12 @@ class GarmentDatagenRecorder(RecorderTerm):
         Returns:
             Dict mapping object names to (num_envs, 4, 4) tensors.
         """
-        def _raise_unavailable(reason: str) -> None:
-            raise ClothObjectPoseUnavailableError(
-                f"GarmentDatagenRecorder could not capture cloth object poses: {reason}"
-            )
-
-        garment_obj = getattr(env, "object", None)
-        if garment_obj is None or not hasattr(garment_obj, "check_points"):
-            _raise_unavailable("garment object is missing or has no check_points.")
-
-        check_points = garment_obj.check_points
-        if not check_points or len(check_points) < 6:
-            _raise_unavailable("garment check_points are missing or incomplete.")
-
-        try:
-            kp_positions = garment_obj.get_checkpoint_world_positions(
-                check_points,
-                as_numpy=True,
-            )
-        except Exception as exc:
-            _raise_unavailable(
-                f"unable to read garment checkpoint positions from GarmentObject: {exc}"
-            )
-
-        kp_positions = np.asarray(kp_positions, dtype=np.float32)
-        semantic_points = _semantic_keypoints_from_positions(kp_positions)
-        object_poses: dict[str, torch.Tensor] = {}
-        for name, point in semantic_points.items():
-            pos = torch.tensor(point, dtype=torch.float32, device=device).unsqueeze(0).expand(num_envs, -1)
-            object_poses[name] = _pos_to_4x4(pos)
-        validate_semantic_object_pose_dict(
-            object_poses,
+        return compute_garment_keypoint_object_poses(
+            env,
+            device=device,
+            num_envs=num_envs,
             context="GarmentDatagenRecorder._compute_keypoint_object_poses",
         )
-        return object_poses
 
     def _compute_subtask_signals(
         self, env, device: torch.device, num_envs: int

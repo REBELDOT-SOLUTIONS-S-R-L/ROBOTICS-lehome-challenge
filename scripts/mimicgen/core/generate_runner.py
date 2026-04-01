@@ -28,6 +28,7 @@ from lehome.assets.robots.lerobot import (
     SO101_LEFT_ARM_HOME_JOINT_POS,
     SO101_RIGHT_ARM_HOME_JOINT_POS,
 )
+from lehome.tasks.fold_cloth.mdp.recorders import GenerationPoseRecorder
 
 from .dataset_meta import get_first_demo_action_dim as _get_first_demo_action_dim
 from .dataset_meta import get_first_demo_garment_name as _get_first_demo_garment_name
@@ -110,9 +111,17 @@ class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
 
 
 @configclass
-class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
-    """Default action/state recorder plus camera observations."""
+class PreStepGenerationPoseRecorderCfg(RecorderTermCfg):
+    """Configuration for fold-cloth pose recording during generation export."""
 
+    class_type: type[RecorderTerm] = GenerationPoseRecorder
+
+
+@configclass
+class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
+    """Default action/state recorder plus generated pose and camera observations."""
+
+    record_pre_step_generation_pose = PreStepGenerationPoseRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
 
 
@@ -314,12 +323,11 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         carb_settings.set_bool("/physics/fabricUpdateVelocities", True)
         carb_settings.set_bool("/physics/fabricUpdateJointStates", True)
         print("Enabled fabric-backed transform sync for CUDA generation.")
-    if bool(parsed_args.enable_cameras):
-        dataset_export_mode = env_cfg.recorders.dataset_export_mode
-        env_cfg.recorders = GenerationRecorderManagerCfg()
-        env_cfg.recorders.dataset_export_dir_path = output_dir
-        env_cfg.recorders.dataset_filename = output_file_name
-        env_cfg.recorders.dataset_export_mode = dataset_export_mode
+    dataset_export_mode = env_cfg.recorders.dataset_export_mode
+    env_cfg.recorders = GenerationRecorderManagerCfg()
+    env_cfg.recorders.dataset_export_dir_path = output_dir
+    env_cfg.recorders.dataset_filename = output_file_name
+    env_cfg.recorders.dataset_export_mode = dataset_export_mode
 
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, parsed_args.task_type))
