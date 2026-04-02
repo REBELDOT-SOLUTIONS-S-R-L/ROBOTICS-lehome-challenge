@@ -10,7 +10,7 @@ from lehome.utils.constant import ASSETS_ROOT
 
 """Configuration for the SO101 Follower Robot."""
 SO101_FOLLOWER_ASSET_PATH = (
-    Path(ASSETS_ROOT) / "robots" / "lerobot" / "so101_follower_good.usd"
+    Path(ASSETS_ROOT) / "robots" / "lerobot" / "so101_follower_eef.usd"
 )
 SO101_KINFE_ASSET_PATH = Path(ASSETS_ROOT) / "robots" / "lerobot" / "so101_knife.usd"
 

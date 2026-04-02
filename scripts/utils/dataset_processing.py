@@ -14,6 +14,7 @@ from lerobot.datasets.lerobot_dataset import LeRobotDataset
 
 from lehome.utils import RobotKinematics, compute_ee_pose_single_arm
 from lehome.utils.logger import get_logger
+from .data_formatting import normalize_depth_column_schema
 
 if TYPE_CHECKING:
     pass
@@ -226,103 +227,6 @@ def augment_ee_pose(
     print(f"✅ Done! Added ee_pose features ({pose_dim}D) to dataset.")
 
 
-def _fix_depth_data_format(dataset_root: Path) -> None:
-    """Ensure observation.top_depth has a stable Arrow schema for merging."""
-    dataset_root = dataset_root.resolve()
-    data_root = dataset_root / "data"
-    parquet_files = sorted(data_root.glob("chunk-*/file-*.parquet"))
-
-    if not parquet_files:
-        return
-
-    try:
-        first_table = pq.read_table(parquet_files[0])
-    except Exception as e:
-        logger.warning(f"Failed to read parquet file {parquet_files[0]}: {e}")
-        return
-
-    if "observation.top_depth" not in first_table.column_names:
-        return
-
-    logger.info(
-        f"Found observation.top_depth in {dataset_root.name}, "
-        f"normalizing depth column schema in {len(parquet_files)} parquet file(s)..."
-    )
-
-    for pf in parquet_files:
-        try:
-            table = pq.read_table(pf)
-            if "observation.top_depth" not in table.column_names:
-                continue
-
-            depth_col = table["observation.top_depth"]
-            depth_list = depth_col.to_pylist()
-
-            fixed_list = []
-            for item in depth_list:
-                if item is None:
-                    fixed_list.append(None)
-                    continue
-
-                if isinstance(item, np.ndarray):
-                    item = item.tolist()
-
-                # Item should be a 2D list: H x W
-                if isinstance(item, list):
-                    new_rows = []
-                    for row in item:
-                        if isinstance(row, np.ndarray):
-                            new_rows.append(row.astype(np.float32).tolist())
-                        elif isinstance(row, list):
-                            new_rows.append([float(v) for v in row])
-                        else:
-                            # Unexpected format, convert to float list
-                            new_rows.append([float(row)])
-                    fixed_list.append(new_rows)
-                else:
-                    # Fallback: scalar/1D, convert to single-row list
-                    fixed_list.append([[float(item)]])
-
-            # Infer H, W from first non-None item
-            height = width = None
-            for item in fixed_list:
-                if item is not None and isinstance(item, list) and len(item) > 0:
-                    height = len(item)
-                    width = len(item[0]) if isinstance(item[0], list) else None
-                    break
-
-            if height is None or width is None:
-                logger.warning(f"Skip depth normalization for {pf}: cannot infer shape.")
-                continue
-
-            # Auto-detect dtype from first non-None item
-            sample_value = None
-            for item in fixed_list:
-                if item is not None and isinstance(item, list) and len(item) > 0:
-                    if isinstance(item[0], list) and len(item[0]) > 0:
-                        sample_value = item[0][0]
-                        break
-            
-            # Determine Arrow type based on sample value
-            if sample_value is not None and isinstance(sample_value, (int, np.integer)):
-                depth_type = pa.list_(pa.list_(pa.uint16(), width), height)
-            else:
-                depth_type = pa.list_(pa.list_(pa.float32(), width), height)
-            
-            new_depth_array = pa.array(fixed_list, type=depth_type)
-
-            col_idx = table.column_names.index("observation.top_depth")
-            table = table.remove_column(col_idx)
-            table = table.add_column(col_idx, "observation.top_depth", new_depth_array)
-
-            pq.write_table(table, pf)
-        except Exception as e:
-            logger.warning(f"Failed to normalize depth column in {pf}: {e}")
-            continue
-
-    logger.info(f"Depth column normalization completed for {dataset_root.name}.")
-
-
 def merge_datasets(
     source_roots: List[Path],
     output_root: Path,
@@ -352,7 +256,7 @@ def merge_datasets(
     # Normalize depth column schema if needed (to avoid ArrowTypeError)
     for source_root in source_roots:
         try:
-            _fix_depth_data_format(source_root)
+            normalize_depth_column_schema(source_root)
         except Exception as e:
             logger.warning(f"Depth format normalization failed for {source_root}: {e}")
 

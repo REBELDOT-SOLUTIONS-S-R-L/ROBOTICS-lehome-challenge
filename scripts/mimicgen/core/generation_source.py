@@ -17,6 +17,10 @@ from lehome.tasks.fold_cloth.checkpoint_mappings import (
 from .dataset_io import demo_sort_key as _demo_sort_key
 from .dataset_io import load_episode_compat as _load_episode_compat
 
+# Camera observation keys to skip when loading source episodes for generation.
+# These are large image tensors that are not needed by MimicGen.
+_SOURCE_OBS_SKIP_KEYS = frozenset({"top", "left_wrist", "right_wrist"})
+
 
 def _pose_dict_first_center_cpu(pose_dict: Any) -> torch.Tensor | None:
     """Compute mean xyz over first timestep for a pose dict on CPU."""
@@ -77,6 +81,7 @@ class RobustDataGenInfoPool(DataGenInfoPool):
             )
         self._runtime_object_center = self._get_runtime_object_center()
         self.invalid_episode_names: list[str] = []
+        self.episode_names: list[str] = []
 
     def _get_runtime_object_center(self) -> torch.Tensor | None:
         """Get current env object center from runtime world-frame object poses."""
@@ -233,11 +238,13 @@ class RobustDataGenInfoPool(DataGenInfoPool):
                         self.device,
                         input_file=file_path,
                         info_prefix="Info",
+                        obs_skip_keys=_SOURCE_OBS_SKIP_KEYS,
                     )
                     self._prepare_source_target_eef_pose(episode)
                     self._align_legacy_source_datagen_poses_to_runtime_if_needed(episode, episode_name)
                     self._validate_episode_object_pose(episode, episode_name)
                     self._add_episode(episode)
+                    self.episode_names.append(episode_name)
                 except ClothObjectPoseValidationError as exc:
                     self.invalid_episode_names.append(episode_name)
                     print(

@@ -344,6 +344,8 @@ def replay(args: argparse.Namespace) -> None:
 
             logger.info(f"{'=' * 60}")
         finally:
+            if debug_markers is not None:
+                debug_markers.close()
             env.close()
 
 

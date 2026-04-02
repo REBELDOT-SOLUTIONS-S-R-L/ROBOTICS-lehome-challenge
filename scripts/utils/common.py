@@ -98,20 +98,58 @@ def stabilize_garment_after_reset(
 
     is_bimanual = "Bi" in args.task or "bi" in args.task.lower()
 
-    try:
-        initial_obs = env._get_observations()
-        action_dim = (
-            len(initial_obs["observation.state"])
-            if "observation.state" in initial_obs
-            else (12 if is_bimanual else 6)
-        )
-    except Exception:
-        action_dim = 12 if is_bimanual else 6
+    action_dim = None
+    action_manager = getattr(env, "action_manager", None)
+    if action_manager is not None and hasattr(action_manager, "total_action_dim"):
+        try:
+            action_dim = int(action_manager.total_action_dim)
+        except Exception:
+            action_dim = None
+
+    if action_dim is None:
+        try:
+            initial_obs = env._get_observations()
+            action_dim = (
+                len(initial_obs["action"])
+                if "action" in initial_obs
+                else (12 if is_bimanual else 6)
+            )
+        except Exception:
+            action_dim = 12 if is_bimanual else 6
 
     single_arm_home_position, dual_arm_home_position = _get_cached_home_positions()
     home_joints = dual_arm_home_position if is_bimanual else single_arm_home_position
 
-    if len(home_joints) != action_dim:
+    home_action: torch.Tensor | None = None
+    if len(home_joints) == action_dim:
+        home_action = torch.from_numpy(home_joints).float().to(env.device).unsqueeze(0)
+    elif (
+        is_bimanual
+        and action_dim == 16
+        and hasattr(env, "_compute_target_pose_from_joint_targets")
+        and hasattr(env, "target_eef_pose_to_action")
+    ):
+        try:
+            home_joint_tensor = torch.from_numpy(home_joints).float().to(env.device).unsqueeze(0)
+            left_joint_targets = home_joint_tensor[:, :6]
+            right_joint_targets = home_joint_tensor[:, 6:12]
+            target_eef_pose_dict = {
+                "left_arm": env._compute_target_pose_from_joint_targets("left_arm", left_joint_targets),
+                "right_arm": env._compute_target_pose_from_joint_targets("right_arm", right_joint_targets),
+            }
+            gripper_action_dict = {
+                "left_arm": left_joint_targets[:, 5:6],
+                "right_arm": right_joint_targets[:, 5:6],
+            }
+            home_action = env.target_eef_pose_to_action(
+                target_eef_pose_dict=target_eef_pose_dict,
+                gripper_action_dict=gripper_action_dict,
+                env_id=0,
+            )
+        except Exception:
+            home_action = None
+
+    if home_action is None:
         # Use warning from logger if available, otherwise print
         try:
             from lehome.utils.logger import get_logger
@@ -124,10 +162,27 @@ def stabilize_garment_after_reset(
         except Exception:
             pass
         home_action = torch.zeros(1, action_dim, dtype=torch.float32, device=env.device)
-    else:
-        home_action = torch.from_numpy(home_joints).float().to(env.device).unsqueeze(0)
+
+    force_cuda_render_sync = None
+    cuda_visual_sync_enabled = None
+    with torch.inference_mode():
+        try:
+            from scripts.mimicgen.core.cuda_visual_sync import cuda_visual_sync_enabled as _cuda_visual_sync_enabled
+            from scripts.mimicgen.core.cuda_visual_sync import force_cuda_render_sync as _force_cuda_render_sync
+
+            cuda_visual_sync_enabled = _cuda_visual_sync_enabled
+            force_cuda_render_sync = _force_cuda_render_sync
+        except Exception:
+            force_cuda_render_sync = None
+            cuda_visual_sync_enabled = None
 
     for step_idx in range(num_steps):
         env.step(home_action)
-        if (step_idx + 1) % 10 == 0 or step_idx == num_steps - 1:
+        if (
+            force_cuda_render_sync is not None
+            and cuda_visual_sync_enabled is not None
+            and cuda_visual_sync_enabled(env)
+        ):
+            force_cuda_render_sync(env)
+        elif (step_idx + 1) % 10 == 0 or step_idx == num_steps - 1:
             env.render()

@@ -136,17 +136,14 @@ def get_cloth_keypoint_object_poses_world(
         return None
 
     try:
-        mesh_points_world, _, _, _ = garment_obj.get_current_mesh_points()
-        mesh_points = np.asarray(mesh_points_world)
+        kp_positions = garment_obj.get_checkpoint_world_positions(
+            check_points,
+            as_numpy=True,
+        )
     except Exception:
-        try:
-            mesh_points = (
-                garment_obj._cloth_prim_view.get_world_positions().squeeze(0).detach().cpu().numpy()
-            )
-        except Exception:
-            return None
+        return None
 
-    kp_positions = mesh_points[check_points]
+    kp_positions = np.asarray(kp_positions, dtype=np.float32)
     semantic_points = map_semantic_keypoints_from_positions(kp_positions)
     object_poses = {}
     num_envs = int(getattr(env, "num_envs", 1))

@@ -131,6 +131,7 @@ def load_numeric_hdf5_group(
 def load_episode_with_numeric_datasets_only_from_group(
     h5_episode_group: Any,
     device: str,
+    skip_keys: set[str] | None = None,
 ):
     """Load an EpisodeData while skipping non-numeric datasets such as /meta."""
     require_h5py("numeric-only episode loading")
@@ -139,8 +140,11 @@ def load_episode_with_numeric_datasets_only_from_group(
 
     from isaaclab.utils.datasets import EpisodeData
 
+    if skip_keys is None:
+        skip_keys = {"meta"}
+
     episode = EpisodeData()
-    episode.data = load_numeric_hdf5_group(h5_episode_group, device=device, skip_keys={"meta"})
+    episode.data = load_numeric_hdf5_group(h5_episode_group, device=device, skip_keys=skip_keys)
 
     if "seed" in h5_episode_group.attrs:
         try:
@@ -156,6 +160,7 @@ def load_episode_with_numeric_datasets_only_from_file(
     input_file: str | Path,
     episode_name: str,
     device: str,
+    skip_keys: set[str] | None = None,
 ):
     """Open a dataset file and load one episode using numeric-only fallback logic."""
     require_h5py("numeric-only episode loading")
@@ -164,7 +169,7 @@ def load_episode_with_numeric_datasets_only_from_file(
         if data_group is None or episode_name not in data_group:
             raise KeyError(f"Episode {episode_name!r} not found in {input_file}")
         return load_episode_with_numeric_datasets_only_from_group(
-            data_group[episode_name], device=device
+            data_group[episode_name], device=device, skip_keys=skip_keys
         )
 
 
@@ -176,8 +181,33 @@ def load_episode_compat(
     input_file: str | Path | None = None,
     h5_episode_group: Any | None = None,
     info_prefix: str = "Info",
+    obs_skip_keys: set[str] | frozenset[str] | None = None,
 ):
-    """Load an episode robustly across mixed numeric/string HDF5 schemas."""
+    """Load an episode robustly across mixed numeric/string HDF5 schemas.
+
+    Args:
+        obs_skip_keys: Observation keys to exclude (e.g. camera image streams).
+            Skipped at the I/O level so large tensors are never read from disk.
+    """
+    # When obs_skip_keys is requested we bypass the default loader entirely and
+    # use the selective numeric loader so camera images are never read from disk.
+    if obs_skip_keys:
+        skip = {"meta"} | set(obs_skip_keys)
+        # Try the h5py group from the handler's internal state first.
+        h5_group = h5_episode_group
+        if h5_group is None:
+            data_group = getattr(dataset_file_handler, "_hdf5_data_group", None)
+            if data_group is not None and episode_name in data_group:
+                h5_group = data_group[episode_name]
+        if h5_group is not None:
+            return load_episode_with_numeric_datasets_only_from_group(
+                h5_group, device=device, skip_keys=skip,
+            )
+        if input_file is not None:
+            return load_episode_with_numeric_datasets_only_from_file(
+                input_file, episode_name, device=device, skip_keys=skip,
+            )
+
     try:
         episode = dataset_file_handler.load_episode(episode_name, device)
         if episode is None:
@@ -190,15 +220,18 @@ def load_episode_compat(
             f"{info_prefix}: default episode loader failed on non-numeric datasets ({exc}). "
             "Using numeric-only fallback loader."
         )
+        skip = {"meta"}
         if h5_episode_group is not None:
             return load_episode_with_numeric_datasets_only_from_group(
                 h5_episode_group,
                 device=device,
+                skip_keys=skip,
             )
         if input_file is not None:
             return load_episode_with_numeric_datasets_only_from_file(
                 input_file,
                 episode_name,
                 device=device,
+                skip_keys=skip,
             )
         raise

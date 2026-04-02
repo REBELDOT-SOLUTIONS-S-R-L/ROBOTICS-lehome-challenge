@@ -3,6 +3,7 @@
 from . import common
 from . import dataset_inspection
 from . import dataset_processing
+from . import data_formatting
 from . import parser
 
 # Note: evaluation, dataset_record and dataset_replay are not imported at module level
@@ -12,6 +13,7 @@ from . import parser
 # Export commonly used functions for convenience
 from .parser import (
     setup_record_parser,
+    setup_record_annotated_parser,
     setup_replay_parser,
     setup_inspect_parser,
     setup_read_parser,
@@ -26,6 +28,7 @@ from .dataset_processing import (
     merge_datasets,
     merge_garment_info,
 )
+from .data_formatting import normalize_depth_column_schema, remove_dataset_column
 
 # Note: evaluation functions are not imported at module level to avoid
 # importing Isaac Sim modules before SimulationApp is launched.
@@ -33,6 +36,7 @@ from .dataset_processing import (
 
 __all__ = [
     "setup_record_parser",
+    "setup_record_annotated_parser",
     "setup_replay_parser",
     "setup_inspect_parser",
     "setup_read_parser",
@@ -47,6 +51,8 @@ __all__ = [
     "augment_ee_pose",
     "merge_datasets",
     "merge_garment_info",
+    "normalize_depth_column_schema",
+    "remove_dataset_column",
     # Note: evaluation functions, "replay" and "record_dataset" are not exported
     # at module level to avoid importing Isaac Sim modules before SimulationApp
     # is launched. Import them lazily when needed:

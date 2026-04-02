@@ -9,11 +9,14 @@ import traceback
 from typing import Any
 
 import torch
+import isaaclab.sim as sim_utils
+import isaaclab.utils.math as math_utils
 
 import isaaclab_mimic.datagen.generation as mimic_generation
 from isaaclab.envs import ManagerBasedRLMimicEnv
 from isaaclab.managers import TerminationTermCfg
 from isaaclab_mimic.datagen.data_generator import DataGenerator
+from pxr import Gf, Sdf, Usd, UsdGeom
 
 from lehome.tasks.fold_cloth.checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
@@ -29,6 +32,115 @@ from .pose_trace import write_pose_snapshot as _write_pose_snapshot
 
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
+
+
+def _cuda_runtime_enabled(env: ManagerBasedRLMimicEnv) -> bool:
+    """Return whether generation is running on a CUDA-backed env device."""
+    return "cuda" in str(env.device)
+
+
+def _cuda_visual_sync_enabled(env: ManagerBasedRLMimicEnv) -> bool:
+    """Return whether CUDA generation currently needs render-facing USD sync."""
+    if not _cuda_runtime_enabled(env):
+        return False
+    with contextlib.suppress(Exception):
+        return bool(env.sim.has_gui() or env.sim.has_rtx_sensors())
+    return False
+
+
+def _force_cuda_render_sync(env: ManagerBasedRLMimicEnv) -> None:
+    """Force a render refresh for CUDA generation and mirror robot visuals to USD."""
+    if not _cuda_visual_sync_enabled(env):
+        return
+    with contextlib.suppress(Exception):
+        _sync_cuda_robot_visuals_to_usd(env)
+    with contextlib.suppress(Exception):
+        env.sim.render()
+
+
+def _ensure_cuda_robot_visual_sync_initialized(
+    env: ManagerBasedRLMimicEnv,
+) -> dict[str, list[tuple[Any, Any, Any]]]:
+    cache = getattr(env, "_cuda_robot_visual_sync_cache", None)
+    if cache is not None:
+        return cache
+
+    stage = env.scene.stage
+    cache = {}
+    for arm_name in ("left_arm", "right_arm"):
+        with contextlib.suppress(Exception):
+            arm = env.scene[arm_name]
+            prim_entries = []
+            for prim_path in arm.root_physx_view.link_paths[0]:
+                prim = stage.GetPrimAtPath(prim_path)
+                if not prim.IsValid():
+                    continue
+                with contextlib.suppress(Exception):
+                    sim_utils.standardize_xform_ops(prim)
+                translate_attr = prim.GetAttribute("xformOp:translate")
+                orient_attr = prim.GetAttribute("xformOp:orient")
+                if not translate_attr.IsValid() or not orient_attr.IsValid():
+                    continue
+                parent_prim = prim.GetParent() if prim.GetParent().IsValid() else None
+                prim_entries.append((translate_attr, orient_attr, parent_prim))
+            if prim_entries:
+                cache[arm_name] = prim_entries
+
+    setattr(env, "_cuda_robot_visual_sync_cache", cache)
+    return cache
+
+
+def _sync_cuda_robot_visuals_to_usd(env: ManagerBasedRLMimicEnv) -> None:
+    cache = _ensure_cuda_robot_visual_sync_initialized(env)
+    if not cache:
+        return
+
+    xform_cache = UsdGeom.XformCache(Usd.TimeCode.Default())
+    with Sdf.ChangeBlock():
+        for arm_name, prim_entries in cache.items():
+            arm = env.scene[arm_name]
+            poses = arm.root_physx_view.get_link_transforms()[0]
+            count = min(len(prim_entries), int(poses.shape[0]))
+            poses_cpu = poses[:count].detach().cpu()
+            positions_cpu = poses_cpu[:, :3].numpy()
+            orientations_cpu = math_utils.convert_quat(poses_cpu[:, 3:7], to="wxyz").numpy()
+            for body_idx in range(count):
+                translate_attr, orient_attr, parent_prim = prim_entries[body_idx]
+                world_pos = Gf.Vec3d(*positions_cpu[body_idx].tolist())
+                world_quat = Gf.Quatd(
+                    float(orientations_cpu[body_idx, 0]),
+                    Gf.Vec3d(*orientations_cpu[body_idx, 1:].tolist()),
+                )
+
+                if parent_prim is not None and parent_prim.GetPath() != Sdf.Path.absoluteRootPath:
+                    prim_tf = Gf.Matrix4d()
+                    prim_tf.SetTranslateOnly(world_pos)
+                    prim_tf.SetRotateOnly(world_quat)
+                    parent_world_tf = xform_cache.GetLocalToWorldTransform(parent_prim)
+                    local_tf = prim_tf * parent_world_tf.GetInverse()
+                    local_pos = local_tf.ExtractTranslation()
+                    local_quat = local_tf.ExtractRotationQuat()
+                else:
+                    local_pos = world_pos
+                    local_quat = world_quat
+
+                translate_attr.Set(local_pos)
+                orient_attr.Set(local_quat)
+
+
+def _restore_cuda_cloth_visual_pose_to_initial(env: ManagerBasedRLMimicEnv) -> None:
+    """Keep CUDA cloth visuals aligned with the initial particle-buffer frame after env.reset()."""
+    if not _cuda_visual_sync_enabled(env):
+        return
+    obj = getattr(env, "object", None)
+    if obj is None:
+        return
+    init_pos = getattr(obj, "init_pos", None)
+    init_ori = getattr(obj, "init_ori", None)
+    if init_pos is None or init_ori is None:
+        return
+    with contextlib.suppress(Exception):
+        obj.set_world_pose(position=init_pos, orientation=init_ori)
 
 
 async def run_data_generator_with_object_pose_failures(
@@ -81,6 +193,7 @@ def setup_async_generation(
     align_object_pose_to_runtime: bool = False,
     align_object_pose_mode: str = "object_only",
     pause_subtask: bool = False,
+    log_success: bool = False,
     post_reset_settle_steps: int = 0,
     post_reset_hold_action: torch.Tensor | None = None,
     motion_planners: Any = None,
@@ -120,6 +233,7 @@ def setup_async_generation(
         post_reset_settle_steps=post_reset_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
     )
+    setattr(data_generator, "_log_source_demo_selection", bool(log_success))
     data_generator_asyncio_tasks = []
     for i in range(num_envs):
         env_motion_planner = motion_planners[i] if motion_planners else None
@@ -203,19 +317,23 @@ def env_loop_with_pose_output(
     asyncio_event_loop: asyncio.AbstractEventLoop,
     output_file: str,
     pose_output_file: str | None,
+    enable_pose_trace: bool = False,
     logging_interval: int = 1,
     log_success: bool = False,
+    worker_tasks: list[asyncio.Task] | None = None,
 ) -> None:
     """Main async loop for generation with CSV logging and optional success logging."""
     env_id_tensor = torch.tensor([0], dtype=torch.int64, device=env.device)
     prev_num_attempts = 0
     step_count = 0
     action_dim = int(env.single_action_space.shape[0])
-    pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
-    pose_writer = PoseTraceCsvWriter(pose_output_path)
+    pose_writer: PoseTraceCsvWriter | None = None
+    if enable_pose_trace:
+        pose_output_path = _resolve_pose_output_path(output_file, pose_output_file)
+        pose_writer = PoseTraceCsvWriter(pose_output_path)
+        print(f"Pose trace CSV: {pose_output_path}")
     episode_indices = {env_id: -1 for env_id in range(int(env.num_envs))}
     episode_steps = {env_id: -1 for env_id in range(int(env.num_envs))}
-    print(f"Pose trace CSV: {pose_output_path}")
 
     try:
         with contextlib.suppress(KeyboardInterrupt), torch.inference_mode():
@@ -226,10 +344,12 @@ def env_loop_with_pose_output(
                         reset_env_id = int(env_reset_queue.get_nowait())
                         env_id_tensor[0] = reset_env_id
                         env.reset(env_ids=env_id_tensor)
+                        _restore_cuda_cloth_visual_pose_to_initial(env)
+                        _force_cuda_render_sync(env)
                         episode_indices[reset_env_id] += 1
                         episode_steps[reset_env_id] = 0
                         env_reset_queue.task_done()
-                        if reset_env_id == 0:
+                        if reset_env_id == 0 and (enable_pose_trace or log_success):
                             row = _write_pose_snapshot(
                                 env,
                                 step_count=step_count,
@@ -255,6 +375,7 @@ def env_loop_with_pose_output(
                     actions[env_id] = action_tensor
 
                 env.step(actions)
+                _force_cuda_render_sync(env)
                 for _ in range(env.num_envs):
                     env_action_queue.task_done()
 
@@ -263,7 +384,7 @@ def env_loop_with_pose_output(
                     if episode_steps[env_id] >= 0:
                         episode_steps[env_id] += 1
                 row: dict[str, Any] | None = None
-                if step_count % logging_interval == 0:
+                if enable_pose_trace and step_count % logging_interval == 0:
                     row = _write_pose_snapshot(
                         env,
                         step_count=step_count,
@@ -316,6 +437,14 @@ def env_loop_with_pose_output(
                 if env.sim.is_stopped():
                     break
     finally:
+        # Cancel worker coroutines *before* closing the env so that the
+        # event loop and queues are still alive to process CancelledErrors.
+        if worker_tasks:
+            for task in worker_tasks:
+                task.cancel()
+            asyncio_event_loop.run_until_complete(
+                asyncio.gather(*worker_tasks, return_exceptions=True)
+            )
         pose_writer.close()
         env.close()
 

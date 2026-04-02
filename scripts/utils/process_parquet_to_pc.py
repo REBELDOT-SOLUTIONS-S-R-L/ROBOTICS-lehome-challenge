@@ -15,7 +15,7 @@ project_root = os.path.abspath(os.path.join(current_dir, "../../.."))
 
 
 def get_args():
-    parser = argparse.ArgumentParser(description="Process Parquet depth and MP4 RGB into Pointclouds.")
+    parser = argparse.ArgumentParser(description="[Internal] Process parquet depth and MP4 RGB into pointclouds.")
     parser.add_argument(
         "--dataset_root", 
         type=str, 
