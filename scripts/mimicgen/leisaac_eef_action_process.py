@@ -9,7 +9,7 @@ import argparse
 from isaaclab.app import AppLauncher
 
 # add argparse arguments
-parser = argparse.ArgumentParser(description="eef action process for MimicGen recorded demos.")
+parser = argparse.ArgumentParser(description="[Support Tool] EEF action processing for MimicGen recorded demos.")
 parser.add_argument("--input_file", type=str, default="./datasets/mimic-lift-cube-example.hdf5", help="File path to load MimicGen recorded demos.")
 parser.add_argument("--output_file", type=str, default="./datasets/processed_mimic-lift-cube-example.hdf5", help="File path to save processed MimicGen recorded demos.")
 parser.add_argument("--to_ik", action="store_true", help="Whether to convert the action to ik action.")

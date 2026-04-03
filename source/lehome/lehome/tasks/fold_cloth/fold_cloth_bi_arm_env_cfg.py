@@ -31,6 +31,7 @@ from isaaclab.envs.mdp import joint_pos as mdp_joint_pos
 from isaaclab.envs.mdp import last_action as mdp_last_action
 
 from .mdp import garment_folded
+from .mdp import robot_rest_pose as mdp_robot_rest_pose
 
 from lehome.assets.robots.lerobot import (
     SO101_FOLLOWER_CFG,
@@ -129,7 +130,7 @@ class GarmentFoldSceneCfg(InteractiveSceneCfg):
             rot=(0.1650476, -0.9862856, 0.0, 0.0),
             convention="ros",
         ),
-        data_types=["rgb", "depth"],
+        data_types=["rgb"],
         spawn=sim_utils.PinholeCameraCfg(
             focal_length=28.7,
             focus_distance=400.0,
@@ -186,7 +187,7 @@ class ActionsCfg:
 
 @configclass
 class ObservationsCfg:
-    """Observation specifications — joint positions and last action."""
+    """Observation specifications — joint positions, last action, and rest pose."""
 
     @configclass
     class PolicyCfg(ObsGroup):
@@ -201,6 +202,7 @@ class ObservationsCfg:
             params={"asset_cfg": SceneEntityCfg("right_arm")},
         )
         actions = ObsTerm(func=mdp_last_action)
+        robot_rest_pose = ObsTerm(func=mdp_robot_rest_pose)
 
         def __post_init__(self):
             self.enable_corruption = False
@@ -269,6 +271,7 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
         render_interval=1,
         render=render_cfg,
         use_fabric=False,
+        device="cuda:0",
     )
 
     # Garment configuration
@@ -287,6 +290,13 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     task_description: str = "Fold the garment on the table."
     # Teleop / action contract name (updated by scripts)
     task_type: str = "bi-so101leader"
+    # Online subtask-observation thresholds
+    subtask_grasp_eef_to_keypoint_threshold_m: float = 0.15
+    subtask_gripper_close_threshold: float = 0.35
+    subtask_middle_to_lower_threshold_m: float = 0.10
+    subtask_lower_to_upper_threshold_m: float = 0.12
+    subtask_signal_min_consecutive_steps: int = 3
+    return_home_min_consecutive_steps: int = 10
 
     def __post_init__(self):
         """Post initialization."""

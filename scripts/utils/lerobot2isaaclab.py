@@ -220,7 +220,7 @@ def convert_lerobot_folder_to_hdf5(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Compact LeRobot to HDF5 converter")
+    parser = argparse.ArgumentParser(description="[Legacy] Compact LeRobot to HDF5 converter")
     parser.add_argument("--lerobot_dir", type=str, required=True, help="Path to local LeRobot dataset")
     parser.add_argument("--output_hdf5", type=str, required=True, help="Path to output HDF5")
     parser.add_argument(

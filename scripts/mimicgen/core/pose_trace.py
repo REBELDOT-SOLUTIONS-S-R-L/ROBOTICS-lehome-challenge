@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import csv
-import json
+import importlib.util
 from pathlib import Path
 from typing import Any
 
@@ -23,26 +23,27 @@ def _load_trace_constants():
     except Exception:
         mappings_path = (
             Path(__file__).resolve().parents[3]
-            / "source/lehome/lehome/tasks/fold_cloth/checkpoint_mappings.json"
+            / "source/lehome/lehome/tasks/fold_cloth/checkpoint_mappings.py"
         )
-        with mappings_path.open("r", encoding="utf-8") as handle:
-            mappings = json.load(handle)
+        spec = importlib.util.spec_from_file_location("fold_cloth_checkpoint_mappings", mappings_path)
+        if spec is None or spec.loader is None:
+            raise ImportError(f"Failed to load checkpoint mappings from {mappings_path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
 
         arm_keypoint_groups = {
             str(arm_name): tuple(str(name) for name in keypoint_names)
-            for arm_name, keypoint_names in mappings["arm_keypoint_groups"].items()
+            for arm_name, keypoint_names in getattr(module, "ARM_KEYPOINT_GROUPS").items()
         }
-        csv_trace_keypoint_names = tuple(
-            str(name) for name in mappings["csv_trace_keypoint_names"]
-        )
+        csv_trace_keypoint_names = tuple(str(name) for name in getattr(module, "CSV_TRACE_KEYPOINT_NAMES"))
         success_distance_specs = tuple(
             (
-                str(item["name"]),
-                str(item["src"]),
-                str(item["dst"]),
-                float(item["threshold_m"]),
+                str(name),
+                str(src),
+                str(dst),
+                float(threshold_m),
             )
-            for item in mappings["success_distance_specs"]
+            for name, src, dst, threshold_m in getattr(module, "SUCCESS_DISTANCE_SPECS")
         )
         return arm_keypoint_groups, csv_trace_keypoint_names, success_distance_specs
 

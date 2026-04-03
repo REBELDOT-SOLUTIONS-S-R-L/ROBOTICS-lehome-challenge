@@ -14,68 +14,48 @@ from pathlib import Path
 from isaaclab.app import AppLauncher
 
 try:
+    from scripts.mimicgen.core.cli_parser import (
+        add_config_argument,
+        add_garment_override_arguments,
+        add_mimic_ik_orientation_weight_argument,
+        add_task_type_argument,
+        warn_on_deprecated_flags,
+    )
     from scripts.utils.arg_config import expand_cli_args_with_config
 except ImportError:
     repo_root = Path(__file__).resolve().parents[2]
     if str(repo_root) not in sys.path:
         sys.path.append(str(repo_root))
+    from scripts.mimicgen.core.cli_parser import (
+        add_config_argument,
+        add_garment_override_arguments,
+        add_mimic_ik_orientation_weight_argument,
+        add_task_type_argument,
+        warn_on_deprecated_flags,
+    )
     from scripts.utils.arg_config import expand_cli_args_with_config
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Generate demonstrations for Isaac Lab environments.")
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help=(
-            "Optional config file that expands to CLI args before parsing. "
-            "Supports .json, .yaml, .yml, .csv, .txt, and .args."
-        ),
+    add_config_argument(parser)
+
+    core_group = parser.add_argument_group("core workflow")
+    core_group.add_argument("--task", type=str, default=None, help="Name of the task.")
+    core_group.add_argument(
+        "--generation_num_trials", type=int, help="Number of demos to be generated.", default=None
     )
-    parser.add_argument("--task", type=str, default=None, help="Name of the task.")
-    parser.add_argument("--generation_num_trials", type=int, help="Number of demos to be generated.", default=None)
-    parser.add_argument(
+    core_group.add_argument(
         "--num_envs", type=int, default=1, help="Number of environments to instantiate for generating datasets."
     )
-    parser.add_argument("--input_file", type=str, default=None, help="File path to the source dataset file.")
-    parser.add_argument(
+    core_group.add_argument("--input_file", type=str, default=None, help="File path to the source dataset file.")
+    core_group.add_argument(
         "--output_file",
         type=str,
         default="./datasets/output_dataset.hdf5",
         help="File path to export recorded and generated episodes.",
     )
-    parser.add_argument("--task_type", type=str, default=None, help="Specify task type. If your annotated dataset is recorded with keyboard, you should set it to 'keyboard', otherwise not to set it and keep default value None.")
-    parser.add_argument(
-        "--garment_name",
-        type=str,
-        default=None,
-        help="Garment name (for garment tasks), e.g. Top_Long_Unseen_0.",
-    )
-    parser.add_argument(
-        "--garment_version",
-        type=str,
-        default=None,
-        help="Garment version (for garment tasks), e.g. Release or Holdout.",
-    )
-    parser.add_argument(
-        "--garment_cfg_base_path",
-        type=str,
-        default="Assets/objects/Challenge_Garment",
-        help="Base path of garment assets (for garment tasks).",
-    )
-    parser.add_argument(
-        "--particle_cfg_path",
-        type=str,
-        default="source/lehome/lehome/tasks/bedroom/config_file/particle_garment_cfg.yaml",
-        help="Path to particle garment config yaml (for garment tasks).",
-    )
-    parser.add_argument(
-        "--pause_subtask",
-        action="store_true",
-        help="pause after every subtask during generation for debugging - only useful with render flag",
-    )
-    parser.add_argument(
+    core_group.add_argument(
         "--garment_settle_steps",
         type=int,
         default=20,
@@ -84,17 +64,33 @@ def build_parser() -> argparse.ArgumentParser:
             "Mimic samples runtime object poses."
         ),
     )
-    parser.add_argument(
-        "--enable_pinocchio",
-        action="store_true",
-        default=False,
-        help="Enable Pinocchio.",
-    )
-    parser.add_argument(
+    core_group.add_argument(
         "--logging_interval",
         type=int,
         default=1,
         help="CSV logging interval in env steps. Must be > 0.",
+    )
+    core_group.add_argument(
+        "--log_success",
+        action="store_true",
+        default=False,
+        help="Log garment success-term distances for env 0 at episode start and every 50 env steps.",
+    )
+
+    garment_group = parser.add_argument_group("garment and environment overrides")
+    add_garment_override_arguments(garment_group)
+
+    runtime_group = parser.add_argument_group("runtime and debugging")
+    runtime_group.add_argument(
+        "--pause_subtask",
+        action="store_true",
+        help="Pause after every subtask during generation for debugging; only useful with rendering.",
+    )
+    parser.add_argument(
+        "--enable_pinocchio",
+        action="store_true",
+        default=False,
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--pose_output_interval",
@@ -109,13 +105,13 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--save_pose_trace",
         action="store_true",
         default=False,
-        help=argparse.SUPPRESS,
+        help="Write a pose-trace CSV alongside generation for offline debugging.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--pose_output_file",
         type=str,
         default=None,
@@ -124,13 +120,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Defaults to <output_file stem>_pose_trace.csv."
         ),
     )
-    parser.add_argument(
-        "--log_success",
-        action="store_true",
-        default=False,
-        help="Log garment success-term distances for env 0 at episode start and every 50 env steps.",
-    )
-    parser.add_argument(
+
+    compatibility_group = parser.add_argument_group("compatibility and legacy")
+    compatibility_group.add_argument(
         "--use_eef_pose_as_target",
         action="store_true",
         default=False,
@@ -139,7 +131,7 @@ def build_parser() -> argparse.ArgumentParser:
             "(instead of recorded target_eef_pose)."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--source_target_z_offset",
         type=float,
         default=0.0,
@@ -148,7 +140,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Use negative values to lower grasp trajectories (e.g. -0.02)."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--align_object_pose_to_runtime",
         action="store_true",
         default=False,
@@ -157,7 +149,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Keep disabled unless you are repairing old datasets with known global frame offsets."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--object_pose_alignment_mode",
         type=str,
         default="object_only",
@@ -168,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
             "'all_poses' shifts object/eef/target together (for pure global frame shifts)."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--auto_fix_mixed_pose_frames",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -177,7 +169,7 @@ def build_parser() -> argparse.ArgumentParser:
             "Disabled by default in strict pipeline mode."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--strict_preflight",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -186,13 +178,13 @@ def build_parser() -> argparse.ArgumentParser:
             "(recommended; enabled by default)."
         ),
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--expected_source_action_dim",
         type=int,
         default=16,
         help="Expected top-level source action dimension for strict preflight checks.",
     )
-    parser.add_argument(
+    compatibility_group.add_argument(
         "--require_source_actions_mode",
         type=str,
         default="ee_pose",
@@ -204,15 +196,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help=argparse.SUPPRESS,
     )
-    parser.add_argument(
-        "--mimic_ik_orientation_weight",
-        type=float,
-        default=0.01,
-        help=(
-            "Orientation weight forwarded to env IK conversion (target_eef_pose_to_action). "
-            "Higher values enforce source wrist orientation more strongly; 0 disables orientation tracking."
-        ),
-    )
+    add_task_type_argument(compatibility_group)
+    add_mimic_ik_orientation_weight_argument(compatibility_group)
     AppLauncher.add_app_launcher_args(parser)
     return parser
 
@@ -223,7 +208,23 @@ def main(argv: list[str] | None = None) -> None:
     if any(arg in {"-h", "--help"} for arg in raw_argv):
         parser.print_help()
         return
-    args_cli = parser.parse_args(expand_cli_args_with_config(raw_argv, parser))
+    expanded_argv = expand_cli_args_with_config(raw_argv, parser)
+    warn_on_deprecated_flags(
+        expanded_argv,
+        {
+            "--pose_output_interval": (
+                "`--pose_output_interval` is deprecated; use `--logging_interval` instead."
+            ),
+            "--disable_object_pose_alignment": (
+                "`--disable_object_pose_alignment` is deprecated and kept only for compatibility."
+            ),
+            "--enable_pinocchio": (
+                "`--enable_pinocchio` is deprecated and kept only for compatibility."
+            ),
+            "--print_poses": "`--print_poses` is deprecated and no longer has any effect.",
+        },
+    )
+    args_cli = parser.parse_args(expanded_argv)
     if not args_cli.input_file:
         parser.error("the following arguments are required: --input_file")
 
@@ -232,14 +233,40 @@ def main(argv: list[str] | None = None) -> None:
 
     app_launcher = AppLauncher(args_cli)
     simulation_app = app_launcher.app
+    generation_finished = False
     try:
         from scripts.mimicgen.core.generate_runner import run_generation
 
         run_generation(args_cli, simulation_app)
+        generation_finished = True
     except KeyboardInterrupt:
+        generation_finished = True
         print("\nProgram interrupted by user. Exiting...")
+    except Exception:
+        # Print the traceback now — simulation_app.close() may kill the process
+        # before Python gets a chance to display it.
+        import traceback
+
+        traceback.print_exc()
     finally:
-        simulation_app.close()
+        if generation_finished:
+            import os
+            import threading
+
+            close_done = threading.Event()
+
+            def _close_app():
+                try:
+                    simulation_app.close()
+                finally:
+                    close_done.set()
+
+            threading.Thread(target=_close_app, daemon=True).start()
+            if not close_done.wait(timeout=10):
+                print("Warning: simulation_app.close() timed out — forcing exit.")
+                os._exit(0)
+        else:
+            simulation_app.close()
 
 
 if __name__ == "__main__":

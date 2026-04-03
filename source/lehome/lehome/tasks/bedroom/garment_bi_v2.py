@@ -20,7 +20,7 @@ import isaacsim.core.utils.prims as prims_utils
 from lehome.tasks.bedroom.garment_bi_cfg_v2 import GarmentEnvCfg
 from lehome.utils.success_checker_chanllege import success_checker_garment_fold
 from lehome.utils.depth_to_pointcloud import generate_pointcloud_from_data
-from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_USD_PATH
+from lehome.assets.scenes.bedroom import MARBLE_BEDROOM_CFG
 from lehome.devices.action_process import preprocess_device_action
 from lehome.assets.object.Garment import GarmentObject
 from lehome.tasks.bedroom.challenge_garment_loader import ChallengeGarmentLoader
@@ -69,12 +69,12 @@ class GarmentEnv(DirectRLEnv):
         self.top_camera = TiledCamera(self.cfg.top_camera)
         self.left_camera = TiledCamera(self.cfg.left_wrist)
         self.right_camera = TiledCamera(self.cfg.right_wrist)
-        cfg = sim_utils.UsdFileCfg(usd_path=f"{MARBLE_BEDROOM_USD_PATH}")
-        cfg.func(
-            "/World/Scene",
-            cfg,
-            translation=(0.0, 0.0, 0.0),
-            orientation=(0.0, 0.0, 0.0, 0.0),
+        scene_cfg = MARBLE_BEDROOM_CFG.replace(prim_path="/World/Scene")
+        scene_cfg.spawn.func(
+            scene_cfg.prim_path,
+            scene_cfg.spawn,
+            translation=scene_cfg.init_state.pos,
+            orientation=scene_cfg.init_state.rot,
         )
 
         # Create garment object with selected asset
@@ -279,14 +279,8 @@ class GarmentEnv(DirectRLEnv):
         joint_pos = torch.cat([left_joint_pos, right_joint_pos], dim=1)
         joint_pos = joint_pos.squeeze(0)
         top_camera_rgb = self.top_camera.data.output["rgb"]
-        top_camera_depth = self.top_camera.data.output["depth"].squeeze()
         left_camera_rgb = self.left_camera.data.output["rgb"]
         right_camera_rgb = self.right_camera.data.output["rgb"]
-
-        # Convert depth from meters to millimeters (uint16)
-        # Range: 0-65535 mm (0-65.535 m), precision: 1 mm
-        depth_np = top_camera_depth.cpu().detach().numpy().copy()
-        depth_mm = np.clip(depth_np * 1000, 0, 65535).astype(np.uint16)
 
         observations = {
             "action": action.cpu().detach().numpy(),
@@ -303,7 +297,6 @@ class GarmentEnv(DirectRLEnv):
             .detach()
             .numpy()
             .squeeze(),
-            "observation.top_depth": depth_mm,
         }
         return observations
 
@@ -323,7 +316,9 @@ class GarmentEnv(DirectRLEnv):
             colors (np.ndarray) (0-255)
         """
         top_camera_rgb_tensor = self.top_camera.data.output["rgb"]
-        top_camera_depth_tensor = self.top_camera.data.output["depth"]
+        top_camera_depth_tensor = self.top_camera.data.output.get("depth")
+        if top_camera_depth_tensor is None:
+            raise RuntimeError("Top camera depth output is disabled for this environment.")
 
         depth_img = top_camera_depth_tensor[env_index].clone().cpu().numpy().squeeze()
 

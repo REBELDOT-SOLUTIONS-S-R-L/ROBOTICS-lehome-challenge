@@ -30,7 +30,7 @@ def main():
     AppLauncher.add_app_launcher_args(isaac_args_parser)
 
     parser = argparse.ArgumentParser(
-        description="LeHome dataset management tool",
+        description="[Legacy] LeHome dataset management tool",
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(

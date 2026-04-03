@@ -8,6 +8,7 @@ import gymnasium as gym
 import numpy as np
 import omni
 import torch
+import carb
 
 from isaaclab.envs import ManagerBasedRLMimicEnv
 from isaaclab.envs.mdp.recorders.recorders_cfg import ActionStateRecorderManagerCfg
@@ -27,6 +28,7 @@ from lehome.assets.robots.lerobot import (
     SO101_LEFT_ARM_HOME_JOINT_POS,
     SO101_RIGHT_ARM_HOME_JOINT_POS,
 )
+from lehome.tasks.fold_cloth.mdp.recorders import GenerationPoseRecorder
 
 from .dataset_meta import get_first_demo_action_dim as _get_first_demo_action_dim
 from .dataset_meta import get_first_demo_garment_name as _get_first_demo_garment_name
@@ -109,9 +111,17 @@ class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
 
 
 @configclass
-class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
-    """Default action/state recorder plus camera observations."""
+class PreStepGenerationPoseRecorderCfg(RecorderTermCfg):
+    """Configuration for fold-cloth pose recording during generation export."""
 
+    class_type: type[RecorderTerm] = GenerationPoseRecorder
+
+
+@configclass
+class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
+    """Default action/state recorder plus generated pose and camera observations."""
+
+    record_pre_step_generation_pose = PreStepGenerationPoseRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
 
 
@@ -305,12 +315,19 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         device=parsed_args.device,
         generation_num_trials=parsed_args.generation_num_trials,
     )
-    if bool(parsed_args.enable_cameras):
-        dataset_export_mode = env_cfg.recorders.dataset_export_mode
-        env_cfg.recorders = GenerationRecorderManagerCfg()
-        env_cfg.recorders.dataset_export_dir_path = output_dir
-        env_cfg.recorders.dataset_filename = output_file_name
-        env_cfg.recorders.dataset_export_mode = dataset_export_mode
+    if str(parsed_args.device).startswith("cuda"):
+        # CUDA cloth rendering needs the render delegate to consume live fabric transforms.
+        env_cfg.sim.use_fabric = True
+        carb_settings = carb.settings.get_settings()
+        carb_settings.set_bool("/physics/fabricUpdateTransformations", True)
+        carb_settings.set_bool("/physics/fabricUpdateVelocities", True)
+        carb_settings.set_bool("/physics/fabricUpdateJointStates", True)
+        print("Enabled fabric-backed transform sync for CUDA generation.")
+    dataset_export_mode = env_cfg.recorders.dataset_export_mode
+    env_cfg.recorders = GenerationRecorderManagerCfg()
+    env_cfg.recorders.dataset_export_dir_path = output_dir
+    env_cfg.recorders.dataset_filename = output_file_name
+    env_cfg.recorders.dataset_export_mode = dataset_export_mode
 
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, parsed_args.task_type))
@@ -455,30 +472,29 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         align_object_pose_to_runtime=(explicit_object_alignment or auto_object_alignment),
         align_object_pose_mode=object_alignment_mode,
         pause_subtask=parsed_args.pause_subtask,
+        log_success=bool(parsed_args.log_success),
         post_reset_settle_steps=int(parsed_args.garment_settle_steps),
         post_reset_hold_action=post_reset_hold_action,
     )
 
-    try:
-        import isaaclab_mimic.datagen.generation as mimic_generation
+    import isaaclab_mimic.datagen.generation as mimic_generation
 
-        mimic_generation.num_success = 0
-        mimic_generation.num_failures = 0
-        mimic_generation.num_attempts = 0
-        asyncio = __import__("asyncio")
-        asyncio.ensure_future(asyncio.gather(*async_components["tasks"]))
-        env_loop_with_pose_output(
-            env,
-            async_components["reset_queue"],
-            async_components["action_queue"],
-            async_components["event_loop"],
-            output_file=parsed_args.output_file,
-            pose_output_file=parsed_args.pose_output_file,
-            logging_interval=int(parsed_args.logging_interval),
-            log_success=bool(parsed_args.log_success),
-        )
-    except __import__("asyncio").CancelledError:
-        print("Tasks were cancelled.")
+    mimic_generation.num_success = 0
+    mimic_generation.num_failures = 0
+    mimic_generation.num_attempts = 0
+    enable_pose_trace = bool(parsed_args.save_pose_trace or parsed_args.pose_output_file)
+    env_loop_with_pose_output(
+        env,
+        async_components["reset_queue"],
+        async_components["action_queue"],
+        async_components["event_loop"],
+        output_file=parsed_args.output_file,
+        pose_output_file=parsed_args.pose_output_file,
+        enable_pose_trace=enable_pose_trace,
+        logging_interval=int(parsed_args.logging_interval),
+        log_success=bool(parsed_args.log_success),
+        worker_tasks=async_components["tasks"],
+    )
 
 
 __all__ = ["run_generation"]
