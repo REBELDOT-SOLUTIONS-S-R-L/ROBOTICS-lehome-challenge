@@ -7,7 +7,7 @@ from typing import Any
 
 import torch
 
-from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
+from lehome.assets.robots.lerobot import get_so101_rest_pose_range
 from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS
 from lehome.tasks.fold_cloth.mdp.observations import (
     FoldClothSubtaskObservationContext,
@@ -15,7 +15,7 @@ from lehome.tasks.fold_cloth.mdp.observations import (
 )
 
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
-_REST_POSE_SPEC_CACHE: dict[tuple[str, ...], tuple[tuple[int, float, float], ...]] = {}
+_REST_POSE_SPEC_CACHE: dict[tuple[str, tuple[str, ...]], tuple[tuple[int, float, float], ...]] = {}
 
 
 @dataclass
@@ -68,14 +68,19 @@ def _normalize_optional_bool_column(
     return tensor[:1].reshape(1, 1)
 
 
-def _get_rest_pose_specs(joint_names: list[str]) -> tuple[tuple[int, float, float], ...]:
-    cache_key = tuple(joint_names)
+def _get_rest_pose_specs(
+    arm_name: str | None,
+    joint_names: list[str],
+) -> tuple[tuple[int, float, float], ...]:
+    normalized_arm_name = str(arm_name or "")
+    cache_key = (normalized_arm_name, tuple(joint_names))
     cached = _REST_POSE_SPEC_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    rest_pose_range = get_so101_rest_pose_range(arm_name)
     specs = tuple(
         (int(joint_names.index(joint_name)), float(min_pos), float(max_pos))
-        for joint_name, (min_pos, max_pos) in SO101_FOLLOWER_REST_POSE_RANGE.items()
+        for joint_name, (min_pos, max_pos) in rest_pose_range.items()
     )
     _REST_POSE_SPEC_CACHE[cache_key] = specs
     return specs
@@ -84,10 +89,11 @@ def _get_rest_pose_specs(joint_names: list[str]) -> tuple[tuple[int, float, floa
 def _is_so101_at_rest_pose_fast(
     joint_pos: torch.Tensor,
     joint_names: list[str],
+    arm_name: str | None = None,
 ) -> torch.Tensor:
     joint_pos_deg = joint_pos[:, :].to(dtype=torch.float32) / torch.pi * 180.0
     is_reset = torch.ones((joint_pos_deg.shape[0], 1), dtype=torch.bool, device=joint_pos_deg.device)
-    for joint_idx, min_pos, max_pos in _get_rest_pose_specs(joint_names):
+    for joint_idx, min_pos, max_pos in _get_rest_pose_specs(arm_name, joint_names):
         joint_ok = torch.logical_and(joint_pos_deg[:, joint_idx : joint_idx + 1] > min_pos, joint_pos_deg[:, joint_idx : joint_idx + 1] < max_pos)
         is_reset = torch.logical_and(is_reset, joint_ok)
     return is_reset
@@ -152,6 +158,10 @@ def capture_annotated_runtime_snapshot(
         name: torch.as_tensor(checkpoint_positions[idx], device=env.device, dtype=torch.float32).reshape(1, 3)
         for idx, name in enumerate(CHECKPOINT_LABELS)
     }
+    left_lower = semantic_keypoints_world.get("garment_left_lower")
+    right_lower = semantic_keypoints_world.get("garment_right_lower")
+    if left_lower is not None and right_lower is not None:
+        semantic_keypoints_world["garment_lower_center"] = (left_lower + right_lower) * 0.5
     checkpoint_positions = torch.stack(
         [semantic_keypoints_world[name].reshape(3) for name in CHECKPOINT_LABELS],
         dim=0,
@@ -194,6 +204,7 @@ def capture_annotated_runtime_snapshot(
             arm_at_rest_by_arm[arm_name] = _is_so101_at_rest_pose_fast(
                 joint_pos[arm_name],
                 arm.data.joint_names,
+                arm_name=arm_name,
             )
 
     fold_success_value = None
@@ -250,6 +261,7 @@ def ensure_return_home_snapshot_fields(
         snapshot.observation_context.arm_at_rest_by_arm[arm_name] = _is_so101_at_rest_pose_fast(
             snapshot.joint_pos[arm_name],
             arm.data.joint_names,
+            arm_name=arm_name,
         )
     if include_fold_success and snapshot.observation_context.fold_success is None:
         snapshot.observation_context.fold_success = _normalize_optional_bool_column(

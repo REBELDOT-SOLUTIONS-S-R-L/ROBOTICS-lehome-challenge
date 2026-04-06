@@ -11,6 +11,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 
 from ..checkpoint_mappings import (
+    CENTER_GROUPS,
     CHECKPOINT_LABELS,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
 )
@@ -66,12 +67,22 @@ def _resolve_arm_name(arm: str | SceneEntityCfg) -> str:
 
 def _resolve_checkpoint_name(checkpoint_name: str) -> str:
     checkpoint_name = str(checkpoint_name)
-    if checkpoint_name not in CHECKPOINT_LABELS:
+    valid_checkpoint_names = CHECKPOINT_LABELS + tuple(CENTER_GROUPS.keys())
+    if checkpoint_name not in valid_checkpoint_names:
         raise KeyError(
             f"Unsupported garment checkpoint name {checkpoint_name!r}. "
-            f"Expected one of {CHECKPOINT_LABELS}."
+            f"Expected one of {valid_checkpoint_names}."
         )
     return checkpoint_name
+
+
+def _preferred_lower_target_name(
+    semantic_points: dict[str, torch.Tensor] | None,
+    fallback_name: str,
+) -> str:
+    if semantic_points is not None and "garment_lower_center" in semantic_points:
+        return "garment_lower_center"
+    return fallback_name
 
 
 def _cfg_float(env: ManagerBasedEnv, attr_name: str, default: float) -> float:
@@ -338,23 +349,31 @@ def get_subtask_signal_observation_from_context(
             <= context.grasp_eef_to_keypoint_threshold_m
         )
     if signal_name == "left_middle_to_lower":
+        lower_target = _preferred_lower_target_name(
+            context.semantic_keypoints_world,
+            "garment_left_lower",
+        )
         return (
             ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
         ) & (
             _context_keypoint_pair_distance(
                 context,
                 "garment_left_middle",
-                "garment_left_lower",
+                lower_target,
             ) <= context.middle_to_lower_threshold_m
         )
     if signal_name == "right_middle_to_lower":
+        lower_target = _preferred_lower_target_name(
+            context.semantic_keypoints_world,
+            "garment_right_lower",
+        )
         return (
             ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
         ) & (
             _context_keypoint_pair_distance(
                 context,
                 "garment_right_middle",
-                "garment_right_lower",
+                lower_target,
             ) <= context.middle_to_lower_threshold_m
         )
     if signal_name == "grasp_left_lower":
@@ -434,8 +453,16 @@ def robot_rest_pose(
     left_arm = env.scene[left_arm_cfg.name]
     right_arm = env.scene[right_arm_cfg.name]
 
-    left_at_rest = is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)
-    right_at_rest = is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)
+    left_at_rest = is_so101_at_rest_pose(
+        left_arm.data.joint_pos,
+        left_arm.data.joint_names,
+        arm_name=left_arm_cfg.name,
+    )
+    right_at_rest = is_so101_at_rest_pose(
+        right_arm.data.joint_pos,
+        right_arm.data.joint_names,
+        arm_name=right_arm_cfg.name,
+    )
 
     return torch.stack(
         (
@@ -467,10 +494,11 @@ def arm_at_rest(
 ) -> torch.Tensor:
     """Return whether the given arm is at the rest pose."""
     env_ids, num_envs = _resolve_env_ids(env, env_ids)
-    _, arm_entity = _get_scene_arm(env, arm)
+    arm_name, arm_entity = _get_scene_arm(env, arm)
     at_rest = is_so101_at_rest_pose(
         arm_entity.data.joint_pos[env_ids],
         arm_entity.data.joint_names,
+        arm_name=arm_name,
     )
     return at_rest.reshape(num_envs, 1)
 
@@ -551,11 +579,13 @@ def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    lower_target = _preferred_lower_target_name(semantic_points, "garment_left_lower")
     return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
         keypoint_pair_distance(
             env,
             "garment_left_middle",
-            "garment_left_lower",
+            lower_target,
             env_ids=env_ids,
         ) <= threshold
     )
@@ -567,11 +597,13 @@ def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = 
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    lower_target = _preferred_lower_target_name(semantic_points, "garment_right_lower")
     return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
         keypoint_pair_distance(
             env,
             "garment_right_middle",
-            "garment_right_lower",
+            lower_target,
             env_ids=env_ids,
         ) <= threshold
     )

@@ -213,7 +213,11 @@ def _describe_head_status(
 
     if head_signal in {"left_middle_to_lower", "right_middle_to_lower"}:
         point_a = "garment_left_middle" if head_signal == "left_middle_to_lower" else "garment_right_middle"
-        point_b = "garment_left_lower" if head_signal == "left_middle_to_lower" else "garment_right_lower"
+        point_b = (
+            "garment_lower_center"
+            if "garment_lower_center" in context.semantic_keypoints_world
+            else ("garment_left_lower" if head_signal == "left_middle_to_lower" else "garment_right_lower")
+        )
         distance = torch.linalg.norm(
             context.semantic_keypoints_world[point_a] - context.semantic_keypoints_world[point_b],
             dim=-1,

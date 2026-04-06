@@ -47,8 +47,8 @@ CENTER_GROUPS = {
     "garment_center": CHECKPOINT_LABELS,
 }
 SUCCESS_DISTANCE_SPECS = (
-    ("left_middle_to_lower", "garment_left_middle", "garment_left_lower", 0.10),
-    ("right_middle_to_lower", "garment_right_middle", "garment_right_lower", 0.10),
+    ("left_middle_to_lower", "garment_left_middle", "garment_lower_center", 0.10),
+    ("right_middle_to_lower", "garment_right_middle", "garment_lower_center", 0.10),
     ("left_lower_to_upper", "garment_left_lower", "garment_left_upper", 0.12),
     ("right_lower_to_upper", "garment_right_lower", "garment_right_upper", 0.12),
 )

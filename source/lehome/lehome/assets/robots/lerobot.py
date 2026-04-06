@@ -38,15 +38,23 @@ SO101_FOLLOWER_HOME_POSE_DEG = {
     "shoulder_lift": -100.0,
     "elbow_flex": 85.0,
     "wrist_flex": 60.0,
-    "wrist_roll": 0.0,
+    "wrist_roll": -90.0,
     "gripper": 0.0,
 }
 
 SO101_LEFT_ARM_HOME_JOINT_POS = dict(SO101_FOLLOWER_HOME_JOINT_POS)
 SO101_LEFT_ARM_HOME_JOINT_POS["shoulder_pan"] = math.radians(-70.0)
+SO101_LEFT_ARM_HOME_JOINT_POS["wrist_roll"] = math.radians(-90.0)
+
+SO101_LEFT_ARM_HOME_POSE_DEG = dict(SO101_FOLLOWER_HOME_POSE_DEG)
+SO101_LEFT_ARM_HOME_POSE_DEG["wrist_roll"] = -90.0
 
 SO101_RIGHT_ARM_HOME_JOINT_POS = dict(SO101_FOLLOWER_HOME_JOINT_POS)
 SO101_RIGHT_ARM_HOME_JOINT_POS["shoulder_pan"] = math.radians(70.0)
+SO101_RIGHT_ARM_HOME_JOINT_POS["wrist_roll"] = math.radians(90.0)
+
+SO101_RIGHT_ARM_HOME_POSE_DEG = dict(SO101_FOLLOWER_HOME_POSE_DEG)
+SO101_RIGHT_ARM_HOME_POSE_DEG["wrist_roll"] = 90.0
 
 
 def _build_rest_pose_range(home_pose_deg: dict[str, float]) -> dict[str, tuple[float, float]]:
@@ -184,3 +192,18 @@ SO101_FOLLOWER_MOTOR_LIMITS = {
 
 
 SO101_FOLLOWER_REST_POSE_RANGE = _build_rest_pose_range(SO101_FOLLOWER_HOME_POSE_DEG)
+SO101_LEFT_ARM_REST_POSE_RANGE = _build_rest_pose_range(SO101_LEFT_ARM_HOME_POSE_DEG)
+SO101_RIGHT_ARM_REST_POSE_RANGE = _build_rest_pose_range(SO101_RIGHT_ARM_HOME_POSE_DEG)
+
+
+def get_so101_rest_pose_range(arm_name: str | None = None) -> dict[str, tuple[float, float]]:
+    """Return the rest-pose range for the follower or a specific arm."""
+    if arm_name is None:
+        return SO101_FOLLOWER_REST_POSE_RANGE
+
+    normalized_name = str(arm_name).strip().lower()
+    if normalized_name in {"left", "left_arm"} or "left" in normalized_name:
+        return SO101_LEFT_ARM_REST_POSE_RANGE
+    if normalized_name in {"right", "right_arm"} or "right" in normalized_name:
+        return SO101_RIGHT_ARM_REST_POSE_RANGE
+    return SO101_FOLLOWER_REST_POSE_RANGE

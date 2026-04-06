@@ -17,7 +17,9 @@ from isaaclab.envs import ManagerBasedRLMimicEnv
 from isaaclab.managers import TerminationTermCfg
 from isaaclab.utils.datasets import EpisodeData
 
+from lehome.assets.robots.lerobot import get_so101_rest_pose_range
 from lehome.utils.env_utils import dynamic_reset_gripper_effort_limit_sim
+from lehome.utils.robot_utils import is_so101_at_rest_pose
 
 from .annotation_session import AnnotationSessionController
 from .data_utils import as_2d_tensor, as_tensor, flatten_nested_leaves
@@ -496,8 +498,20 @@ def _print_success_debug_breakdown(env: ManagerBasedRLMimicEnv) -> None:
 
         left_arm = env.scene["left_arm"]
         right_arm = env.scene["right_arm"]
-        left_at_rest = bool(is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)[0].item())
-        right_at_rest = bool(is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)[0].item())
+        left_at_rest = bool(
+            is_so101_at_rest_pose(
+                left_arm.data.joint_pos,
+                left_arm.data.joint_names,
+                arm_name="left_arm",
+            )[0].item()
+        )
+        right_at_rest = bool(
+            is_so101_at_rest_pose(
+                right_arm.data.joint_pos,
+                right_arm.data.joint_names,
+                arm_name="right_arm",
+            )[0].item()
+        )
 
         print(
             "\tSuccess breakdown:"
@@ -506,11 +520,12 @@ def _print_success_debug_breakdown(env: ManagerBasedRLMimicEnv) -> None:
 
         def _report_joint_out_of_range(arm_name: str, arm) -> None:
             out_of_range = []
+            rest_pose_range = get_so101_rest_pose_range(arm_name)
             joint_pos = arm.data.joint_pos[0].detach().cpu()
             for i, joint_name in enumerate(arm.data.joint_names):
-                if joint_name not in SO101_FOLLOWER_REST_POSE_RANGE:
+                if joint_name not in rest_pose_range:
                     continue
-                low_deg, high_deg = SO101_FOLLOWER_REST_POSE_RANGE[joint_name]
+                low_deg, high_deg = rest_pose_range[joint_name]
                 low_rad = math.radians(low_deg)
                 high_rad = math.radians(high_deg)
                 value = float(joint_pos[i].item())
