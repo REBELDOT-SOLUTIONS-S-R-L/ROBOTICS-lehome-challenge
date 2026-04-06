@@ -289,11 +289,11 @@ def setup_record_annotated_parser(
         default=False,
         help="Print EEF and garment checkpoint positions during teleoperation.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--debugging_markers",
         action="store_true",
         default=False,
-        help=argparse.SUPPRESS,
+        help="Show live garment semantic keypoint markers during annotated teleoperation.",
     )
     runtime_group.add_argument(
         "--step_hz", type=int, default=90, help="Environment stepping rate in Hz."

@@ -33,8 +33,10 @@ from .cuda_visual_sync import apply_cuda_fabric_render_settings
 from .cuda_visual_sync import force_cuda_render_sync
 from .cuda_visual_sync import post_reset_cuda_visual_sync
 from .teleop_runtime import (
+    create_debug_markers_if_needed,
     create_teleop_interface,
     register_teleop_callbacks,
+    update_debug_markers_if_needed,
     validate_task_and_device,
 )
 
@@ -316,10 +318,18 @@ def _current_return_home_arms(annotator: OnlineAnnotationState) -> tuple[str, ..
 def _reset_environment_for_next_attempt(
     env: DirectRLEnv,
     args: argparse.Namespace,
+    debug_markers=None,
+    debug_marker_state: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     env.reset()
     stabilize_garment_after_reset(env, args)
     post_reset_cuda_visual_sync(env)
+    update_debug_markers_if_needed(
+        env,
+        debug_markers,
+        debug_marker_state,
+        force=True,
+    )
     return _safe_get_all_pose(env)
 
 
@@ -371,6 +381,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
         logger.info(f"Using fixed random seed: {args.seed}")
 
     env: DirectRLEnv | None = gym.make(runtime_task, cfg=env_cfg).unwrapped
+    debug_markers = None
     try:
         action_manager = getattr(env, "action_manager", None)
         action_dim = int(getattr(action_manager, "total_action_dim", 0))
@@ -382,12 +393,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
         teleop_interface = create_teleop_interface(env, args)
         flags = register_teleop_callbacks(teleop_interface, recording_enabled=True)
         teleop_interface.reset()
-
-        if getattr(args, "debugging_markers", False):
-            logger.info(
-                "[Annotated Recording] Ignoring --debugging_markers for record_annotated "
-                "to preserve teleop FPS."
-            )
+        debug_markers = create_debug_markers_if_needed(args)
 
         recorder = AnnotatedMimicHDF5Recorder(
             file_path=_resolve_output_hdf5_path(getattr(args, "dataset_root", "Datasets/record")),
@@ -399,6 +405,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
         rate_limiter = _create_rate_limiter(args)
         annotator = OnlineAnnotationState.from_env(env)
         debug_pose_state: dict[str, Any] = {"step_count": 0, "eef_body_idx_cache": {}}
+        debug_marker_state: dict[str, Any] = {"step_count": 0}
         cached_object_initial_pose: dict[str, Any] | None = None
         initialized = False
         episode_index = 0
@@ -414,9 +421,21 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                 if not initialized:
                     logger.info("[Idle Phase] Initializing observations...")
                     env.initialize_obs()
+                    update_debug_markers_if_needed(
+                        env,
+                        debug_markers,
+                        debug_marker_state,
+                        force=True,
+                    )
                     logger.info("[Idle Phase] Stabilizing garment after initialization...")
                     stabilize_garment_after_reset(env, args)
                     post_reset_cuda_visual_sync(env)
+                    update_debug_markers_if_needed(
+                        env,
+                        debug_markers,
+                        debug_marker_state,
+                        force=True,
+                    )
                     cached_object_initial_pose = _safe_get_all_pose(env)
                     logger.info("[Idle Phase] Ready for annotated recording")
                     initialized = True
@@ -437,6 +456,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     )
                     env.step(action)
                     force_cuda_render_sync(env)
+                    update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
                     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
                     if rate_limiter is not None:
                         rate_limiter.sleep(env)
@@ -483,6 +503,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         cached_object_initial_pose = _reset_environment_for_next_attempt(
                             env,
                             args,
+                            debug_markers,
+                            debug_marker_state,
                         )
                         flags["remove"] = False
                         break
@@ -531,6 +553,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         cached_object_initial_pose = _reset_environment_for_next_attempt(
                             env,
                             args,
+                            debug_markers,
+                            debug_marker_state,
                         )
                         flags["success"] = False
                         break
@@ -551,6 +575,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     )
                     env.step(action)
                     force_cuda_render_sync(env)
+                    update_debug_markers_if_needed(env, debug_markers, debug_marker_state)
                     episode_step_count += 1
                     log_debug_pose_snapshot_if_enabled(env, args, debug_pose_state)
                     snapshot = capture_annotated_runtime_snapshot(
@@ -626,11 +651,15 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         cached_object_initial_pose = _reset_environment_for_next_attempt(
                             env,
                             args,
+                            debug_markers,
+                            debug_marker_state,
                         )
                         break
     except KeyboardInterrupt:
         logger.warning("\n[Ctrl+C] Interrupt signal detected")
     finally:
+        if debug_markers is not None:
+            debug_markers.close()
         if "recorder" in locals() and recorder is not None:
             recorder.finalize()
         if env is not None:
