@@ -158,10 +158,7 @@ def capture_annotated_runtime_snapshot(
         name: torch.as_tensor(checkpoint_positions[idx], device=env.device, dtype=torch.float32).reshape(1, 3)
         for idx, name in enumerate(CHECKPOINT_LABELS)
     }
-    left_lower = semantic_keypoints_world.get("garment_left_lower")
-    right_lower = semantic_keypoints_world.get("garment_right_lower")
-    if left_lower is not None and right_lower is not None:
-        semantic_keypoints_world["garment_lower_center"] = (left_lower + right_lower) * 0.5
+    
     checkpoint_positions = torch.stack(
         [semantic_keypoints_world[name].reshape(3) for name in CHECKPOINT_LABELS],
         dim=0,
