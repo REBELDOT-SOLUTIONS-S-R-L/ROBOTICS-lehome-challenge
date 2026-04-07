@@ -187,6 +187,9 @@ class SO101Leader(Device):
     def configure(self) -> None:
         self._bus.disable_torque()
         self._bus.configure_motors()
+        if self._bus.calibration:
+            self._bus.write_calibration(self._bus.calibration)
+            print(f"Applied cached calibration from {self.calibration_path}")
         for motor in self._bus.motors:
             self._bus.write("Operating_Mode", motor, OperatingMode.POSITION.value)
 
