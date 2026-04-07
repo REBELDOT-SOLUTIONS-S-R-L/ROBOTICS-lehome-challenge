@@ -82,6 +82,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             self.garment_rng = np.random.RandomState(cfg.random_seed)
 
         super().__init__(cfg, render_mode, **kwargs)
+        self._disable_gripper_capsule_collisions()
         self._filter_inter_arm_collisions()
 
         # Create garment object AFTER super().__init__() which sets up the scene.
@@ -254,6 +255,51 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 target_sdf_path = Sdf.Path(target_path)
                 if target_sdf_path not in existing_targets:
                     rel.AddTarget(target_sdf_path)
+
+    def _disable_gripper_capsule_collisions(self) -> None:
+        """Disable collisions on capsule prims used only as gripper/jaw visuals."""
+        stage = self.scene.stage
+        robot_root_paths = (
+            "/World/Robot/Left_Robot",
+            "/World/Robot/Right_Robot",
+        )
+        disabled_paths: list[str] = []
+
+        for root_path in robot_root_paths:
+            root_prim = stage.GetPrimAtPath(root_path)
+            if not root_prim.IsValid():
+                logger.warning(
+                    "[Collision Filter] Robot root prim not found while disabling gripper capsules: %s",
+                    root_path,
+                )
+                continue
+
+            stack = [root_prim]
+            while stack:
+                prim = stack.pop()
+                prim_path = prim.GetPath().pathString
+                normalized_path = prim_path.lower()
+                if (
+                    prim.GetTypeName() == "Capsule"
+                    and ("gripper" in normalized_path or "jaw" in normalized_path)
+                ):
+                    collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+                    collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                    if not collision_enabled_attr.IsValid():
+                        collision_enabled_attr = collision_api.CreateCollisionEnabledAttr()
+                    collision_enabled_attr.Set(False)
+                    disabled_paths.append(prim_path)
+                stack.extend(reversed(list(prim.GetChildren())))
+
+        if disabled_paths:
+            logger.info(
+                "[Collision Filter] Disabled collisions on %d gripper/jaw capsule prims.",
+                len(disabled_paths),
+            )
+        else:
+            logger.warning(
+                "[Collision Filter] No gripper/jaw capsule prims were found to disable collisions."
+            )
 
     def _filter_inter_arm_collisions(self) -> None:
         """Disable collisions between left and right robot rigid bodies."""

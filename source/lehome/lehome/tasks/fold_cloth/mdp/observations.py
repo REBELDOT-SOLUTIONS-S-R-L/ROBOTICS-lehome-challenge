@@ -28,6 +28,7 @@ _DEFAULT_GRIPPER_JOINT_IDX = 5
 _DEFAULT_GRIPPER_CLOSE_THRESHOLD = 0.35
 _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M = 0.05
 _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
+_DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M = 0.53
 _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M = 0.12
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
 
@@ -44,6 +45,7 @@ class FoldClothSubtaskObservationContext:
     arm_at_rest_by_arm: dict[str, torch.Tensor]
     grasp_eef_to_keypoint_threshold_m: float
     middle_to_lower_threshold_m: float
+    middle_to_lower_middle_keypoint_max_z_m: float
     lower_to_upper_threshold_m: float
     fold_success: torch.Tensor | None = None
 
@@ -287,6 +289,11 @@ def build_subtask_observation_context(
             "subtask_middle_to_lower_threshold_m",
             _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
         ),
+        middle_to_lower_middle_keypoint_max_z_m=_cfg_float(
+            env,
+            "subtask_middle_to_lower_middle_keypoint_max_z_m",
+            _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
+        ),
         lower_to_upper_threshold_m=_cfg_float(
             env,
             "subtask_lower_to_upper_threshold_m",
@@ -306,6 +313,16 @@ def _context_keypoint_pair_distance(
     if pos_a is None or pos_b is None:
         return _context_full_float_column(context, float("inf"))
     return torch.linalg.norm(pos_a - pos_b, dim=-1, keepdim=True)
+
+
+def _context_keypoint_z(
+    context: FoldClothSubtaskObservationContext,
+    checkpoint_name: str,
+) -> torch.Tensor:
+    kp_pos = context.semantic_keypoints_world.get(checkpoint_name)
+    if kp_pos is None:
+        return _context_full_float_column(context, float("inf"))
+    return kp_pos[..., 2:3]
 
 
 def _context_eef_to_keypoint_distance(
@@ -340,21 +357,19 @@ def get_subtask_signal_observation_from_context(
         return (
             ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
         ) & (
-            _context_keypoint_pair_distance(
+            _context_keypoint_z(
                 context,
                 "garment_left_middle",
-                "garment_left_lower",
-            ) <= context.middle_to_lower_threshold_m
+            ) < context.middle_to_lower_middle_keypoint_max_z_m
         )
     if signal_name == "right_middle_to_lower":
         return (
             ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
         ) & (
-            _context_keypoint_pair_distance(
+            _context_keypoint_z(
                 context,
                 "garment_right_middle",
-                "garment_right_lower",
-            ) <= context.middle_to_lower_threshold_m
+            ) < context.middle_to_lower_middle_keypoint_max_z_m
         )
     if signal_name == "grasp_left_lower":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
@@ -554,34 +569,32 @@ def grasp_right_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = Non
 
 
 def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    threshold = _cfg_float(
+    threshold_z = _cfg_float(
         env,
-        "subtask_middle_to_lower_threshold_m",
-        _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
+        "subtask_middle_to_lower_middle_keypoint_max_z_m",
+        _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
     )
+    _, num_envs = _resolve_env_ids(env, env_ids)
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    if semantic_points is None or "garment_left_middle" not in semantic_points:
+        return _false_bool_column(env, num_envs)
     return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
-        keypoint_pair_distance(
-            env,
-            "garment_left_middle",
-            "garment_left_lower",
-            env_ids=env_ids,
-        ) <= threshold
+        semantic_points["garment_left_middle"][..., 2:3] < threshold_z
     )
 
 
 def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    threshold = _cfg_float(
+    threshold_z = _cfg_float(
         env,
-        "subtask_middle_to_lower_threshold_m",
-        _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
+        "subtask_middle_to_lower_middle_keypoint_max_z_m",
+        _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
     )
+    _, num_envs = _resolve_env_ids(env, env_ids)
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    if semantic_points is None or "garment_right_middle" not in semantic_points:
+        return _false_bool_column(env, num_envs)
     return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
-        keypoint_pair_distance(
-            env,
-            "garment_right_middle",
-            "garment_right_lower",
-            env_ids=env_ids,
-        ) <= threshold
+        semantic_points["garment_right_middle"][..., 2:3] < threshold_z
     )
 
 

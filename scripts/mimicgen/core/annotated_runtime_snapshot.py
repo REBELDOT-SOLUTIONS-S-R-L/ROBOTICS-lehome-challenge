@@ -225,6 +225,11 @@ def capture_annotated_runtime_snapshot(
             "subtask_middle_to_lower_threshold_m",
             0.10,
         ),
+        middle_to_lower_middle_keypoint_max_z_m=_cfg_float(
+            env,
+            "subtask_middle_to_lower_middle_keypoint_max_z_m",
+            0.53,
+        ),
         lower_to_upper_threshold_m=_cfg_float(
             env,
             "subtask_lower_to_upper_threshold_m",

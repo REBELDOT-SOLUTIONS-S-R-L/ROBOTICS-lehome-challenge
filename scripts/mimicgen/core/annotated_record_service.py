@@ -214,18 +214,13 @@ def _describe_head_status(
         )
 
     if head_signal in {"left_middle_to_lower", "right_middle_to_lower"}:
-        point_a = "garment_left_middle" if head_signal == "left_middle_to_lower" else "garment_right_middle"
-        point_b = "garment_left_lower" if head_signal == "left_middle_to_lower" else "garment_right_lower"
-        distance = torch.linalg.norm(
-            context.semantic_keypoints_world[point_a] - context.semantic_keypoints_world[point_b],
-            dim=-1,
-            keepdim=True,
-        )
-        distance_limit_cm = context.middle_to_lower_threshold_m * 100.0
+        point_name = "garment_left_middle" if head_signal == "left_middle_to_lower" else "garment_right_middle"
+        middle_z = context.semantic_keypoints_world[point_name][..., 2:3]
+        z_limit_cm = context.middle_to_lower_middle_keypoint_max_z_m * 100.0
         return (
             f"{arm_label}: waiting to {signal_label}. "
             f"Gripper open: {'no' if _bool_text(context.gripper_closed_by_arm[arm_name]) == 'yes' else 'yes'}. "
-            f"Keypoint distance: {_cm_text(distance)} (need <= {distance_limit_cm:.1f} cm). "
+            f"Middle keypoint z: {_cm_text(middle_z)} (need < {z_limit_cm:.1f} cm). "
             f"Dwell: {dwell}/{required}."
         )
 
@@ -313,6 +308,49 @@ def _current_return_home_arms(annotator: OnlineAnnotationState) -> tuple[str, ..
         for arm_name, signal_name in annotator.current_signal_heads().items()
         if signal_name in _RETURN_HOME_SIGNALS
     )
+
+
+def _log_return_home_success_if_both_arms_at_rest(
+    env: DirectRLEnv,
+    annotator: OnlineAnnotationState,
+    snapshot,
+    episode_index: int,
+    episode_step_count: int,
+    already_logged: bool,
+) -> bool:
+    """Emit one fold-success snapshot once both arms are at rest during return-home."""
+    if already_logged:
+        return True
+
+    current_heads = annotator.current_signal_heads()
+    if current_heads.get("left_arm") != "left_return_home":
+        return False
+    if current_heads.get("right_arm") != "right_return_home":
+        return False
+
+    context = snapshot.observation_context
+    left_at_rest = bool(
+        torch.as_tensor(context.arm_at_rest_by_arm.get("left_arm", False)).reshape(-1)[0].item()
+    )
+    right_at_rest = bool(
+        torch.as_tensor(context.arm_at_rest_by_arm.get("right_arm", False)).reshape(-1)[0].item()
+    )
+    if not (left_at_rest and right_at_rest):
+        return False
+
+    logger.info(
+        "[Annotated Recording][Episode %d][step %d] Both arms are at rest in the final subtask. "
+        "Running fold success check once.",
+        episode_index,
+        episode_step_count,
+    )
+    log_success_result(
+        env,
+        episode_index=episode_index,
+        step_in_episode=episode_step_count,
+        context="both_arms_at_rest_in_return_home",
+    )
+    return True
 
 
 def _reset_environment_for_next_attempt(
@@ -466,6 +504,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                 flags["remove"] = False
                 annotator.reset()
                 annotation_complete_logged = False
+                return_home_success_logged = False
                 garment_name, scale = get_env_garment_metadata(env)
                 if cached_object_initial_pose is None:
                     cached_object_initial_pose = _safe_get_all_pose(env)
@@ -511,7 +550,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
 
                     if flags["success"]:
                         if annotator.is_complete():
-                            if args.log_success:
+                            if args.log_success and not return_home_success_logged:
                                 log_success_result(
                                     env,
                                     episode_index=episode_index,
@@ -525,7 +564,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                                 f"Annotated episode saved, progress: {episode_index}/{int(args.num_episode)}"
                             )
                         else:
-                            if args.log_success:
+                            if args.log_success and not return_home_success_logged:
                                 log_success_result(
                                     env,
                                     episode_index=episode_index,
@@ -599,14 +638,23 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                             ", ".join(_format_signal_label(signal_name) for signal_name in newly_latched),
                         )
                         _log_annotation_progress(annotator, episode_index, episode_step_count)
+                    return_home_success_logged = _log_return_home_success_if_both_arms_at_rest(
+                        env,
+                        annotator,
+                        snapshot,
+                        episode_index,
+                        episode_step_count,
+                        return_home_success_logged,
+                    )
 
                     if annotator.is_complete() and not annotation_complete_logged:
-                        log_success_result(
-                            env,
-                            episode_index=episode_index,
-                            step_in_episode=episode_step_count,
-                            context="annotation_complete",
-                        )
+                        if not return_home_success_logged:
+                            log_success_result(
+                                env,
+                                episode_index=episode_index,
+                                step_in_episode=episode_step_count,
+                                context="annotation_complete",
+                            )
                         logger.info(
                             "[Annotated Recording] All subtask queues completed. "
                             "Press N to save the episode or D to re-record."
@@ -630,7 +678,7 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     terminated, truncated = env._get_dones()
                     done = bool(torch.any(terminated).item() or torch.any(truncated).item())
                     if done:
-                        if args.log_success:
+                        if args.log_success and not return_home_success_logged:
                             log_success_result(
                                 env,
                                 episode_index=episode_index,

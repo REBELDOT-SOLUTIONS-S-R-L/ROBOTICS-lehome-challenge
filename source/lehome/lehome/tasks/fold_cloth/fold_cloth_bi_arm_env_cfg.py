@@ -294,6 +294,7 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     subtask_grasp_eef_to_keypoint_threshold_m: float = 0.15
     subtask_gripper_close_threshold: float = 0.35
     subtask_middle_to_lower_threshold_m: float = 0.10
+    subtask_middle_to_lower_middle_keypoint_max_z_m: float = 0.60
     subtask_lower_to_upper_threshold_m: float = 0.12
     subtask_signal_min_consecutive_steps: int = 3
     return_home_min_consecutive_steps: int = 10
