@@ -50,7 +50,7 @@ def normalize_manual_subtask_signal_name(signal_name: str | None, eef_name: str,
     return f"{eef_name}_subtask_{subtask_index}_complete"
 
 
-def stabilize_garment_after_reset_for_annotation(env: ManagerBasedRLMimicEnv, num_steps: int = 20) -> None:
+def stabilize_garment_after_reset_for_annotation(env: ManagerBasedRLMimicEnv, num_steps: int = 60) -> None:
     """Run a short physics-only settle phase without adding recorder entries."""
     if num_steps <= 0:
         return

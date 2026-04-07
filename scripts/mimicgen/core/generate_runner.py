@@ -73,6 +73,8 @@ DUAL_ARM_SETTLE_ACTION = np.concatenate(
     ]
 ).astype(np.float32)
 
+MIN_GENERATION_GARMENT_SETTLE_STEPS = 60
+
 
 class PreStepCameraObservationsRecorder(RecorderTerm):
     """Record camera observations into the generated HDF5 obs group."""
@@ -154,6 +156,18 @@ def _stabilize_after_initial_reset(
     batched_action = hold_action.reshape(1, -1).repeat(env.num_envs, 1)
     for _ in range(int(num_steps)):
         env.step(batched_action)
+
+
+def _resolve_generation_garment_settle_steps(requested_steps: int) -> int:
+    """Clamp generation settle steps to a cloth-safe minimum."""
+    requested_steps = int(requested_steps)
+    effective_steps = max(requested_steps, MIN_GENERATION_GARMENT_SETTLE_STEPS)
+    if effective_steps != requested_steps:
+        print(
+            "Increasing garment_settle_steps from "
+            f"{requested_steps} to {effective_steps} for generation cloth stability."
+        )
+    return effective_steps
 
 
 def _validate_source_dataset_contract(
@@ -412,11 +426,12 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
             env.initialize_obs()
         except Exception as exc:
             print(f"Warning: initialize_obs failed during generation reset: {exc}")
+    garment_settle_steps = _resolve_generation_garment_settle_steps(parsed_args.garment_settle_steps)
     post_reset_hold_action = _build_post_reset_hold_action(env)
     _stabilize_after_initial_reset(
         env,
         hold_action=post_reset_hold_action,
-        num_steps=int(parsed_args.garment_settle_steps),
+        num_steps=garment_settle_steps,
     )
 
     if bool(parsed_args.strict_preflight):
@@ -473,7 +488,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         align_object_pose_mode=object_alignment_mode,
         pause_subtask=parsed_args.pause_subtask,
         log_success=bool(parsed_args.log_success),
-        post_reset_settle_steps=int(parsed_args.garment_settle_steps),
+        post_reset_settle_steps=garment_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
     )
 

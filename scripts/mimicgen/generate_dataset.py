@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     core_group.add_argument(
         "--garment_settle_steps",
         type=int,
-        default=20,
+        default=60,
         help=(
             "Number of post-reset hold-action steps used to let garment cloth settle before "
             "Mimic samples runtime object poses."
