@@ -343,6 +343,7 @@ def get_subtask_signal_observation_from_context(
             _context_keypoint_pair_distance(
                 context,
                 "garment_left_middle",
+                "garment_left_lower",
             ) <= context.middle_to_lower_threshold_m
         )
     if signal_name == "right_middle_to_lower":
@@ -352,6 +353,7 @@ def get_subtask_signal_observation_from_context(
             _context_keypoint_pair_distance(
                 context,
                 "garment_right_middle",
+                "garment_right_lower",
             ) <= context.middle_to_lower_threshold_m
         )
     if signal_name == "grasp_left_lower":
@@ -557,11 +559,11 @@ def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
-    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
     return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
         keypoint_pair_distance(
             env,
             "garment_left_middle",
+            "garment_left_lower",
             env_ids=env_ids,
         ) <= threshold
     )
@@ -573,11 +575,11 @@ def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = 
         "subtask_middle_to_lower_threshold_m",
         _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
     )
-    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
     return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
         keypoint_pair_distance(
             env,
             "garment_right_middle",
+            "garment_right_lower",
             env_ids=env_ids,
         ) <= threshold
     )
