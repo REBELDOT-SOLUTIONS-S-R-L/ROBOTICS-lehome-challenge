@@ -267,6 +267,19 @@ def setup_record_annotated_parser(
         help="Path of the particle configuration.",
     )
 
+    pose_group = parser.add_argument_group("pose sequence")
+    pose_group.add_argument(
+        "--pose_sequence",
+        type=int,
+        default=None,
+        help=(
+            "Number of deterministic pose samples using a Halton "
+            "low-discrepancy sequence over (pos_x, pos_y, rot_x, rot_y). "
+            "Each episode uses a unique pose from the sequence. "
+            "Advances only on successful saves. Overrides --num_episode."
+        ),
+    )
+
     runtime_group = parser.add_argument_group("runtime and debugging")
     runtime_group.add_argument(
         "--use_random_seed",

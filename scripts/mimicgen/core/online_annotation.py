@@ -9,6 +9,7 @@ import torch
 
 from lehome.tasks.fold_cloth.mdp.observations import (
     FoldClothSubtaskObservationContext,
+    build_subtask_observation_context,
     get_subtask_signal_observation,
     get_subtask_signal_observation_from_context,
 )
@@ -150,6 +151,48 @@ class OnlineAnnotationState:
             if signal_name is not None
         )
 
+    def _advance_joint_return_home_from_context(
+        self,
+        context: FoldClothSubtaskObservationContext,
+    ) -> list[str] | None:
+        left_signal = self._head_signal_for_arm("left_arm")
+        right_signal = self._head_signal_for_arm("right_arm")
+        if left_signal not in _RETURN_HOME_SIGNALS and right_signal not in _RETURN_HOME_SIGNALS:
+            return None
+
+        if left_signal != "left_return_home" or right_signal != "right_return_home":
+            if left_signal in _RETURN_HOME_SIGNALS:
+                self.consecutive_true_counts["left_arm"] = 0
+            if right_signal in _RETURN_HOME_SIGNALS:
+                self.consecutive_true_counts["right_arm"] = 0
+            return []
+
+        fold_success = bool(
+            torch.as_tensor(context.fold_success).reshape(-1)[0].item()
+        ) if context.fold_success is not None else False
+        left_at_rest = bool(
+            torch.as_tensor(context.arm_at_rest_by_arm.get("left_arm", False)).reshape(-1)[0].item()
+        )
+        right_at_rest = bool(
+            torch.as_tensor(context.arm_at_rest_by_arm.get("right_arm", False)).reshape(-1)[0].item()
+        )
+        if not (fold_success and left_at_rest and right_at_rest):
+            self.consecutive_true_counts["left_arm"] = 0
+            self.consecutive_true_counts["right_arm"] = 0
+            return []
+
+        newly_latched = []
+        for arm_name, signal_name in (
+            ("left_arm", "left_return_home"),
+            ("right_arm", "right_return_home"),
+        ):
+            self.latched_signals[signal_name] = True
+            self.arm_queue_indices[arm_name] += 1
+            self.consecutive_true_counts[arm_name] = 0
+            self.grasp_open_ready_by_arm[arm_name] = False
+            newly_latched.append(signal_name)
+        return newly_latched
+
     def _advance_from_signal_reader(self, signal_reader) -> list[str]:
         newly_latched: list[str] = []
         for arm_name in self.arm_queues:
@@ -178,8 +221,12 @@ class OnlineAnnotationState:
 
     def advance(self, env: Any) -> list[str]:
         """Advance one step of online annotation and return newly latched signals."""
-        return self._advance_from_signal_reader(
-            lambda signal_name: get_subtask_signal_observation(env, signal_name, env_ids=[0])
+        return self.advance_from_context(
+            build_subtask_observation_context(
+                env,
+                env_ids=[0],
+                include_fold_success=self.needs_fold_success(),
+            )
         )
 
     def advance_from_context(
@@ -187,6 +234,10 @@ class OnlineAnnotationState:
         context: FoldClothSubtaskObservationContext,
     ) -> list[str]:
         """Advance one step of online annotation using precomputed predicate inputs."""
+        joint_return_home_latched = self._advance_joint_return_home_from_context(context)
+        if joint_return_home_latched is not None:
+            return joint_return_home_latched
+
         newly_latched: list[str] = []
         for arm_name in self.arm_queues:
             signal_name = self._head_signal_for_arm(arm_name)

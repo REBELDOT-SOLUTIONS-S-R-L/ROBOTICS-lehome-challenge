@@ -42,6 +42,128 @@ from .teleop_runtime import (
 
 logger = get_logger(__name__)
 
+
+class PoseSequence:
+    """Deterministic Halton low-discrepancy sequence over 4D pose space.
+
+    Generates *n* points in (pos_x, pos_y, rot_x, rot_y) using Halton
+    sequences with prime bases 2, 3, 5, 7.  Position Z and rotation Z
+    are read once from the garment config and held fixed.
+    """
+
+    _BASES = (2, 3, 5, 7)
+
+    def __init__(self, n: int, pos_range: list[float], rot_range: list[float]) -> None:
+        if n < 1:
+            raise ValueError(f"--pose_sequence must be >= 1, got {n}")
+        self.n = n
+        self._pos_min = (pos_range[0], pos_range[1])
+        self._pos_max = (pos_range[3], pos_range[4])
+        self._pos_z = pos_range[2]
+        self._rot_min = (rot_range[0], rot_range[1])
+        self._rot_max = (rot_range[3], rot_range[4])
+        self._rot_z = rot_range[2]
+
+        self._sequence: list[tuple[list[float], list[float]]] = []
+        for i in range(n):
+            h = self._halton_point(i + 1)  # skip index 0 (all-zeros corner)
+            pos_x = round(self._pos_min[0] + h[0] * (self._pos_max[0] - self._pos_min[0]), 4)
+            pos_y = round(self._pos_min[1] + h[1] * (self._pos_max[1] - self._pos_min[1]), 4)
+            rot_x = round(self._rot_min[0] + h[2] * (self._rot_max[0] - self._rot_min[0]), 1)
+            rot_y = round(self._rot_min[1] + h[3] * (self._rot_max[1] - self._rot_min[1]), 1)
+            self._sequence.append(
+                ([pos_x, pos_y, self._pos_z], [rot_x, rot_y, self._rot_z])
+            )
+        self._index = 0
+
+    @staticmethod
+    def _halton_value(index: int, base: int) -> float:
+        """Compute the *index*-th element of the van der Corput sequence in *base*."""
+        result = 0.0
+        f = 1.0
+        i = index
+        while i > 0:
+            f /= base
+            result += f * (i % base)
+            i //= base
+        return result
+
+    def _halton_point(self, index: int) -> tuple[float, ...]:
+        """Return a 4D point in [0,1]^4 for the given 1-based index."""
+        return tuple(self._halton_value(index, b) for b in self._BASES)
+
+    @property
+    def total(self) -> int:
+        return self.n
+
+    @property
+    def index(self) -> int:
+        return self._index
+
+    @property
+    def exhausted(self) -> bool:
+        return self._index >= self.n
+
+    def current(self) -> tuple[list[float], list[float]]:
+        """Return ``(pos, ori_euler_degrees)`` for the current sequence position."""
+        return self._sequence[self._index]
+
+    def advance(self) -> None:
+        """Move to the next sequence position (call after a successful save)."""
+        self._index += 1
+
+    def log_status(self) -> None:
+        if self.exhausted:
+            logger.info("[PoseSequence] All %d poses exhausted.", self.n)
+            return
+        pos, ori = self._sequence[self._index]
+        logger.info(
+            "[PoseSequence] Index %d/%d | pos=(%.2f, %.2f) rot=(%.2f, %.2f)",
+            self._index, self.n, pos[0], pos[1], ori[0], ori[1],
+        )
+
+
+def _install_pose_sequence_override(env: DirectRLEnv, seq: PoseSequence) -> None:
+    """Monkey-patch the garment's ``_sample_reset_pose`` to return deterministic poses."""
+    garment_obj = getattr(env, "object", None)
+    if garment_obj is None:
+        raise RuntimeError("Cannot install pose sequence: env has no garment object.")
+
+    def _sequence_sample_reset_pose():
+        pos, ori = seq.current()
+        logger.debug("[PoseSequence] Overriding reset pose to pos=%s ori=%s", pos, ori)
+        return pos, ori
+
+    garment_obj._sample_reset_pose = _sequence_sample_reset_pose
+    logger.info("[PoseSequence] Installed deterministic pose override on garment object.")
+
+
+def _build_pose_sequence(args: argparse.Namespace, env: DirectRLEnv) -> PoseSequence | None:
+    """Build a PoseSequence from CLI args if --pose_sequence is set."""
+    n = getattr(args, "pose_sequence", None)
+    if n is None:
+        return None
+
+    garment_obj = getattr(env, "object", None)
+    if garment_obj is None:
+        raise RuntimeError("Cannot build pose sequence: env has no garment object.")
+
+    pos_range, _ = garment_obj._get_config_value("soft_reset_pos_range", "common")
+    rot_range, _ = garment_obj._get_config_value("soft_reset_rot_range", "common")
+    seq = PoseSequence(int(n), pos_range, rot_range)
+    logger.info("[PoseSequence] Created %d-point Halton sequence (bases 2,3,5,7)", n)
+    logger.info(
+        "[PoseSequence] Pos range: x=[%.2f, %.2f] y=[%.2f, %.2f] z=%.2f (fixed)",
+        pos_range[0], pos_range[3], pos_range[1], pos_range[4], pos_range[2],
+    )
+    logger.info(
+        "[PoseSequence] Rot range: x=[%.2f, %.2f] y=[%.2f, %.2f] z=%.2f (fixed)",
+        rot_range[0], rot_range[3], rot_range[1], rot_range[4], rot_range[2],
+    )
+    _install_pose_sequence_override(env, seq)
+    return seq
+
+
 _SIGNAL_LABELS = {
     "grasp_left_middle": "grasp left middle",
     "grasp_right_middle": "grasp right middle",
@@ -433,6 +555,8 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
         teleop_interface.reset()
         debug_markers = create_debug_markers_if_needed(args)
 
+        pose_seq = _build_pose_sequence(args, env)
+
         recorder = AnnotatedMimicHDF5Recorder(
             file_path=_resolve_output_hdf5_path(getattr(args, "dataset_root", "Datasets/record")),
             env_args=_build_env_args(args),
@@ -476,10 +600,18 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     )
                     cached_object_initial_pose = _safe_get_all_pose(env)
                     logger.info("[Idle Phase] Ready for annotated recording")
+                    if pose_seq is not None:
+                        pose_seq.log_status()
                     initialized = True
                     continue
 
-                if episode_index >= int(args.num_episode):
+                if pose_seq is not None:
+                    if pose_seq.exhausted:
+                        logger.info(
+                            f"[PoseSequence] All {pose_seq.total} poses completed!"
+                        )
+                        break
+                elif episode_index >= int(args.num_episode):
                     logger.info(
                         f"All {int(args.num_episode)} annotated episodes recording completed!"
                     )
@@ -560,9 +692,16 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                             logger.info(f"[Annotated Recording] Saving episode {episode_index}...")
                             recorder.finalize_episode(env)
                             episode_index += 1
+                            if pose_seq is not None:
+                                pose_seq.advance()
+                                total = pose_seq.total
+                            else:
+                                total = int(args.num_episode)
                             logger.info(
-                                f"Annotated episode saved, progress: {episode_index}/{int(args.num_episode)}"
+                                f"Annotated episode saved, progress: {episode_index}/{total}"
                             )
+                            if pose_seq is not None and not pose_seq.exhausted:
+                                pose_seq.log_status()
                         else:
                             if args.log_success and not return_home_success_logged:
                                 log_success_result(
@@ -623,21 +762,6 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         include_fold_success=annotator.needs_fold_success(),
                         rest_pose_arms=_current_return_home_arms(annotator),
                     )
-                    newly_latched = annotator.advance_from_context(snapshot.observation_context)
-                    if newly_latched:
-                        if annotator.needs_fold_success() and snapshot.observation_context.fold_success is None:
-                            snapshot = ensure_return_home_snapshot_fields(
-                                env,
-                                snapshot,
-                                _current_return_home_arms(annotator),
-                            )
-                        logger.info(
-                            "[Annotated Recording][Episode %d][step %d] Latched: %s",
-                            episode_index,
-                            episode_step_count,
-                            ", ".join(_format_signal_label(signal_name) for signal_name in newly_latched),
-                        )
-                        _log_annotation_progress(annotator, episode_index, episode_step_count)
                     return_home_success_logged = _log_return_home_success_if_both_arms_at_rest(
                         env,
                         annotator,
@@ -646,6 +770,21 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                         episode_step_count,
                         return_home_success_logged,
                     )
+                    newly_latched = annotator.advance_from_context(snapshot.observation_context)
+                    if newly_latched:
+                        if annotator.needs_fold_success() and snapshot.observation_context.fold_success is None:
+                            snapshot = ensure_return_home_snapshot_fields(
+                                env,
+                                snapshot,
+                                _current_return_home_arms(annotator),
+                        )
+                        logger.info(
+                            "[Annotated Recording][Episode %d][step %d] Latched: %s",
+                            episode_index,
+                            episode_step_count,
+                            ", ".join(_format_signal_label(signal_name) for signal_name in newly_latched),
+                        )
+                        _log_annotation_progress(annotator, episode_index, episode_step_count)
 
                     if annotator.is_complete() and not annotation_complete_logged:
                         if not return_home_success_logged:
