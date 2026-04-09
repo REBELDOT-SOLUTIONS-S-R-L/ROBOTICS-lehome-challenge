@@ -15,6 +15,7 @@ from ..checkpoint_mappings import (
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
 )
 from lehome.assets.robots.lerobot import (
+    SO101_FOLLOWER_HOME_JOINT_POS,
     SO101_LEFT_ARM_HOME_JOINT_POS,
     SO101_RIGHT_ARM_HOME_JOINT_POS,
 )
@@ -528,11 +529,14 @@ def arm_at_waiting_pos(
     """
     env_ids, num_envs = _resolve_env_ids(env, env_ids)
     arm_name, arm_entity = _get_scene_arm(env, arm)
+    # Waiting pose: shoulder_pan=0 (centered), other joints from follower home.
+    # Only wrist_roll differs per arm.
     normalized = str(arm_name).strip().lower()
+    home = dict(SO101_FOLLOWER_HOME_JOINT_POS)
     if "left" in normalized:
-        home = SO101_LEFT_ARM_HOME_JOINT_POS
+        home["wrist_roll"] = SO101_LEFT_ARM_HOME_JOINT_POS["wrist_roll"]
     else:
-        home = SO101_RIGHT_ARM_HOME_JOINT_POS
+        home["wrist_roll"] = SO101_RIGHT_ARM_HOME_JOINT_POS["wrist_roll"]
     joint_pos = arm_entity.data.joint_pos[env_ids]
     is_near = torch.ones(joint_pos.shape[0], dtype=torch.bool, device=joint_pos.device)
     failing_joints: list[str] = []
