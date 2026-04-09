@@ -514,6 +514,7 @@ def arm_at_rest(
 
 _WAITING_POS_TOLERANCE_RAD = 0.5236  # ~30 degrees
 _WAITING_POS_ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+_WAITING_POS_DEBUG_COUNTER: dict[str, int] = {}
 
 
 def arm_at_waiting_pos(
@@ -534,10 +535,27 @@ def arm_at_waiting_pos(
         home = SO101_RIGHT_ARM_HOME_JOINT_POS
     joint_pos = arm_entity.data.joint_pos[env_ids]
     is_near = torch.ones(joint_pos.shape[0], dtype=torch.bool, device=joint_pos.device)
+    failing_joints: list[str] = []
     for jname in _WAITING_POS_ARM_JOINTS:
         idx = arm_entity.data.joint_names.index(jname)
         target = home[jname]
-        is_near = is_near & (torch.abs(joint_pos[:, idx] - target) < _WAITING_POS_TOLERANCE_RAD)
+        diff = torch.abs(joint_pos[:, idx] - target)
+        joint_ok = diff < _WAITING_POS_TOLERANCE_RAD
+        if not joint_ok.all():
+            failing_joints.append(
+                f"{jname}: cur={joint_pos[0, idx].item():.3f} "
+                f"home={target:.3f} diff={diff[0].item():.3f}"
+            )
+        is_near = is_near & joint_ok
+    # Log every 90 steps (~1 sec at 90Hz) when NOT at waiting pos
+    count_key = str(arm_name)
+    _WAITING_POS_DEBUG_COUNTER[count_key] = _WAITING_POS_DEBUG_COUNTER.get(count_key, 0) + 1
+    if not is_near.all() and _WAITING_POS_DEBUG_COUNTER[count_key] % 90 == 0:
+        import logging
+        logging.getLogger(__name__).info(
+            "[waiting_pos] %s NOT at waiting pos — failing: %s",
+            arm_name, "; ".join(failing_joints),
+        )
     return is_near.reshape(num_envs, 1)
 
 
