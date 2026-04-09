@@ -618,7 +618,14 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                     break
 
                 if not flags["start"]:
-                    input_action = teleop_interface.advance()
+                    try:
+                        input_action = teleop_interface.advance()
+                    except Exception as exc:
+                        logger.error(
+                            f"[Annotated Recording] Error in teleop interface: {exc}",
+                            exc_info=True,
+                        )
+                        input_action = None
                     action = (
                         _get_hold_action(env)
                         if input_action is None

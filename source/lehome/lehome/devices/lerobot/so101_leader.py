@@ -125,7 +125,7 @@ class SO101Leader(Device):
                     self._additional_callbacks["ESCAPE"]()
 
     def get_device_state(self):
-        return self._bus.sync_read("Present_Position")
+        return self._bus.sync_read("Present_Position", num_retry=3)
 
     def input2action(self):
         state = {}
