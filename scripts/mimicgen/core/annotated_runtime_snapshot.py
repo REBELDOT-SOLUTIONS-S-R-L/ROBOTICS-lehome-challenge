@@ -186,7 +186,7 @@ def capture_annotated_runtime_snapshot(
 
     joint_pos: dict[str, torch.Tensor] = {}
 
-    close_threshold = float(getattr(getattr(env, "cfg", None), "subtask_gripper_close_threshold", 0.5))
+    close_threshold = float(getattr(getattr(env, "cfg", None), "subtask_gripper_close_threshold", 0.20))
     gripper_closed_by_arm: dict[str, torch.Tensor] = {}
     arm_at_rest_by_arm: dict[str, torch.Tensor] = {}
     rest_pose_arm_names = set(rest_pose_arms)

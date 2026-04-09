@@ -34,6 +34,7 @@ from lehome.utils.success_checker_chanllege import success_checker_garment_fold
 from lehome.utils.depth_to_pointcloud import generate_pointcloud_from_data
 from lehome.devices.action_process import preprocess_device_action
 from lehome.utils import RobotKinematics, compute_joints_from_ee_pose, mat_to_quat
+from lehome.assets.robots.lerobot import ACTION_NAMES, SO101_FOLLOWER_USD_JOINT_LIMLITS
 from lehome.utils.logger import get_logger
 
 from .checkpoint_mappings import (
@@ -998,6 +999,10 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 if joint_targets is None:
                     joint_targets = current_joints.copy()
                     joint_targets[5] = gripper_val
+                # Clamp to USD joint limits to prevent physics instability at hard stops
+                for j, name in enumerate(ACTION_NAMES[:6]):
+                    lo_deg, hi_deg = SO101_FOLLOWER_USD_JOINT_LIMLITS[name]
+                    joint_targets[j] = np.clip(joint_targets[j], np.radians(lo_deg), np.radians(hi_deg))
                 action[i, action_col_offset:action_col_offset + 6] = torch.as_tensor(
                     joint_targets[:6], device=self.device, dtype=torch.float32
                 )

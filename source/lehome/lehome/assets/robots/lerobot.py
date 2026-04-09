@@ -125,7 +125,7 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
             damping=0.60,
         ),
     },
-    soft_joint_pos_limit_factor=1.0,
+    soft_joint_pos_limit_factor=0.9,
 )
 
 SO101_KINFE_CFG = ArticulationCfg(
@@ -168,7 +168,7 @@ SO101_KINFE_CFG = ArticulationCfg(
             damping=0.60,
         ),
     },
-    soft_joint_pos_limit_factor=1.0,
+    soft_joint_pos_limit_factor=0.9,
 )
 # joint limit written in USD (degree)
 SO101_FOLLOWER_USD_JOINT_LIMLITS = {
