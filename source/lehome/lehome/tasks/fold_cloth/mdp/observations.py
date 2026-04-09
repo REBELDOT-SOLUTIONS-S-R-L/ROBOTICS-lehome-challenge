@@ -14,6 +14,10 @@ from ..checkpoint_mappings import (
     CHECKPOINT_LABELS,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
 )
+from lehome.assets.robots.lerobot import (
+    SO101_LEFT_ARM_HOME_JOINT_POS,
+    SO101_RIGHT_ARM_HOME_JOINT_POS,
+)
 from lehome.utils.robot_utils import is_so101_at_rest_pose
 from lehome.utils.success_checker_chanllege import (
     evaluate_garment_fold_success,
@@ -43,6 +47,7 @@ class FoldClothSubtaskObservationContext:
     eef_world_positions: dict[str, torch.Tensor]
     gripper_closed_by_arm: dict[str, torch.Tensor]
     arm_at_rest_by_arm: dict[str, torch.Tensor]
+    arm_at_waiting_pos_by_arm: dict[str, torch.Tensor]
     grasp_eef_to_keypoint_threshold_m: float
     middle_to_lower_threshold_m: float
     middle_to_lower_middle_keypoint_max_z_m: float
@@ -259,6 +264,10 @@ def build_subtask_observation_context(
         "left_arm": arm_at_rest(env, "left_arm", env_ids=env_ids),
         "right_arm": arm_at_rest(env, "right_arm", env_ids=env_ids),
     }
+    arm_waiting_map = {
+        "left_arm": arm_at_waiting_pos(env, "left_arm", env_ids=env_ids),
+        "right_arm": arm_at_waiting_pos(env, "right_arm", env_ids=env_ids),
+    }
 
     fold_success_column = _normalize_optional_bool_column(
         env,
@@ -279,6 +288,7 @@ def build_subtask_observation_context(
         eef_world_positions=eef_positions,
         gripper_closed_by_arm=gripper_closed_map,
         arm_at_rest_by_arm=arm_rest_map,
+        arm_at_waiting_pos_by_arm=arm_waiting_map,
         grasp_eef_to_keypoint_threshold_m=_cfg_float(
             env,
             "subtask_grasp_eef_to_keypoint_threshold_m",
@@ -402,9 +412,9 @@ def get_subtask_signal_observation_from_context(
             ) <= context.lower_to_upper_threshold_m
         )
     if signal_name == "left_at_waiting_pos":
-        return context.arm_at_rest_by_arm.get("left_arm", _context_false_bool_column(context))
+        return context.arm_at_waiting_pos_by_arm.get("left_arm", _context_false_bool_column(context))
     if signal_name == "right_at_waiting_pos":
-        return context.arm_at_rest_by_arm.get("right_arm", _context_false_bool_column(context))
+        return context.arm_at_waiting_pos_by_arm.get("right_arm", _context_false_bool_column(context))
     if signal_name == "left_return_home":
         fold_success_value = context.fold_success
         if fold_success_value is None:
@@ -500,6 +510,35 @@ def arm_at_rest(
         arm_name=arm_name,
     )
     return at_rest.reshape(num_envs, 1)
+
+
+_WAITING_POS_TOLERANCE_RAD = 0.5236  # ~30 degrees
+_WAITING_POS_ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
+
+
+def arm_at_waiting_pos(
+    env: ManagerBasedEnv,
+    arm: str | SceneEntityCfg,
+    env_ids: Sequence[int] | None = None,
+) -> torch.Tensor:
+    """Return whether the given arm is near the home/waiting pose.
+
+    Uses a wider tolerance than arm_at_rest and ignores the gripper joint.
+    """
+    env_ids, num_envs = _resolve_env_ids(env, env_ids)
+    arm_name, arm_entity = _get_scene_arm(env, arm)
+    normalized = str(arm_name).strip().lower()
+    if "left" in normalized:
+        home = SO101_LEFT_ARM_HOME_JOINT_POS
+    else:
+        home = SO101_RIGHT_ARM_HOME_JOINT_POS
+    joint_pos = arm_entity.data.joint_pos[env_ids]
+    is_near = torch.ones(joint_pos.shape[0], dtype=torch.bool, device=joint_pos.device)
+    for jname in _WAITING_POS_ARM_JOINTS:
+        idx = arm_entity.data.joint_names.index(jname)
+        target = home[jname]
+        is_near = is_near & (torch.abs(joint_pos[:, idx] - target) < _WAITING_POS_TOLERANCE_RAD)
+    return is_near.reshape(num_envs, 1)
 
 
 def fold_success(
@@ -657,11 +696,11 @@ def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
 
 
 def left_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    return arm_at_rest(env, "left_arm", env_ids=env_ids)
+    return arm_at_waiting_pos(env, "left_arm", env_ids=env_ids)
 
 
 def right_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    return arm_at_rest(env, "right_arm", env_ids=env_ids)
+    return arm_at_waiting_pos(env, "right_arm", env_ids=env_ids)
 
 
 def left_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -731,6 +770,7 @@ __all__ = [
     "grasp_left_middle",
     "grasp_right_lower",
     "grasp_right_middle",
+    "arm_at_waiting_pos",
     "gripper_closed",
     "keypoint_pair_distance",
     "left_at_waiting_pos",

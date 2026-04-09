@@ -367,7 +367,7 @@ def _describe_head_status(
     if head_signal in {"left_at_waiting_pos", "right_at_waiting_pos"}:
         return (
             f"{arm_label}: waiting to {signal_label}. "
-            f"Arm at rest: {_bool_text(context.arm_at_rest_by_arm[arm_name])}. "
+            f"At waiting pos: {_bool_text(context.arm_at_waiting_pos_by_arm[arm_name])}. "
             f"Dwell: {dwell}/{required}."
         )
 
