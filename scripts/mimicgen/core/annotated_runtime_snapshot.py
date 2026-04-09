@@ -11,6 +11,7 @@ from lehome.assets.robots.lerobot import get_so101_rest_pose_range
 from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS
 from lehome.tasks.fold_cloth.mdp.observations import (
     FoldClothSubtaskObservationContext,
+    arm_at_waiting_pos as _arm_at_waiting_pos,
     fold_success as fold_success_observation,
 )
 
@@ -235,6 +236,10 @@ def capture_annotated_runtime_snapshot(
         eef_world_positions=eef_world_positions,
         gripper_closed_by_arm=gripper_closed_by_arm,
         arm_at_rest_by_arm=arm_at_rest_by_arm,
+        arm_at_waiting_pos_by_arm={
+            arm_name: _arm_at_waiting_pos(env, arm_name, env_ids=[0])
+            for arm_name in ("left_arm", "right_arm")
+        },
         grasp_eef_to_keypoint_threshold_m=_cfg_float(
             env,
             "subtask_grasp_eef_to_keypoint_threshold_m",
