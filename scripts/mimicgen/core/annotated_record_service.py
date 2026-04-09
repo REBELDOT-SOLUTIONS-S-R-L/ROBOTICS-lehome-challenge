@@ -169,6 +169,8 @@ _SIGNAL_LABELS = {
     "grasp_right_middle": "grasp right middle",
     "left_middle_to_lower": "move left middle to lower",
     "right_middle_to_lower": "move right middle to lower",
+    "left_at_waiting_pos": "left arm to waiting position",
+    "right_at_waiting_pos": "right arm to waiting position",
     "grasp_left_lower": "grasp left lower",
     "grasp_right_lower": "grasp right lower",
     "left_lower_to_upper": "move left lower to upper",
@@ -359,6 +361,13 @@ def _describe_head_status(
             f"{arm_label}: waiting to {signal_label}. "
             f"Gripper open: {'no' if _bool_text(context.gripper_closed_by_arm[arm_name]) == 'yes' else 'yes'}. "
             f"Keypoint distance: {_cm_text(distance)} (need <= {distance_limit_cm:.1f} cm). "
+            f"Dwell: {dwell}/{required}."
+        )
+
+    if head_signal in {"left_at_waiting_pos", "right_at_waiting_pos"}:
+        return (
+            f"{arm_label}: waiting to {signal_label}. "
+            f"Arm at rest: {_bool_text(context.arm_at_rest_by_arm[arm_name])}. "
             f"Dwell: {dwell}/{required}."
         )
 

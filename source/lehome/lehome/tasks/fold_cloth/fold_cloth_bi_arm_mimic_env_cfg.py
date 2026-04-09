@@ -127,11 +127,27 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
                 description="Left arm brings left middle keypoint to left lower keypoint",
+                next_subtask_description="Move left arm to waiting position",
+            )
+        )
+
+        # Subtask 2: Move left arm to waiting position (home pose)
+        left_subtask_configs.append(
+            SubTaskConfig(
+                object_ref=None,
+                subtask_term_signal="left_at_waiting_pos",
+                subtask_term_offset_range=(0, 0),
+                selection_strategy="random",
+                action_noise=0.0,
+                num_interpolation_steps=8,
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Left arm moves to waiting position",
                 next_subtask_description="Re-grasp left lower keypoint",
             )
         )
 
-        # Subtask 2: Re-grasp left lower keypoint
+        # Subtask 3: Re-grasp left lower keypoint
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_lower",
@@ -148,7 +164,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 3: Bring left lower keypoint to left upper keypoint
+        # Subtask 4: Bring left lower keypoint to left upper keypoint
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_upper",
@@ -165,7 +181,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 4: Return left arm to home position
+        # Subtask 5: Return left arm to home position
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -217,11 +233,27 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_fixed_steps=0,
                 apply_noise_during_interpolation=False,
                 description="Right arm brings right middle keypoint to right lower keypoint",
+                next_subtask_description="Move right arm to waiting position",
+            )
+        )
+
+        # Subtask 2: Move right arm to waiting position (home pose)
+        right_subtask_configs.append(
+            SubTaskConfig(
+                object_ref=None,
+                subtask_term_signal="right_at_waiting_pos",
+                subtask_term_offset_range=(0, 0),
+                selection_strategy="random",
+                action_noise=0.0,
+                num_interpolation_steps=8,
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Right arm moves to waiting position",
                 next_subtask_description="Re-grasp right lower keypoint",
             )
         )
 
-        # Subtask 2: Re-grasp right lower keypoint
+        # Subtask 3: Re-grasp right lower keypoint
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_lower",
@@ -238,7 +270,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 3: Bring right lower keypoint to right upper keypoint
+        # Subtask 4: Bring right lower keypoint to right upper keypoint
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_upper",
@@ -255,7 +287,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 4: Return right arm to home position
+        # Subtask 5: Return right arm to home position
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -275,29 +307,33 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # -----------------------------------------------------------------
         # Arm synchronization constraints
         # -----------------------------------------------------------------
-        # Both arms must finish subtask 1 (middle_to_lower) before either
-        # starts subtask 2 (grasp_lower).  Both must finish subtask 2
-        # before either starts subtask 3 (lower_to_upper).
-        # Each sync point needs two SEQUENTIAL constraints (one per direction).
+        # Subtask numbering: 0=grasp_middle, 1=middle_to_lower,
+        # 2=move_to_waiting_pos, 3=grasp_lower, 4=lower_to_upper,
+        # 5=return_home.
+        #
+        # Sync point 1: Both arms must finish subtask 2 (waiting_pos)
+        # before either starts subtask 3 (grasp_lower).
+        # Sync point 2: Both arms must finish subtask 4 (lower_to_upper)
+        # before either starts subtask 5 (return_home).
         self.task_constraint_configs = [
-            # Sync before subtask 2: left_arm[1] must finish before right_arm[2] starts
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 1), ("right_arm", 2)],
-                constraint_type=SubTaskConstraintType.SEQUENTIAL,
-            ),
-            # Sync before subtask 2: right_arm[1] must finish before left_arm[2] starts
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("right_arm", 1), ("left_arm", 2)],
-                constraint_type=SubTaskConstraintType.SEQUENTIAL,
-            ),
-            # Sync before subtask 3: left_arm[2] must finish before right_arm[3] starts
+            # Sync before subtask 3: left_arm[2] must finish before right_arm[3]
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 3)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
-            # Sync before subtask 3: right_arm[2] must finish before left_arm[3] starts
+            # Sync before subtask 3: right_arm[2] must finish before left_arm[3]
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("right_arm", 2), ("left_arm", 3)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 5: left_arm[4] must finish before right_arm[5]
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 5)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 5: right_arm[4] must finish before left_arm[5]
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("right_arm", 4), ("left_arm", 5)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
         ]

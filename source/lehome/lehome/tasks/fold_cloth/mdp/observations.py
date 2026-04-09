@@ -401,6 +401,10 @@ def get_subtask_signal_observation_from_context(
                 "garment_right_upper",
             ) <= context.lower_to_upper_threshold_m
         )
+    if signal_name == "left_at_waiting_pos":
+        return context.arm_at_rest_by_arm.get("left_arm", _context_false_bool_column(context))
+    if signal_name == "right_at_waiting_pos":
+        return context.arm_at_rest_by_arm.get("right_arm", _context_false_bool_column(context))
     if signal_name == "left_return_home":
         fold_success_value = context.fold_success
         if fold_success_value is None:
@@ -652,6 +656,14 @@ def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
     )
 
 
+def left_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return arm_at_rest(env, "left_arm", env_ids=env_ids)
+
+
+def right_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return arm_at_rest(env, "right_arm", env_ids=env_ids)
+
+
 def left_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     return fold_success(env, env_ids=env_ids) & arm_at_rest(env, "left_arm", env_ids=env_ids)
 
@@ -665,6 +677,8 @@ SUBTASK_SIGNAL_OBSERVATION_FNS = {
     "grasp_right_middle": grasp_right_middle,
     "left_middle_to_lower": left_middle_to_lower,
     "right_middle_to_lower": right_middle_to_lower,
+    "left_at_waiting_pos": left_at_waiting_pos,
+    "right_at_waiting_pos": right_at_waiting_pos,
     "grasp_left_lower": grasp_left_lower,
     "grasp_right_lower": grasp_right_lower,
     "left_lower_to_upper": left_lower_to_upper,
@@ -719,9 +733,11 @@ __all__ = [
     "grasp_right_middle",
     "gripper_closed",
     "keypoint_pair_distance",
+    "left_at_waiting_pos",
     "left_lower_to_upper",
     "left_middle_to_lower",
     "left_return_home",
+    "right_at_waiting_pos",
     "right_lower_to_upper",
     "right_middle_to_lower",
     "right_return_home",
