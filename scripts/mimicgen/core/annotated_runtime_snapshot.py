@@ -131,6 +131,15 @@ def _extract_gripper_actions(reference_action: Any, device: torch.device | str) 
     }
 
 
+def _effective_gripper_closed(
+    actual_closed: torch.Tensor,
+    commanded_closed: torch.Tensor,
+) -> torch.Tensor:
+    # For annotation, an explicit open command should count as released even if
+    # the simulated gripper joint lags behind for a few frames.
+    return actual_closed & commanded_closed
+
+
 def capture_annotated_runtime_snapshot(
     env: Any,
     reference_action: torch.Tensor,
@@ -194,8 +203,19 @@ def capture_annotated_runtime_snapshot(
         arm = env.scene[arm_name]
         joint_pos[arm_name] = _slice_joint_tensor(arm.data.joint_pos)
         gripper_joint_idx = _get_gripper_joint_index(arm)
-        gripper_closed_by_arm[arm_name] = (
+        actual_closed = (
             arm.data.joint_pos[:1, gripper_joint_idx : gripper_joint_idx + 1] < close_threshold
+        )
+        commanded_closed = (
+            gripper_actions.get(
+                arm_name,
+                torch.zeros((1, 1), device=env.device, dtype=torch.float32),
+            )
+            < close_threshold
+        )
+        gripper_closed_by_arm[arm_name] = _effective_gripper_closed(
+            actual_closed,
+            commanded_closed,
         )
         if arm_name in rest_pose_arm_names:
             arm_at_rest_by_arm[arm_name] = _is_so101_at_rest_pose_fast(
