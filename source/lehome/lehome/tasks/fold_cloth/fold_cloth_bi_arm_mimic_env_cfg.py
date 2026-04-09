@@ -21,6 +21,8 @@ from __future__ import annotations
 from isaaclab.envs.mimic_env_cfg import (
     MimicEnvCfg,
     SubTaskConfig,
+    SubTaskConstraintConfig,
+    SubTaskConstraintType,
 )
 from isaaclab.managers.recorder_manager import RecorderManagerBaseCfg, RecorderTermCfg
 from isaaclab.utils import configclass
@@ -82,7 +84,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         self.datagen_config.generation_num_trials = 10
         # Keep generation deterministic/stable by default.
         self.datagen_config.generation_select_src_per_subtask = True
-        self.datagen_config.generation_select_src_per_arm = False
+        self.datagen_config.generation_select_src_per_arm = True
         self.datagen_config.generation_transform_first_robot_pose = False
         self.datagen_config.generation_interpolate_from_last_target_pose = True
         # Keep generated waypoints object-relative where supported by the env.
@@ -270,5 +272,32 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
         self.subtask_configs["right_arm"] = right_subtask_configs
 
-        # Allow left and right arm subtasks to advance independently.
-        self.task_constraint_configs = []
+        # -----------------------------------------------------------------
+        # Arm synchronization constraints
+        # -----------------------------------------------------------------
+        # Both arms must finish subtask 1 (middle_to_lower) before either
+        # starts subtask 2 (grasp_lower).  Both must finish subtask 2
+        # before either starts subtask 3 (lower_to_upper).
+        # Each sync point needs two SEQUENTIAL constraints (one per direction).
+        self.task_constraint_configs = [
+            # Sync before subtask 2: left_arm[1] must finish before right_arm[2] starts
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 1), ("right_arm", 2)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 2: right_arm[1] must finish before left_arm[2] starts
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("right_arm", 1), ("left_arm", 2)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 3: left_arm[2] must finish before right_arm[3] starts
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 3)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 3: right_arm[2] must finish before left_arm[3] starts
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("right_arm", 2), ("left_arm", 3)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+        ]
