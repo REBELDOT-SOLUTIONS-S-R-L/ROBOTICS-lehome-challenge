@@ -106,10 +106,10 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
     actuators={
         "sts3215-gripper": ImplicitActuatorCfg(
             joint_names_expr=["gripper"],
-            effort_limit_sim=10,
+            effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=0.60,
+            damping=3.0,
         ),
         "sts3215-arm": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -119,10 +119,10 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
                 "wrist_flex",
                 "wrist_roll",
             ],
-            effort_limit_sim=10,
+            effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=0.60,
+            damping=3.0,
         ),
     },
     soft_joint_pos_limit_factor=0.9,
@@ -149,10 +149,10 @@ SO101_KINFE_CFG = ArticulationCfg(
     actuators={
         "sts3215-gripper": ImplicitActuatorCfg(
             joint_names_expr=["gripper"],
-            effort_limit_sim=10,
+            effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=0.60,
+            damping=3.0,
         ),
         "sts3215-arm": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -162,10 +162,10 @@ SO101_KINFE_CFG = ArticulationCfg(
                 "wrist_flex",
                 "wrist_roll",
             ],
-            effort_limit_sim=10,
+            effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=0.60,
+            damping=3.0,
         ),
     },
     soft_joint_pos_limit_factor=0.9,
