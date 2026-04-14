@@ -109,7 +109,7 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
             effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=3.0,
+            damping=0.6,
         ),
         "sts3215-arm": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -122,7 +122,7 @@ SO101_FOLLOWER_CFG = ArticulationCfg(
             effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=3.0,
+            damping=0.9,
         ),
     },
     soft_joint_pos_limit_factor=0.9,
@@ -152,7 +152,7 @@ SO101_KINFE_CFG = ArticulationCfg(
             effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=3.0,
+            damping=1.0,
         ),
         "sts3215-arm": ImplicitActuatorCfg(
             joint_names_expr=[
@@ -165,7 +165,7 @@ SO101_KINFE_CFG = ArticulationCfg(
             effort_limit_sim=20,
             velocity_limit_sim=10,
             stiffness=17.8,
-            damping=3.0,
+            damping=1.0,
         ),
     },
     soft_joint_pos_limit_factor=0.9,
