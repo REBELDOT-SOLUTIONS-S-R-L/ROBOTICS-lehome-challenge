@@ -159,15 +159,10 @@ class OnlineAnnotationState:
     ) -> list[str] | None:
         left_signal = self._head_signal_for_arm("left_arm")
         right_signal = self._head_signal_for_arm("right_arm")
-        if left_signal not in _RETURN_HOME_SIGNALS and right_signal not in _RETURN_HOME_SIGNALS:
-            return None
-
+        # Only take over when BOTH arms are at return_home.
+        # Otherwise return None so normal per-arm signal evaluation runs.
         if left_signal != "left_return_home" or right_signal != "right_return_home":
-            if left_signal in _RETURN_HOME_SIGNALS:
-                self.consecutive_true_counts["left_arm"] = 0
-            if right_signal in _RETURN_HOME_SIGNALS:
-                self.consecutive_true_counts["right_arm"] = 0
-            return []
+            return None
 
         fold_success = bool(
             torch.as_tensor(context.fold_success).reshape(-1)[0].item()
