@@ -509,7 +509,6 @@ def arm_at_rest(
 
 
 _WAITING_POS_EEF_X_THRESHOLD = 0.20
-_WAITING_POS_LOG_CTR: dict[str, int] = {}
 
 
 def arm_at_waiting_pos(
@@ -527,19 +526,8 @@ def arm_at_waiting_pos(
     eef_x = eef_pos[..., 0:1]  # (num_envs, 1)
     normalized = str(arm_name).strip().lower()
     if "left" in normalized:
-        result = eef_x < -_WAITING_POS_EEF_X_THRESHOLD
-    else:
-        result = eef_x > _WAITING_POS_EEF_X_THRESHOLD
-    # Debug: log EEF position every ~1s
-    _WAITING_POS_LOG_CTR[arm_name] = _WAITING_POS_LOG_CTR.get(arm_name, 0) + 1
-    if _WAITING_POS_LOG_CTR[arm_name] % 90 == 0:
-        import logging
-        x_val = eef_x[0, 0].item()
-        logging.getLogger(__name__).info(
-            "[waiting_pos] %s eef_x=%.3f threshold=%.2f pass=%s",
-            arm_name, x_val, _WAITING_POS_EEF_X_THRESHOLD, bool(result[0, 0].item()),
-        )
-    return result
+        return eef_x < -_WAITING_POS_EEF_X_THRESHOLD
+    return eef_x > _WAITING_POS_EEF_X_THRESHOLD
 
 
 def fold_success(
