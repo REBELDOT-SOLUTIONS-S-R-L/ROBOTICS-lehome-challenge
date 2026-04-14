@@ -508,7 +508,7 @@ def arm_at_rest(
     return at_rest.reshape(num_envs, 1)
 
 
-_WAITING_POS_EEF_Y_THRESHOLD = 0.20
+_WAITING_POS_EEF_X_THRESHOLD = 0.20
 _WAITING_POS_LOG_CTR: dict[str, int] = {}
 
 
@@ -517,27 +517,27 @@ def arm_at_waiting_pos(
     arm: str | SceneEntityCfg,
     env_ids: Sequence[int] | None = None,
 ) -> torch.Tensor:
-    """Return whether the arm EEF has retracted past the Y threshold.
+    """Return whether the arm EEF has retracted past the X threshold.
 
-    Left arm: eef_y < -0.20.  Right arm: eef_y > 0.20.
+    Left arm: eef_x < -0.20.  Right arm: eef_x > 0.20.
     """
     env_ids, num_envs = _resolve_env_ids(env, env_ids)
     arm_name, _ = _get_scene_arm(env, arm)
     eef_pos = _get_eef_world_position(env, arm_name, env_ids=env_ids)
-    eef_y = eef_pos[..., 1:2]  # (num_envs, 1)
+    eef_x = eef_pos[..., 0:1]  # (num_envs, 1)
     normalized = str(arm_name).strip().lower()
     if "left" in normalized:
-        result = eef_y < -_WAITING_POS_EEF_Y_THRESHOLD
+        result = eef_x < -_WAITING_POS_EEF_X_THRESHOLD
     else:
-        result = eef_y > _WAITING_POS_EEF_Y_THRESHOLD
+        result = eef_x > _WAITING_POS_EEF_X_THRESHOLD
     # Debug: log EEF position every ~1s
     _WAITING_POS_LOG_CTR[arm_name] = _WAITING_POS_LOG_CTR.get(arm_name, 0) + 1
     if _WAITING_POS_LOG_CTR[arm_name] % 90 == 0:
         import logging
-        y_val = eef_y[0, 0].item()
+        x_val = eef_x[0, 0].item()
         logging.getLogger(__name__).info(
-            "[waiting_pos] %s eef_y=%.3f threshold=%.2f pass=%s",
-            arm_name, y_val, _WAITING_POS_EEF_Y_THRESHOLD, bool(result[0, 0].item()),
+            "[waiting_pos] %s eef_x=%.3f threshold=%.2f pass=%s",
+            arm_name, x_val, _WAITING_POS_EEF_X_THRESHOLD, bool(result[0, 0].item()),
         )
     return result
 
