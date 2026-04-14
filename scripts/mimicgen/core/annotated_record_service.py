@@ -744,12 +744,15 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
                             )
                             recorder.discard_episode()
 
-                        cached_object_initial_pose = _reset_environment_for_next_attempt(
-                            env,
-                            args,
-                            debug_markers,
-                            debug_marker_state,
-                        )
+                        if pose_seq is not None and pose_seq.exhausted:
+                            cached_object_initial_pose = None
+                        else:
+                            cached_object_initial_pose = _reset_environment_for_next_attempt(
+                                env,
+                                args,
+                                debug_markers,
+                                debug_marker_state,
+                            )
                         flags["success"] = False
                         break
 
