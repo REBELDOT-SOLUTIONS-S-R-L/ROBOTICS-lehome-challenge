@@ -311,27 +311,33 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # 2=move_to_waiting_pos, 3=grasp_lower, 4=lower_to_upper,
         # 5=return_home.
         #
-        # Sync point 1: Both arms must finish subtask 2 (waiting_pos)
-        # before either starts subtask 3 (grasp_lower).
-        # Sync point 2: Both arms must finish subtask 4 (lower_to_upper)
-        # before either starts subtask 5 (return_home).
+        # Sync point 1: Both arms finish waiting_pos before grasp_lower.
+        # Sync point 2: Both arms finish grasp_lower before lower_to_upper.
+        # Sync point 3: Both arms finish lower_to_upper before return_home.
         self.task_constraint_configs = [
-            # Sync before subtask 3: left_arm[2] must finish before right_arm[3]
+            # Sync before subtask 3 (grasp_lower)
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 3)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
-            # Sync before subtask 3: right_arm[2] must finish before left_arm[3]
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("right_arm", 2), ("left_arm", 3)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
-            # Sync before subtask 5: left_arm[4] must finish before right_arm[5]
+            # Sync before subtask 4 (lower_to_upper)
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 4)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("right_arm", 3), ("left_arm", 4)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 5 (return_home)
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 5)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
-            # Sync before subtask 5: right_arm[4] must finish before left_arm[5]
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("right_arm", 4), ("left_arm", 5)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
