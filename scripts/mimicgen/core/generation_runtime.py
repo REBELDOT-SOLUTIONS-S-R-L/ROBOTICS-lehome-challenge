@@ -445,7 +445,8 @@ def env_loop_with_pose_output(
             asyncio_event_loop.run_until_complete(
                 asyncio.gather(*worker_tasks, return_exceptions=True)
             )
-        pose_writer.close()
+        if pose_writer is not None:
+            pose_writer.close()
         env.close()
 
 
