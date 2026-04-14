@@ -76,26 +76,6 @@ DUAL_ARM_SETTLE_ACTION = np.concatenate(
 MIN_GENERATION_GARMENT_SETTLE_STEPS = 60
 
 
-class PostResetClothPoseRecorder(RecorderTerm):
-    """Record the garment's initial pose after each environment reset."""
-
-    def record_post_reset(self, env_ids):
-        garment = getattr(self._env, "object", None)
-        if garment is None or not hasattr(garment, "reset_pose"):
-            return None, None
-        pose = torch.as_tensor(
-            garment.reset_pose, dtype=torch.float32, device=self._env.device,
-        ).unsqueeze(0).expand(self._env.num_envs, -1)
-        return "initial_state/garment_initial_pose", pose
-
-
-@configclass
-class PostResetClothPoseRecorderCfg(RecorderTermCfg):
-    """Configuration for cloth initial pose recording after reset."""
-
-    class_type: type[RecorderTerm] = PostResetClothPoseRecorder
-
-
 class PreStepCameraObservationsRecorder(RecorderTerm):
     """Record camera observations into the generated HDF5 obs group."""
 
@@ -143,7 +123,6 @@ class PreStepGenerationPoseRecorderCfg(RecorderTermCfg):
 class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
     """Default action/state recorder plus generated pose and camera observations."""
 
-    record_post_reset_cloth_pose = PostResetClothPoseRecorderCfg()
     record_pre_step_generation_pose = PreStepGenerationPoseRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
 
