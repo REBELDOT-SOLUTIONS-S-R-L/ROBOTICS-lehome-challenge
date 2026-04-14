@@ -14,11 +14,6 @@ from ..checkpoint_mappings import (
     CHECKPOINT_LABELS,
     semantic_keypoints_from_positions as map_semantic_keypoints_from_positions,
 )
-from lehome.assets.robots.lerobot import (
-    SO101_FOLLOWER_HOME_JOINT_POS,
-    SO101_LEFT_ARM_HOME_JOINT_POS,
-    SO101_RIGHT_ARM_HOME_JOINT_POS,
-)
 from lehome.utils.robot_utils import is_so101_at_rest_pose
 from lehome.utils.success_checker_chanllege import (
     evaluate_garment_fold_success,
@@ -513,9 +508,7 @@ def arm_at_rest(
     return at_rest.reshape(num_envs, 1)
 
 
-_WAITING_POS_TOLERANCE_RAD = 0.5236  # ~30 degrees
-_WAITING_POS_ARM_JOINTS = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll"]
-_WAITING_POS_DEBUG_COUNTER: dict[str, int] = {}
+_WAITING_POS_EEF_Y_THRESHOLD = 0.20
 
 
 def arm_at_waiting_pos(
@@ -523,44 +516,18 @@ def arm_at_waiting_pos(
     arm: str | SceneEntityCfg,
     env_ids: Sequence[int] | None = None,
 ) -> torch.Tensor:
-    """Return whether the given arm is near the home/waiting pose.
+    """Return whether the arm EEF has retracted past the Y threshold.
 
-    Uses a wider tolerance than arm_at_rest and ignores the gripper joint.
+    Left arm: eef_y < -0.20.  Right arm: eef_y > 0.20.
     """
     env_ids, num_envs = _resolve_env_ids(env, env_ids)
-    arm_name, arm_entity = _get_scene_arm(env, arm)
-    # Waiting pose: shoulder_pan=0 (centered), other joints from follower home.
-    # Only wrist_roll differs per arm.
+    arm_name, _ = _get_scene_arm(env, arm)
+    eef_pos = _get_eef_world_position(env, arm_name, env_ids=env_ids)
+    eef_y = eef_pos[..., 1:2]  # (num_envs, 1)
     normalized = str(arm_name).strip().lower()
-    home = dict(SO101_FOLLOWER_HOME_JOINT_POS)
     if "left" in normalized:
-        home["wrist_roll"] = SO101_LEFT_ARM_HOME_JOINT_POS["wrist_roll"]
-    else:
-        home["wrist_roll"] = SO101_RIGHT_ARM_HOME_JOINT_POS["wrist_roll"]
-    joint_pos = arm_entity.data.joint_pos[env_ids]
-    is_near = torch.ones(joint_pos.shape[0], dtype=torch.bool, device=joint_pos.device)
-    failing_joints: list[str] = []
-    for jname in _WAITING_POS_ARM_JOINTS:
-        idx = arm_entity.data.joint_names.index(jname)
-        target = home[jname]
-        diff = torch.abs(joint_pos[:, idx] - target)
-        joint_ok = diff < _WAITING_POS_TOLERANCE_RAD
-        if not joint_ok.all():
-            failing_joints.append(
-                f"{jname}: cur={joint_pos[0, idx].item():.3f} "
-                f"home={target:.3f} diff={diff[0].item():.3f}"
-            )
-        is_near = is_near & joint_ok
-    # Log every 90 steps (~1 sec at 90Hz) when NOT at waiting pos
-    count_key = str(arm_name)
-    _WAITING_POS_DEBUG_COUNTER[count_key] = _WAITING_POS_DEBUG_COUNTER.get(count_key, 0) + 1
-    if not is_near.all() and _WAITING_POS_DEBUG_COUNTER[count_key] % 90 == 0:
-        import logging
-        logging.getLogger(__name__).info(
-            "[waiting_pos] %s NOT at waiting pos — failing: %s",
-            arm_name, "; ".join(failing_joints),
-        )
-    return is_near.reshape(num_envs, 1)
+        return eef_y < -_WAITING_POS_EEF_Y_THRESHOLD
+    return eef_y > _WAITING_POS_EEF_Y_THRESHOLD
 
 
 def fold_success(
