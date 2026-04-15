@@ -69,6 +69,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         self._eef_body_idx_cache: dict[str, int] = {}
         self._ik_solver: RobotKinematics | None = None
         self._ik_solver_init_failed = False
+        self._last_ik_input_eef_pose: dict[str, torch.Tensor] | None = None
 
         # Initialize garment loader and config
         self.garment_loader = ChallengeGarmentLoader(cfg.garment_cfg_base_path)
@@ -805,6 +806,59 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         T_world_base = self._get_arm_world_base_transform_np(arm_name, env_i)
         return T_world_base @ T_base_pose
 
+    def _ensure_ik_input_eef_pose_cache(self) -> dict[str, torch.Tensor]:
+        """Allocate the cached base-frame IK input pose buffer on first use."""
+        if self._last_ik_input_eef_pose is None:
+            identity_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(self.num_envs, 1, 1)
+            self._last_ik_input_eef_pose = {
+                "left_arm": identity_pose.clone(),
+                "right_arm": identity_pose.clone(),
+            }
+        return self._last_ik_input_eef_pose
+
+    def _cache_ik_input_eef_pose(self, arm_name: str, env_i: int, T_base_pose: torch.Tensor | np.ndarray) -> None:
+        """Cache the exact base-frame pose that is sent into IK / native IK actions."""
+        cache = self._ensure_ik_input_eef_pose_cache()
+        pose = torch.as_tensor(T_base_pose, device=self.device, dtype=torch.float32)
+        if pose.shape != (4, 4):
+            raise ValueError(f"Expected IK input pose with shape (4, 4), got {tuple(pose.shape)}")
+        cache[arm_name][env_i] = pose
+
+    def get_last_ik_input_eef_pose(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Return the last cached per-arm base-frame IK input pose."""
+        if self._last_ik_input_eef_pose is None:
+            return None
+        env_ids, _ = self._resolve_env_ids(env_ids)
+        return {
+            arm_name: pose[env_ids].clone()
+            for arm_name, pose in self._last_ik_input_eef_pose.items()
+        }
+
+    def action_to_ik_input_eef_pose(self, action: torch.Tensor) -> dict[str, torch.Tensor] | None:
+        """Decode native 16D IK actions into per-arm base-frame 4x4 poses."""
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        num_envs = int(action.shape[0])
+        if int(action.shape[-1]) != 16:
+            return None
+
+        def _decode_arm(action_col_offset: int) -> torch.Tensor:
+            decoded = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            for i in range(num_envs):
+                pos_base = action[i, action_col_offset : action_col_offset + 3]
+                quat_base_wxyz = action[i, action_col_offset + 3 : action_col_offset + 7]
+                decoded[i, :3, 3] = pos_base
+                decoded[i, :3, :3] = PoseUtils.matrix_from_quat(quat_base_wxyz.unsqueeze(0))[0]
+            return decoded
+
+        return {
+            "left_arm": _decode_arm(0),
+            "right_arm": _decode_arm(8),
+        }
+
     def _compute_target_pose_from_joint_targets(self, arm_name: str, joint_targets: torch.Tensor) -> torch.Tensor:
         if not self._init_ik_solver_if_needed() or self._ik_solver is None:
             return self.get_robot_eef_pose(arm_name)
@@ -933,6 +987,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                         quat = pose_action[3:7]
                         pose_action[3:7] = quat / torch.linalg.norm(quat).clamp_min(1e-12)
 
+                    T_base_action = torch.eye(4, device=self.device, dtype=torch.float32)
+                    T_base_action[:3, 3] = pose_action[:3]
+                    T_base_action[:3, :3] = PoseUtils.matrix_from_quat(pose_action[3:7].unsqueeze(0))[0]
+                    self._cache_ik_input_eef_pose(arm_name, env_i, T_base_action)
+
                     action[i, action_col_offset : action_col_offset + 7] = pose_action
                     action[i, action_col_offset + 7] = grip_val
 
@@ -985,6 +1044,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 current_joints = arm.data.joint_pos[env_i].detach().cpu().numpy()
                 T_world_target = target_pose[i].detach().cpu().numpy()
                 T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
+                self._cache_ik_input_eef_pose(arm_name, env_i, T_base_target)
                 quat_base_xyzw = mat_to_quat(T_base_target[:3, :3])
                 gripper_val = float(gripper[i].item()) if gripper is not None else float(current_joints[5])
                 ee_pose = np.concatenate([T_base_target[:3, 3], quat_base_xyzw, [gripper_val]], axis=0)
