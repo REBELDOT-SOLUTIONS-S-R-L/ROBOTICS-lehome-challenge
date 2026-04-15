@@ -79,7 +79,11 @@ def init_action_cfg(action_cfg, device):
             use_default_offset=False,
         )
     elif device in ["mimic_bi-so101leader", "mimic_bi-keyboard"]:
-        action_cfg.left_arm_action = mdp.DifferentialInverseKinematicsActionCfg(
+        # Use JointPosition actions with Pinocchio IK (bounded optimization)
+        # instead of DifferentialIK (Jacobian-based, no workspace awareness).
+        # target_eef_pose_to_action resolves EEF targets to joint angles via
+        # Pinocchio when the action contract is 12D.
+        action_cfg.left_arm_action = mdp.JointPositionActionCfg(
             asset_name="left_arm",
             joint_names=[
                 "shoulder_pan",
@@ -88,12 +92,8 @@ def init_action_cfg(action_cfg, device):
                 "wrist_flex",
                 "wrist_roll",
             ],
-            body_name="gripper_frame_link",
-            controller=mdp.DifferentialIKControllerCfg(
-                command_type="pose",
-                ik_method="dls",
-                use_relative_mode=False,
-            ),
+            scale=1.0,
+            use_default_offset=False,
         )
         action_cfg.left_gripper_action = mdp.JointPositionActionCfg(
             asset_name="left_arm",
@@ -101,7 +101,7 @@ def init_action_cfg(action_cfg, device):
             scale=1.0,
             use_default_offset=False,
         )
-        action_cfg.right_arm_action = mdp.DifferentialInverseKinematicsActionCfg(
+        action_cfg.right_arm_action = mdp.JointPositionActionCfg(
             asset_name="right_arm",
             joint_names=[
                 "shoulder_pan",
@@ -110,12 +110,8 @@ def init_action_cfg(action_cfg, device):
                 "wrist_flex",
                 "wrist_roll",
             ],
-            body_name="gripper_frame_link",
-            controller=mdp.DifferentialIKControllerCfg(
-                command_type="pose",
-                ik_method="dls",
-                use_relative_mode=False,
-            ),
+            scale=1.0,
+            use_default_offset=False,
         )
         action_cfg.right_gripper_action = mdp.JointPositionActionCfg(
             asset_name="right_arm",
