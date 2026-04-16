@@ -161,7 +161,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_lower", "garment_left_upper"],
+                    "keypoint_names": ["garment_left_lower", "garment_left_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.0,
@@ -181,7 +181,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_lower", "garment_left_upper"],
+                    "keypoint_names": ["garment_left_lower", "garment_left_upper", "garment_right_upper"],
                     "nn_k": 1,
                 },
                 action_noise=0.0,
@@ -279,7 +279,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_lower", "garment_right_upper"],
+                    "keypoint_names": ["garment_right_lower", "garment_right_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.0,
@@ -299,7 +299,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_lower", "garment_right_upper"],
+                    "keypoint_names": ["garment_right_lower", "garment_right_upper", "garment_left_upper"],
                     "nn_k": 1,
                 },
                 action_noise=0.0,
