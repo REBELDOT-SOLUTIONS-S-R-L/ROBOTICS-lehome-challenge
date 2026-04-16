@@ -230,6 +230,7 @@ class RobotKinematics:
         desired_ee_pose: np.ndarray,
         position_weight: float = 1.0,
         orientation_weight: float = 0.01,
+        joint_bounds_rad: list[tuple[float, float]] | None = None,
     ) -> np.ndarray:
         """
         Compute inverse kinematics using Pinocchio + scipy.optimize.
@@ -239,12 +240,16 @@ class RobotKinematics:
             desired_ee_pose: Target end-effector pose as a 4x4 transformation matrix
             position_weight: Weight for position constraint in IK
             orientation_weight: Weight for orientation constraint in IK, set to 0.0 to only constrain position
+            joint_bounds_rad: Optional per-joint (lower, upper) bounds in radians.
+                When provided these replace the URDF model limits for the
+                L-BFGS-B optimisation.  Length must equal ``self.nq``.
 
         Returns:
             Joint positions in degrees that achieve the desired end-effector pose
         """
         return self._inverse_kinematics_pinocchio(
-            current_joint_pos, desired_ee_pose, position_weight, orientation_weight
+            current_joint_pos, desired_ee_pose, position_weight, orientation_weight,
+            joint_bounds_rad=joint_bounds_rad,
         )
     
     def _inverse_kinematics_pinocchio(
@@ -253,54 +258,58 @@ class RobotKinematics:
         desired_ee_pose: np.ndarray,
         position_weight: float,
         orientation_weight: float,
+        joint_bounds_rad: list[tuple[float, float]] | None = None,
     ) -> np.ndarray:
         """Inverse kinematics using Pinocchio with scipy.optimize."""
         pin = self._pin
-        
+
         # Target pose as Pinocchio SE3
         target_pose = pin.SE3(desired_ee_pose[:3, :3], desired_ee_pose[:3, 3])
-        
+
         # Initial guess (convert to radians)
         current_joint_rad = np.deg2rad(current_joint_pos[: self.nq])
         q0_controlled = np.array(current_joint_rad)
-        
+
         # Optimization objective function
         def objective(q_controlled):
             # Reconstruct full configuration
             q = pin.neutral(self.model)
             for i, q_idx in enumerate(self.joint_q_indices):
                 q[q_idx] = q_controlled[i]
-            
+
             # Forward kinematics
             pin.forwardKinematics(self.model, self.data, q)
             pin.updateFramePlacements(self.model, self.data)
             current_pose = self.data.oMf[self.ee_frame_id]
-            
+
             # Position error
             pos_error = target_pose.translation - current_pose.translation
             pos_cost = position_weight * np.sum(pos_error ** 2)
-            
+
             # Orientation error (logarithmic map)
             if orientation_weight > 0:
                 rot_error = pin.log3(target_pose.rotation.T @ current_pose.rotation)
                 rot_cost = orientation_weight * np.sum(rot_error ** 2)
             else:
                 rot_cost = 0.0
-            
+
             return pos_cost + rot_cost
-        
+
         # Joint limits (bounds)
-        bounds = []
-        for q_idx in self.joint_q_indices:
-            # Get joint limits from model
-            lower = self.model.lowerPositionLimit[q_idx]
-            upper = self.model.upperPositionLimit[q_idx]
-            # If limits are infinite, use reasonable defaults
-            if not np.isfinite(lower):
-                lower = -np.pi
-            if not np.isfinite(upper):
-                upper = np.pi
-            bounds.append((lower, upper))
+        if joint_bounds_rad is not None:
+            bounds = list(joint_bounds_rad)
+        else:
+            bounds = []
+            for q_idx in self.joint_q_indices:
+                # Get joint limits from model
+                lower = self.model.lowerPositionLimit[q_idx]
+                upper = self.model.upperPositionLimit[q_idx]
+                # If limits are infinite, use reasonable defaults
+                if not np.isfinite(lower):
+                    lower = -np.pi
+                if not np.isfinite(upper):
+                    upper = np.pi
+                bounds.append((lower, upper))
         
         # Solve IK using optimization
         result = self._minimize(

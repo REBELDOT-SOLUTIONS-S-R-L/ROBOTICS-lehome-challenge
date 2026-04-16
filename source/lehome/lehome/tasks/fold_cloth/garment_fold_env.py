@@ -48,7 +48,6 @@ from .mdp.observations import get_subtask_signal_observations
 logger = get_logger(__name__)
 
 _SO101_URDF_REL_PATH = Path("Assets/robots/so101_new_calib.urdf")
-_SO101_SHOULDER_PAN_URDF_OFFSET_RAD = np.pi / 2.0
 
 
 class GarmentFoldEnv(ManagerBasedRLMimicEnv):
@@ -791,19 +790,20 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
     @staticmethod
     def _sim_joints_to_pinocchio_convention(joint_pos: np.ndarray) -> np.ndarray:
-        """Convert Isaac joint positions to the SO101 URDF shoulder-pan convention."""
-        joint_pos = np.asarray(joint_pos, dtype=np.float64).copy()
-        if joint_pos.size > 0:
-            joint_pos[0] += _SO101_SHOULDER_PAN_URDF_OFFSET_RAD
-        return joint_pos
+        """Convert Isaac joint positions to the SO101 URDF convention.
+
+        The so101_new_calib URDF and the Isaac USD share the same joint
+        conventions, so no offset is needed — this is an identity copy.
+        """
+        return np.asarray(joint_pos, dtype=np.float64).copy()
 
     @staticmethod
     def _pinocchio_joints_to_sim_convention(joint_pos: np.ndarray) -> np.ndarray:
-        """Convert SO101 URDF joint positions back to Isaac joint convention."""
-        joint_pos = np.asarray(joint_pos, dtype=np.float64).copy()
-        if joint_pos.size > 0:
-            joint_pos[0] -= _SO101_SHOULDER_PAN_URDF_OFFSET_RAD
-        return joint_pos
+        """Convert SO101 URDF joint positions back to Isaac joint convention.
+
+        Identity copy — see ``_sim_joints_to_pinocchio_convention``.
+        """
+        return np.asarray(joint_pos, dtype=np.float64).copy()
 
     def _get_arm_world_base_transform_np(self, arm_name: str, env_i: int) -> np.ndarray:
         """Get world<-base transform for one arm and env as a 4x4 matrix."""
