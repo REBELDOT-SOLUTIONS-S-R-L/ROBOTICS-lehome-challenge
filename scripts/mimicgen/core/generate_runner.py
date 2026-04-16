@@ -105,11 +105,34 @@ class PreStepCameraObservationsRecorder(RecorderTerm):
         return "obs", camera_obs
 
 
+class PreStepGenerationActionsRecorder(RecorderTerm):
+    """Record generated top-level actions, preserving 16D ee-pose export in Pinocchio mode."""
+
+    def record_pre_step(self):
+        env = self._env
+        export_actions = None
+        with contextlib.suppress(Exception):
+            if hasattr(env, "get_generation_export_actions"):
+                export_actions = env.get_generation_export_actions()
+        if export_actions is None:
+            export_actions = env.action_manager.action
+        if export_actions is None:
+            return None, None
+        return "actions", export_actions.clone()
+
+
 @configclass
 class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
     """Configuration for camera observation recording during generation export."""
 
     class_type: type[RecorderTerm] = PreStepCameraObservationsRecorder
+
+
+@configclass
+class PreStepGenerationActionsRecorderCfg(RecorderTermCfg):
+    """Configuration for generation action export during HDF5 recording."""
+
+    class_type: type[RecorderTerm] = PreStepGenerationActionsRecorder
 
 
 @configclass
@@ -123,8 +146,21 @@ class PreStepGenerationPoseRecorderCfg(RecorderTermCfg):
 class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
     """Default action/state recorder plus generated pose and camera observations."""
 
+    record_pre_step_actions = PreStepGenerationActionsRecorderCfg()
     record_pre_step_generation_pose = PreStepGenerationPoseRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
+
+
+def _set_generated_actions_mode(env: ManagerBasedRLMimicEnv, actions_mode: str) -> None:
+    """Stamp generated HDF5 outputs with an explicit action representation mode."""
+    recorder_manager = getattr(env, "recorder_manager", None)
+    if recorder_manager is None:
+        return
+    for attr_name in ("_dataset_file_handler", "_failed_episode_dataset_file_handler"):
+        handler = getattr(recorder_manager, attr_name, None)
+        data_group = getattr(handler, "_hdf5_data_group", None)
+        if data_group is not None:
+            data_group.attrs["actions_mode"] = actions_mode
 
 
 def _build_post_reset_hold_action(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
@@ -345,6 +381,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
 
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, parsed_args.task_type))
+    setattr(env_cfg, "force_pinocchio_generation", bool(parsed_args.enable_pinocchio))
     apply_common_mimic_env_overrides(env_cfg, parsed_args)
     _normalize_last_subtask_offsets_for_generation(env_cfg)
     print(f"Using mimic IK orientation_weight={float(parsed_args.mimic_ik_orientation_weight):.4f}")
@@ -371,6 +408,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         )
 
     env = gym.make(env_name, cfg=env_cfg).unwrapped
+    _set_generated_actions_mode(env, "ee_pose")
 
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
@@ -379,9 +417,11 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         success_term = TerminationTermCfg(func=recording_style_success_tensor, params={}, time_out=False)
         print("Using recording-style garment success checker for generation.")
 
-    requires_env_ik_solver = True
+    force_pinocchio_generation = bool(parsed_args.enable_pinocchio)
+    requires_env_ik_solver = force_pinocchio_generation
     if (
-        hasattr(env, "_is_native_mimic_ik_action_contract")
+        not force_pinocchio_generation
+        and hasattr(env, "_is_native_mimic_ik_action_contract")
         and hasattr(env, "action_manager")
         and hasattr(env.action_manager, "total_action_dim")
     ):
@@ -407,6 +447,8 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
                 "Generation requires a working IK solver in the environment, "
                 f"but initialization failed: {exc}"
             ) from exc
+        if force_pinocchio_generation:
+            print("Using Pinocchio pose->joint conversion for generation.")
     else:
         print("Using native env IK action contract for generation (no Pinocchio pose->joint conversion).")
 

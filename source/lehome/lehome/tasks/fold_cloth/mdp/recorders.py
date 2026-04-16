@@ -120,7 +120,11 @@ class GenerationPoseRecorder(RecorderTerm):
 
         ik_input_eef_pose = None
         with contextlib.suppress(Exception):
-            ik_input_eef_pose = env.action_to_target_eef_pose(env.action_manager.action)
+            if hasattr(env, "get_last_ik_input_eef_pose_world"):
+                ik_input_eef_pose = env.get_last_ik_input_eef_pose_world()
+        if ik_input_eef_pose is None:
+            with contextlib.suppress(Exception):
+                ik_input_eef_pose = env.action_to_target_eef_pose(env.action_manager.action)
         if ik_input_eef_pose is not None:
             obs["ik_input_eef_pose"] = ik_input_eef_pose
 

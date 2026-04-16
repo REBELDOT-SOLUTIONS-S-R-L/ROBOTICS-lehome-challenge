@@ -290,6 +290,8 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     task_description: str = "Fold the garment on the table."
     # Teleop / action contract name (updated by scripts)
     task_type: str = "bi-so101leader"
+    # Generation-only override: keep 12D joint-action contract and use env IK solver.
+    force_pinocchio_generation: bool = False
     # Online subtask-observation thresholds
     subtask_grasp_eef_to_keypoint_threshold_m: float = 0.15
     subtask_gripper_close_threshold: float = 0.20

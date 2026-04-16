@@ -48,6 +48,7 @@ from .mdp.observations import get_subtask_signal_observations
 logger = get_logger(__name__)
 
 _SO101_URDF_REL_PATH = Path("Assets/robots/so101_new_calib.urdf")
+_SO101_SHOULDER_PAN_URDF_OFFSET_RAD = np.pi / 2.0
 
 
 class GarmentFoldEnv(ManagerBasedRLMimicEnv):
@@ -784,6 +785,26 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             pass
         return False
 
+    def _use_pinocchio_generation(self) -> bool:
+        """Return True when generation should force the 12D Pinocchio path."""
+        return bool(getattr(self.cfg, "force_pinocchio_generation", False))
+
+    @staticmethod
+    def _sim_joints_to_pinocchio_convention(joint_pos: np.ndarray) -> np.ndarray:
+        """Convert Isaac joint positions to the SO101 URDF shoulder-pan convention."""
+        joint_pos = np.asarray(joint_pos, dtype=np.float64).copy()
+        if joint_pos.size > 0:
+            joint_pos[0] += _SO101_SHOULDER_PAN_URDF_OFFSET_RAD
+        return joint_pos
+
+    @staticmethod
+    def _pinocchio_joints_to_sim_convention(joint_pos: np.ndarray) -> np.ndarray:
+        """Convert SO101 URDF joint positions back to Isaac joint convention."""
+        joint_pos = np.asarray(joint_pos, dtype=np.float64).copy()
+        if joint_pos.size > 0:
+            joint_pos[0] -= _SO101_SHOULDER_PAN_URDF_OFFSET_RAD
+        return joint_pos
+
     def _get_arm_world_base_transform_np(self, arm_name: str, env_i: int) -> np.ndarray:
         """Get world<-base transform for one arm and env as a 4x4 matrix."""
         arm = self.scene[arm_name]
@@ -836,6 +857,83 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             arm_name: pose[env_ids].clone()
             for arm_name, pose in self._last_ik_input_eef_pose.items()
         }
+
+    def get_last_ik_input_eef_pose_world(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Return the last cached per-arm IK input pose in world frame."""
+        base_pose_dict = self.get_last_ik_input_eef_pose(env_ids=env_ids)
+        if base_pose_dict is None:
+            return None
+
+        env_ids_resolved, num_envs = self._resolve_env_ids(env_ids)
+        if isinstance(env_ids_resolved, slice):
+            env_index_list = list(range(self.num_envs))[env_ids_resolved]
+        else:
+            env_index_list = [int(idx) for idx in env_ids_resolved]
+
+        world_pose_dict: dict[str, torch.Tensor] = {}
+        for arm_name, base_pose in base_pose_dict.items():
+            world_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            for local_i, env_i in enumerate(env_index_list):
+                T_world_pose = self._base_pose_to_world_pose_np(
+                    arm_name,
+                    env_i,
+                    base_pose[local_i].detach().cpu().numpy(),
+                )
+                world_pose[local_i] = torch.as_tensor(T_world_pose, device=self.device, dtype=torch.float32)
+            world_pose_dict[arm_name] = world_pose
+        return world_pose_dict
+
+    def get_generation_export_actions(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> torch.Tensor | None:
+        """Return the action tensor that should be exported into generated HDF5."""
+        if not hasattr(self, "action_manager") or not hasattr(self.action_manager, "action"):
+            return None
+
+        runtime_action = self.action_manager.action
+        if runtime_action.ndim == 1:
+            runtime_action = runtime_action.unsqueeze(0)
+
+        env_ids_resolved, num_envs = self._resolve_env_ids(env_ids)
+        runtime_action = runtime_action[env_ids_resolved]
+        if int(runtime_action.shape[-1]) == 16:
+            return runtime_action.clone()
+        if int(runtime_action.shape[-1]) != 12:
+            return None
+
+        base_pose_dict = self.get_last_ik_input_eef_pose(env_ids=env_ids)
+        if base_pose_dict is None:
+            base_pose_dict = {}
+            target_pose_world = self.action_to_target_eef_pose(runtime_action)
+            if isinstance(env_ids_resolved, slice):
+                env_index_list = list(range(self.num_envs))[env_ids_resolved]
+            else:
+                env_index_list = [int(idx) for idx in env_ids_resolved]
+            for arm_name, world_pose in target_pose_world.items():
+                base_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+                for local_i, env_i in enumerate(env_index_list):
+                    T_base_pose = self._world_pose_to_base_pose_np(
+                        arm_name,
+                        env_i,
+                        world_pose[local_i].detach().cpu().numpy(),
+                    )
+                    base_pose[local_i] = torch.as_tensor(T_base_pose, device=self.device, dtype=torch.float32)
+                base_pose_dict[arm_name] = base_pose
+
+        export_action = torch.zeros((num_envs, 16), device=self.device, dtype=torch.float32)
+        gripper_action = self.actions_to_gripper_actions(runtime_action)
+        for arm_name, action_col_offset in (("left_arm", 0), ("right_arm", 8)):
+            base_pose = base_pose_dict[arm_name]
+            export_action[:, action_col_offset : action_col_offset + 3] = base_pose[:, :3, 3]
+            export_action[:, action_col_offset + 3 : action_col_offset + 7] = PoseUtils.quat_from_matrix(
+                base_pose[:, :3, :3]
+            )
+            export_action[:, action_col_offset + 7 : action_col_offset + 8] = gripper_action[arm_name]
+        return export_action.clone()
 
     def action_to_ik_input_eef_pose(self, action: torch.Tensor) -> dict[str, torch.Tensor] | None:
         """Decode native 16D IK actions into per-arm base-frame 4x4 poses."""
@@ -900,6 +998,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
         for i in range(num_envs):
             joints_np = joint_targets[i].detach().cpu().numpy()
+            joints_np = self._sim_joints_to_pinocchio_convention(joints_np)
             # FK helper expects full 6D joint vector and returns [pos(xyz), quat(xyzw), gripper].
             ee_pose_base = np.asarray(self._ik_solver.forward_kinematics(np.rad2deg(joints_np)))
             pos_base = ee_pose_base[:3, 3]
@@ -1072,7 +1171,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
             for i in range(num_envs):
                 env_i = env_id if num_envs == 1 else min(i, self.num_envs - 1)
-                current_joints = arm.data.joint_pos[env_i].detach().cpu().numpy()
+                current_joints_sim = arm.data.joint_pos[env_i].detach().cpu().numpy()
+                current_joints = self._sim_joints_to_pinocchio_convention(current_joints_sim)
                 T_world_target = target_pose[i].detach().cpu().numpy()
                 T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
                 self._cache_ik_input_eef_pose(arm_name, env_i, T_base_target)
@@ -1090,6 +1190,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 if joint_targets is None:
                     joint_targets = current_joints.copy()
                     joint_targets[5] = gripper_val
+                joint_targets = self._pinocchio_joints_to_sim_convention(joint_targets)
                 # Clamp to USD joint limits to prevent physics instability at hard stops
                 for j, name in enumerate(ACTION_NAMES[:6]):
                     lo_deg, hi_deg = SO101_FOLLOWER_USD_JOINT_LIMLITS[name]
@@ -1241,12 +1342,16 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
 
 class GarmentFoldMimicEnv(GarmentFoldEnv):
-    """Garment fold env variant that enables native mimic IK action contract."""
+    """Garment fold env variant that enables native mimic IK unless Pinocchio is forced."""
 
     def __init__(self, cfg: GarmentFoldEnvCfg, render_mode: str | None = None, **kwargs):
         task_type = str(getattr(cfg, "task_type", "bi-so101leader"))
-        mimic_task_type = task_type if task_type.startswith("mimic_") else f"mimic_{task_type}"
-        cfg.use_teleop_device(mimic_task_type)
+        base_task_type = task_type[len("mimic_"):] if task_type.startswith("mimic_") else task_type
+        if bool(getattr(cfg, "force_pinocchio_generation", False)):
+            cfg.use_teleop_device(base_task_type)
+        else:
+            mimic_task_type = task_type if task_type.startswith("mimic_") else f"mimic_{task_type}"
+            cfg.use_teleop_device(mimic_task_type)
         # Keep runtime task type for utility helpers that expect non-mimic labels.
-        cfg.task_type = task_type
+        cfg.task_type = base_task_type
         super().__init__(cfg, render_mode=render_mode, **kwargs)

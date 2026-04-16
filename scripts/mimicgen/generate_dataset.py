@@ -86,11 +86,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Pause after every subtask during generation for debugging; only useful with rendering.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--enable_pinocchio",
         action="store_true",
         default=False,
-        help=argparse.SUPPRESS,
+        help=(
+            "Force Pinocchio pose-to-joint conversion during generation while preserving "
+            "16D ee-pose action export in the generated HDF5."
+        ),
     )
     parser.add_argument(
         "--pose_output_interval",
@@ -217,9 +220,6 @@ def main(argv: list[str] | None = None) -> None:
             ),
             "--disable_object_pose_alignment": (
                 "`--disable_object_pose_alignment` is deprecated and kept only for compatibility."
-            ),
-            "--enable_pinocchio": (
-                "`--enable_pinocchio` is deprecated and kept only for compatibility."
             ),
             "--print_poses": "`--print_poses` is deprecated and no longer has any effect.",
         },
