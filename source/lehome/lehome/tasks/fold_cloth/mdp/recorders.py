@@ -124,6 +124,12 @@ class GenerationPoseRecorder(RecorderTerm):
         if ik_input_eef_pose is not None:
             obs["ik_input_eef_pose"] = ik_input_eef_pose
 
+        ik_input_joint_pos = None
+        with contextlib.suppress(Exception):
+            ik_input_joint_pos = env.action_to_ik_input_joint_pos(env.action_manager.action)
+        if ik_input_joint_pos is not None:
+            obs["ik_input_joint_pos"] = ik_input_joint_pos
+
         if hasattr(env, "object") and getattr(env.object, "check_points", None):
             object_poses = compute_garment_keypoint_object_poses(
                 env,

@@ -859,6 +859,37 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             "right_arm": _decode_arm(8),
         }
 
+    def action_to_ik_input_joint_pos(self, action: torch.Tensor) -> dict[str, torch.Tensor] | None:
+        """Return per-arm joint targets sent to the robot for both action contracts."""
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        num_envs = int(action.shape[0])
+        action_dim = int(action.shape[-1])
+        if action_dim == 12:
+            return {
+                "left_arm": action[:, :6].clone(),
+                "right_arm": action[:, 6:12].clone(),
+            }
+        if action_dim != 16:
+            return None
+
+        try:
+            left_arm_term = self.action_manager.get_term("left_arm_action")
+            right_arm_term = self.action_manager.get_term("right_arm_action")
+            left_gripper_term = self.action_manager.get_term("left_gripper_action")
+            right_gripper_term = self.action_manager.get_term("right_gripper_action")
+            left_joint_targets = left_arm_term.compute_joint_position_target()[:num_envs]
+            right_joint_targets = right_arm_term.compute_joint_position_target()[:num_envs]
+            left_gripper = left_gripper_term.processed_actions[:num_envs]
+            right_gripper = right_gripper_term.processed_actions[:num_envs]
+        except Exception:
+            return None
+
+        return {
+            "left_arm": torch.cat((left_joint_targets, left_gripper), dim=-1).clone(),
+            "right_arm": torch.cat((right_joint_targets, right_gripper), dim=-1).clone(),
+        }
+
     def _compute_target_pose_from_joint_targets(self, arm_name: str, joint_targets: torch.Tensor) -> torch.Tensor:
         if not self._init_ik_solver_if_needed() or self._ik_solver is None:
             return self.get_robot_eef_pose(arm_name)
