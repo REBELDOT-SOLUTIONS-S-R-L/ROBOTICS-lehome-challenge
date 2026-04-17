@@ -22,6 +22,7 @@ from lehome.tasks.fold_cloth.checkpoint_mappings import (
     ClothObjectPoseUnavailableError,
     ClothObjectPoseValidationError,
 )
+from lehome.tasks.fold_cloth.generation_errors import SubtaskVerificationError
 from lehome.utils.logger import get_logger
 
 from .generation_source import RobustDataGenInfoPool
@@ -169,6 +170,28 @@ async def run_data_generator_with_object_pose_failures(
             mimic_generation.num_attempts += 1
             print(
                 f"Warning: generation trial for env {env_id} failed due to invalid cloth object poses: {exc}"
+            )
+            continue
+        except SubtaskVerificationError as exc:
+            mimic_generation.num_failures += 1
+            mimic_generation.num_attempts += 1
+            _record_failed = getattr(env, "record_failed_episode_minimal", None)
+            if callable(_record_failed):
+                try:
+                    _record_failed(
+                        env_id=env_id,
+                        source_demo_selections=exc.source_demo_selections,
+                        fail_reason=exc.fail_reason,
+                    )
+                except Exception as inner_exc:
+                    logger.error(
+                        "Failed to write minimal failed episode for env %d: %s",
+                        env_id,
+                        inner_exc,
+                    )
+            print(
+                f"Warning: subtask verification failed for env {env_id} "
+                f"({exc.arm_name} subtask={exc.subtask_index}): {exc.fail_reason}"
             )
             continue
         except Exception as exc:

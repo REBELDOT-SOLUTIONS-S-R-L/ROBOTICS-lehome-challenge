@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import random
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Dict
 
 import numpy as np
@@ -1458,6 +1458,162 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             signal_name: signal.to(dtype=torch.float32)
             for signal_name, signal in signal_map.items()
         }
+
+    # ------------------------------------------------------------------
+    # Subtask verification hook (used by MimicGen DataGenerator)
+    # ------------------------------------------------------------------
+
+    # Only these subtasks carry information that, if missed, guarantees the
+    # final fold will fail.  Other subtasks (``*_at_waiting_pos``,
+    # ``*_lower_to_upper``, ``*_return_home``) either don't gate success
+    # (waiting / home) or are re-checked by the final success term
+    # (``*_lower_to_upper`` -> fold success).  Verifying them here would
+    # discard otherwise-recoverable episodes because, for example, a brief
+    # joint excursion leaves ``*_at_waiting_pos`` False at the exact moment
+    # the offset range elapses, yet the eventual fold still lands.
+    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (0, 1, 3)
+
+    def verify_subtask_completion(
+        self,
+        *,
+        arm_name: str,
+        subtask_index: int,
+        env_id: int,
+    ) -> str | None:
+        """Check whether a just-finished subtask achieved its semantic goal.
+
+        The MimicGen data generator calls this after a subtask trajectory has
+        fully run. Returning ``None`` means "ok, proceed to the next subtask";
+        returning a non-empty string aborts the current trial with that string
+        as the ``fail_reason`` written to the failed-episode dataset.
+
+        Only the subtasks in ``_VERIFIED_SUBTASK_INDICES`` are verified — by
+        default the two grasp subtasks (``grasp_*_middle``, ``grasp_*_lower``)
+        and the first transfer (``*_middle_to_lower``).  Failing any of these
+        means the arm never picked up or dropped the cloth where it should,
+        and the fold cannot succeed downstream.  Other subtasks are left to
+        the final success term so we don't discard trials for transient
+        joint-range excursions that the episode recovers from.
+
+        For the verified indices, the implementation reads the
+        ``subtask_term_signal`` declared on the matching :class:`SubTaskConfig`
+        and fails the trial when the signal is not True for ``env_id`` at
+        trajectory end.
+
+        Subclasses may override with richer checks (e.g. explicit EEF-to-
+        keypoint distance, contact flags, per-arm joint tolerances).
+        """
+        if int(subtask_index) not in self._VERIFIED_SUBTASK_INDICES:
+            return None
+
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(arm_name)
+        if not arm_cfgs or subtask_index < 0 or subtask_index >= len(arm_cfgs):
+            return None
+        signal_name = getattr(arm_cfgs[subtask_index], "subtask_term_signal", None)
+        if not signal_name:
+            return None
+
+        env_id_tensor = torch.tensor([int(env_id)], dtype=torch.int64, device=self.device)
+        try:
+            signals = self.get_subtask_term_signals(env_ids=env_id_tensor)
+        except Exception as exc:
+            logger.debug(
+                "verify_subtask_completion: signal eval failed for %s[%d]: %s",
+                arm_name,
+                int(subtask_index),
+                exc,
+            )
+            return None
+
+        tensor = signals.get(signal_name)
+        if tensor is None:
+            return None
+        try:
+            value = float(tensor.reshape(-1)[0].item())
+        except Exception:
+            return None
+        if value > 0.5:
+            return None
+        return (
+            f"subtask_term_signal '{signal_name}' was False at subtask "
+            f"{subtask_index} completion ({arm_name})"
+        )
+
+    def record_failed_episode_minimal(
+        self,
+        *,
+        env_id: int,
+        source_demo_selections: Mapping[str, Sequence[int]] | None,
+        fail_reason: str,
+    ) -> None:
+        """Overwrite the current episode buffer with a minimal failed record.
+
+        Only the fields needed to re-try generation from the same initial
+        conditions are kept:
+
+        - ``initial_state/garment_initial_pose`` — garment pose at reset.
+        - ``source_demo_indices/<arm>`` — source demo indices actually
+          selected per arm, up to the failing subtask (inclusive).
+        - ``fail_reason`` — utf-8 byte encoding of the reason string.
+
+        All accumulated per-step observations, actions, and scene states from
+        the aborted trajectory are discarded. The episode is marked as
+        ``success=False`` and exported immediately via the recorder manager
+        (which routes failed rows to the failed-episode handler when the
+        ``EXPORT_SUCCEEDED_FAILED_IN_SEPARATE_FILES`` mode is active).
+        """
+        from isaaclab.utils.datasets import EpisodeData
+
+        recorder = getattr(self, "recorder_manager", None)
+        if recorder is None or not getattr(recorder, "active_terms", []):
+            return
+
+        minimal = EpisodeData()
+        minimal.env_id = int(env_id)
+        minimal.success = False
+
+        new_data: Dict[str, Any] = {}
+
+        garment_obj = getattr(self, "object", None)
+        garment_reset_pose = (
+            getattr(garment_obj, "reset_pose", None) if garment_obj is not None else None
+        )
+        if garment_reset_pose is not None:
+            pose_tensor = torch.as_tensor(
+                garment_reset_pose, dtype=torch.float32, device=self.device,
+            ).detach().clone()
+            new_data["initial_state"] = {"garment_initial_pose": pose_tensor}
+
+        src_group: Dict[str, torch.Tensor] = {}
+        for arm_name, selections in (source_demo_selections or {}).items():
+            selections_list = [int(v) for v in selections] if selections else []
+            if not selections_list:
+                continue
+            src_group[str(arm_name)] = torch.tensor(
+                selections_list, dtype=torch.int64, device=self.device,
+            )
+        if src_group:
+            new_data["source_demo_indices"] = src_group
+
+        reason_str = str(fail_reason) if fail_reason else "unknown"
+        reason_bytes = reason_str.encode("utf-8")
+        if not reason_bytes:
+            reason_bytes = b"unknown"
+        new_data["fail_reason"] = torch.tensor(
+            list(reason_bytes), dtype=torch.uint8, device=self.device,
+        )
+
+        minimal.data = new_data
+
+        recorder._episodes[int(env_id)] = minimal
+        try:
+            recorder.export_episodes(env_ids=[int(env_id)])
+        except Exception as exc:
+            logger.error(
+                "record_failed_episode_minimal: export_episodes failed for env %d: %s",
+                int(env_id),
+                exc,
+            )
 
 
 class GarmentFoldMimicEnv(GarmentFoldEnv):
