@@ -373,10 +373,8 @@ def compute_joints_from_ee_pose(
                            - 1.0: position and orientation equally important
                            - 0.01: position 100x more important (for position-only tasks)
         joint_bounds_rad: Optional per-joint (lower, upper) bounds in radians
-                         passed to the IK solver.  When the caller applies a
-                         convention offset (e.g. shoulder-pan) the bounds must
-                         be shifted accordingly so the solver can reach the
-                         full sim-valid range.
+                         passed to the IK solver, overriding the URDF joint
+                         limits when provided.
 
     Returns:
         6D joint angles, or None if IK fails
