@@ -86,6 +86,13 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         self._ik_pos_fail_m = 0.03
         self._ik_rot_fail_rad = float(np.deg2rad(30.0))
 
+        # Per-env tracking of which subtasks each arm has completed so far.
+        # Used to gate the (expensive) fold-success check to the final
+        # subtask window — see ``is_final_fold_complete``.  Populated by
+        # ``verify_subtask_completion`` every time a subtask trajectory
+        # finishes and cleared on episode reset.
+        self._completed_subtasks: dict[int, dict[str, set[int]]] = {}
+
         # Initialize garment loader and config
         self.garment_loader = ChallengeGarmentLoader(cfg.garment_cfg_base_path)
         self.garment_config = self.garment_loader.load_garment_config(
@@ -347,6 +354,9 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         """Reset environments — resets arms to default and resets garment."""
         # Flush IK telemetry from the previous episode before super() wipes state.
         self._flush_ik_stats()
+
+        # Reset per-env subtask-completion tracking for the success-check gate.
+        self._clear_completed_subtasks(env_ids)
 
         super()._reset_idx(env_ids)
 
@@ -1473,6 +1483,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     # the offset range elapses, yet the eventual fold still lands.
     _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (0, 1, 3)
 
+    # Zero-based index of the ``*_lower_to_upper`` subtask (the actual fold).
+    # Only after both arms have completed this subtask does the fold-success
+    # check become meaningful — see ``is_final_fold_complete``.
+    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 4
+
     def verify_subtask_completion(
         self,
         *,
@@ -1503,6 +1518,15 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         Subclasses may override with richer checks (e.g. explicit EEF-to-
         keypoint distance, contact flags, per-arm joint tolerances).
         """
+        # Bookkeeping runs for every subtask completion, even when the
+        # signal check is skipped — it feeds ``is_final_fold_complete``
+        # so the generation success term only fires after the fold.
+        self._mark_subtask_completed(
+            env_id=int(env_id),
+            arm_name=arm_name,
+            subtask_index=int(subtask_index),
+        )
+
         if int(subtask_index) not in self._VERIFIED_SUBTASK_INDICES:
             return None
 
@@ -1538,6 +1562,55 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             f"subtask_term_signal '{signal_name}' was False at subtask "
             f"{subtask_index} completion ({arm_name})"
         )
+
+    # ------------------------------------------------------------------
+    # Subtask-completion bookkeeping (drives the success-check gate)
+    # ------------------------------------------------------------------
+
+    def _mark_subtask_completed(
+        self,
+        *,
+        env_id: int,
+        arm_name: str,
+        subtask_index: int,
+    ) -> None:
+        """Record that ``arm_name`` has finished ``subtask_index`` for ``env_id``."""
+        per_env = self._completed_subtasks.setdefault(int(env_id), {})
+        per_arm = per_env.setdefault(str(arm_name), set())
+        per_arm.add(int(subtask_index))
+
+    def _clear_completed_subtasks(self, env_ids: Sequence[int] | None) -> None:
+        """Drop subtask-completion state for the given env ids (all if None)."""
+        if env_ids is None:
+            self._completed_subtasks.clear()
+            return
+        for eid in env_ids:
+            try:
+                self._completed_subtasks.pop(int(eid), None)
+            except (TypeError, ValueError):
+                continue
+
+    def is_final_fold_complete(self, env_id: int) -> bool:
+        """Return True when every configured arm has finished ``*_lower_to_upper``.
+
+        The MimicGen success term (``recording_style_success_tensor``) uses
+        this gate to skip the expensive garment-geometry checker until the
+        fold motion itself is done.  Before that point the cloth is mid-flight
+        and the success signal is meaningless; after that point, each step
+        inside ``*_return_home`` is a legitimate opportunity for the fold to
+        settle into a passing configuration.
+        """
+        completed = self._completed_subtasks.get(int(env_id))
+        if not completed:
+            return False
+        arm_names = getattr(self.cfg, "subtask_configs", {}).keys()
+        if not arm_names:
+            return False
+        target_index = int(self._LOWER_TO_UPPER_SUBTASK_INDEX)
+        for arm_name in arm_names:
+            if target_index not in completed.get(str(arm_name), set()):
+                return False
+        return True
 
     def record_failed_episode_minimal(
         self,

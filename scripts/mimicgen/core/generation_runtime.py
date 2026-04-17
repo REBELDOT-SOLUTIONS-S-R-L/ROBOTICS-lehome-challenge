@@ -301,10 +301,38 @@ def _evaluate_generation_success_result(env: ManagerBasedRLMimicEnv) -> dict[str
 
 
 def recording_style_success_tensor(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
-    """Return the same garment-only success signal used by direct recording."""
-    result = _evaluate_generation_success_result(env)
-    success = bool(result.get("success", False)) if result is not None else False
-    return torch.full((int(env.num_envs),), success, dtype=torch.bool, device=env.device)
+    """Return the same garment-only success signal used by direct recording.
+
+    To avoid burning compute on particle-geometry evaluation while the cloth
+    is still in motion (and to eliminate spurious mid-episode "success"
+    triggers), this is gated to run only after both arms have finished
+    ``*_lower_to_upper``.  The gate is sampled per environment via
+    :py:meth:`GarmentFoldEnv.is_final_fold_complete`; environments whose
+    gate is still closed report False without evaluating the checker.
+    """
+    num_envs = int(env.num_envs)
+    result = torch.zeros(num_envs, dtype=torch.bool, device=env.device)
+
+    gate_fn = getattr(env, "is_final_fold_complete", None)
+    if callable(gate_fn):
+        gated_mask = torch.tensor(
+            [bool(gate_fn(int(eid))) for eid in range(num_envs)],
+            dtype=torch.bool,
+            device=env.device,
+        )
+        if not bool(gated_mask.any()):
+            return result
+    else:
+        gated_mask = torch.ones(num_envs, dtype=torch.bool, device=env.device)
+
+    # Single-garment env: the checker is global, so one call feeds every
+    # gated env.  Envs whose gate is closed stay False regardless.
+    eval_result = _evaluate_generation_success_result(env)
+    success = bool(eval_result.get("success", False)) if eval_result is not None else False
+    if not success:
+        return result
+    result[gated_mask] = True
+    return result
 
 
 def _log_success_snapshot(env: ManagerBasedRLMimicEnv, row: dict[str, Any]) -> bool:
