@@ -71,6 +71,21 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         self._ik_solver_init_failed = False
         self._last_ik_input_eef_pose: dict[str, torch.Tensor] | None = None
 
+        # IK telemetry: counters per arm, reset on each episode.  Used to
+        # surface silent Pinocchio IK failures (L-BFGS-B returns the closest
+        # reachable point without raising when the target is infeasible).
+        self._ik_stats: dict[str, dict[str, float]] = {}
+        self._ik_warn_cooldown: dict[str, int] = {}
+        # Position/rotation residual thresholds above which a solve is
+        # considered "bad" (reportable).  Calibrated for SO101 + cloth:
+        # 1 cm is enough to miss the particle-attachment radius,
+        # 15 deg is enough to misalign the gripper jaws with the cloth ridge.
+        self._ik_pos_warn_m = 0.01
+        self._ik_rot_warn_rad = float(np.deg2rad(15.0))
+        # Hard-failure thresholds — treated as "unreachable" in logs.
+        self._ik_pos_fail_m = 0.03
+        self._ik_rot_fail_rad = float(np.deg2rad(30.0))
+
         # Initialize garment loader and config
         self.garment_loader = ChallengeGarmentLoader(cfg.garment_cfg_base_path)
         self.garment_config = self.garment_loader.load_garment_config(
@@ -330,6 +345,9 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         """Reset environments — resets arms to default and resets garment."""
+        # Flush IK telemetry from the previous episode before super() wipes state.
+        self._flush_ik_stats()
+
         super()._reset_idx(env_ids)
 
         # Reset cached reward
@@ -344,6 +362,105 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             self._randomize_table038_texture()
         if hasattr(self, "light_cfg") and self.light_cfg.get("enable", False):
             self._randomize_light()
+
+    # ------------------------------------------------------------------
+    # IK telemetry helpers
+    # ------------------------------------------------------------------
+
+    def _ik_stats_entry(self, arm_name: str) -> dict[str, float]:
+        """Lazily create the per-arm IK stats accumulator."""
+        entry = self._ik_stats.get(arm_name)
+        if entry is None:
+            entry = {
+                "n_calls": 0,
+                "n_warn": 0,        # residual > warn thresholds
+                "n_fail": 0,        # residual > fail thresholds (unreachable)
+                "n_hit_bound": 0,   # solved joints pinned to a URDF bound
+                "n_no_solve": 0,    # compute_joints_from_ee_pose returned None
+                "pos_res_sum": 0.0,
+                "pos_res_max": 0.0,
+                "rot_res_sum": 0.0,
+                "rot_res_max": 0.0,
+            }
+            self._ik_stats[arm_name] = entry
+        return entry
+
+    def _record_ik_diagnostics(self, arm_name: str, diag: dict | None) -> None:
+        """Update per-arm IK counters and emit rate-limited warnings."""
+        if diag is None:
+            entry = self._ik_stats_entry(arm_name)
+            entry["n_calls"] += 1
+            entry["n_no_solve"] += 1
+            # Warn once per cooldown window — IK code-path exceptions are
+            # always noteworthy, unlike routine residual spikes.
+            cooldown = self._ik_warn_cooldown.get(arm_name, 0)
+            if cooldown <= 0:
+                logger.warning(f"[IK][{arm_name}] compute_joints_from_ee_pose returned None (exception path)")
+                self._ik_warn_cooldown[arm_name] = 90  # ~1 s @ 90 Hz
+            else:
+                self._ik_warn_cooldown[arm_name] = cooldown - 1
+            return
+
+        entry = self._ik_stats_entry(arm_name)
+        entry["n_calls"] += 1
+        pos_res = float(diag.get("pos_residual_m", 0.0))
+        rot_res = float(diag.get("rot_residual_rad", 0.0))
+        if not np.isfinite(pos_res):
+            pos_res = 0.0
+        if not np.isfinite(rot_res):
+            rot_res = 0.0
+
+        entry["pos_res_sum"] += pos_res
+        entry["rot_res_sum"] += rot_res
+        if pos_res > entry["pos_res_max"]:
+            entry["pos_res_max"] = pos_res
+        if rot_res > entry["rot_res_max"]:
+            entry["rot_res_max"] = rot_res
+
+        if bool(diag.get("hit_bound", False)):
+            entry["n_hit_bound"] += 1
+
+        is_warn = (pos_res > self._ik_pos_warn_m) or (rot_res > self._ik_rot_warn_rad)
+        is_fail = (pos_res > self._ik_pos_fail_m) or (rot_res > self._ik_rot_fail_rad)
+        if is_fail:
+            entry["n_fail"] += 1
+        elif is_warn:
+            entry["n_warn"] += 1
+
+        if is_fail:
+            cooldown = self._ik_warn_cooldown.get(arm_name, 0)
+            if cooldown <= 0:
+                logger.warning(
+                    f"[IK][{arm_name}] unreachable target: "
+                    f"pos_residual={pos_res * 1000:.1f} mm  "
+                    f"rot_residual={np.degrees(rot_res):.1f} deg  "
+                    f"cost={float(diag.get('cost', 0.0)):.4g}  "
+                    f"hit_bound={bool(diag.get('hit_bound', False))}"
+                )
+                self._ik_warn_cooldown[arm_name] = 90  # ~1 s @ 90 Hz
+            else:
+                self._ik_warn_cooldown[arm_name] = cooldown - 1
+
+    def _flush_ik_stats(self) -> None:
+        """Emit a per-arm summary of IK health for the episode that just ended."""
+        if not self._ik_stats:
+            return
+        for arm_name, entry in self._ik_stats.items():
+            n = int(entry.get("n_calls", 0))
+            if n <= 0:
+                continue
+            pos_mean = entry["pos_res_sum"] / n
+            rot_mean = entry["rot_res_sum"] / n
+            logger.info(
+                f"[IK][{arm_name}][episode end] "
+                f"n={n}  "
+                f"warn={int(entry['n_warn'])}  fail={int(entry['n_fail'])}  "
+                f"bound_hits={int(entry['n_hit_bound'])}  no_solve={int(entry['n_no_solve'])}  "
+                f"pos_res mean={pos_mean * 1000:.2f} mm max={entry['pos_res_max'] * 1000:.2f} mm  "
+                f"rot_res mean={np.degrees(rot_mean):.2f} deg max={np.degrees(entry['rot_res_max']):.2f} deg"
+            )
+        self._ik_stats.clear()
+        self._ik_warn_cooldown.clear()
 
     # ------------------------------------------------------------------
     # Observations (for compatibility with direct env record/replay)
@@ -1180,13 +1297,15 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 gripper_val = float(gripper[i].item()) if gripper is not None else float(current_joints[5])
                 ee_pose = np.concatenate([T_base_target[:3, 3], quat_base_xyzw, [gripper_val]], axis=0)
 
-                joint_targets = compute_joints_from_ee_pose(
+                joint_targets, ik_diag = compute_joints_from_ee_pose(
                     self._ik_solver,
                     current_joints=current_joints,
                     ee_pose=ee_pose,
                     state_unit="rad",
                     orientation_weight=ik_orientation_weight,
+                    return_diagnostics=True,
                 )
+                self._record_ik_diagnostics(arm_name, ik_diag if joint_targets is not None else None)
                 if joint_targets is None:
                     joint_targets = current_joints.copy()
                     joint_targets[5] = gripper_val

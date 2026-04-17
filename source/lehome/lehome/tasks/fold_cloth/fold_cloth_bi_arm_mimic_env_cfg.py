@@ -85,7 +85,11 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # Keep generation deterministic/stable by default.
         self.datagen_config.generation_select_src_per_subtask = True
         self.datagen_config.generation_select_src_per_arm = True
-        self.datagen_config.generation_transform_first_robot_pose = False
+        # Include the source demo's first measured EEF pose in the transformed
+        # segment so interpolation goes to where the robot *actually was* at
+        # subtask start, not just to the first target pose.  This smooths
+        # cross-subtask transitions and reduces early-subtask IK spikes.
+        self.datagen_config.generation_transform_first_robot_pose = True
         self.datagen_config.generation_interpolate_from_last_target_pose = True
         # Keep generated waypoints object-relative where supported by the env.
         self.datagen_config.generation_relative = True
@@ -108,9 +112,12 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_left_middle", "garment_left_upper"],
                     "nn_k": 1,
                 },
+                # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                # Hold the approach pose for ~110 ms (10 steps @ 90 Hz) so the
+                # gripper physically closes on the cloth before the arm lifts.
+                num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
                 description="Left arm reaches and grasps left middle keypoint",
                 next_subtask_description="Bring left middle keypoint to left lower keypoint",
@@ -128,9 +135,11 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_left_middle", "garment_left_lower"],
                     "nn_k": 1,
                 },
-                action_noise=0.0,
+                # Small noise widens the training distribution on transfer motions.
+                action_noise=0.01,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                # Short hold at subtask entry so contacts settle after interp.
+                num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
                 description="Left arm brings left middle keypoint to left lower keypoint",
                 next_subtask_description="Move left arm to waiting position",
@@ -144,7 +153,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_signal="left_at_waiting_pos",
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="random",
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
@@ -164,9 +173,12 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_left_lower", "garment_left_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
+                # Zero noise during a grasp.
                 action_noise=0.0,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                # Hold the approach pose so the gripper fully closes before
+                # the arm begins the fold motion.
+                num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
                 description="Left arm re-grasps left lower keypoint",
                 next_subtask_description="Bring left lower keypoint to left upper keypoint",
@@ -178,15 +190,18 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_left_upper",
                 subtask_term_signal="left_lower_to_upper",
-                subtask_term_offset_range=(0, 0),
+                # Give the cloth 110-280 ms to drape and settle after the
+                # fold signal fires, before the arm retracts to home.
+                subtask_term_offset_range=(10, 25),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
                     "keypoint_names": ["garment_left_lower", "garment_left_upper", "garment_right_upper"],
                     "nn_k": 1,
                 },
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                # Short hold at subtask entry.
+                num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
                 description="Left arm brings left lower keypoint to left upper keypoint",
                 next_subtask_description="Return left arm to home position",
@@ -198,10 +213,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="left_return_home",
-                # Last subtask runs to episode end; keep offsets fixed.
+                # Last subtask runs to episode end; Mimic requires offsets = 0.
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="random",
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
@@ -226,9 +241,12 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_right_middle", "garment_right_upper"],
                     "nn_k": 1,
                 },
+                # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                # Hold the approach pose for ~110 ms so the gripper closes
+                # before the arm lifts.
+                num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
                 description="Right arm reaches and grasps right middle keypoint",
                 next_subtask_description="Bring right middle keypoint to right lower keypoint",
@@ -246,9 +264,9 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_right_middle", "garment_right_lower"],
                     "nn_k": 1,
                 },
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
                 description="Right arm brings right middle keypoint to right lower keypoint",
                 next_subtask_description="Move right arm to waiting position",
@@ -262,7 +280,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_signal="right_at_waiting_pos",
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="random",
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
@@ -282,9 +300,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                     "keypoint_names": ["garment_right_lower", "garment_right_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
+                # Zero noise during a grasp.
                 action_noise=0.0,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                num_fixed_steps=10,
                 apply_noise_during_interpolation=False,
                 description="Right arm re-grasps right lower keypoint",
                 next_subtask_description="Bring right lower keypoint to right upper keypoint",
@@ -296,15 +315,17 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_right_upper",
                 subtask_term_signal="right_lower_to_upper",
-                subtask_term_offset_range=(0, 0),
+                # Give the cloth time to drape and settle after the fold
+                # signal fires, before the arm retracts.
+                subtask_term_offset_range=(10, 25),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
                     "keypoint_names": ["garment_right_lower", "garment_right_upper", "garment_left_upper"],
                     "nn_k": 1,
                 },
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=5,
-                num_fixed_steps=0,
+                num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
                 description="Right arm brings right lower keypoint to right upper keypoint",
                 next_subtask_description="Return right arm to home position",
@@ -316,10 +337,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="right_return_home",
-                # Last subtask runs to episode end; keep offsets fixed.
+                # Last subtask runs to episode end; Mimic requires offsets = 0.
                 subtask_term_offset_range=(0, 0),
                 selection_strategy="random",
-                action_noise=0.0,
+                action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
                 apply_noise_during_interpolation=False,

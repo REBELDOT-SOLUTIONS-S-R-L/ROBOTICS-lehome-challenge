@@ -360,7 +360,8 @@ def compute_joints_from_ee_pose(
     state_unit: str,
     orientation_weight: float = 1.0,
     joint_bounds_rad: list[tuple[float, float]] | None = None,
-) -> np.ndarray | None:
+    return_diagnostics: bool = False,
+):
     """
     Compute joint angles from end-effector pose via IK (inverse of compute_ee_pose_single_arm).
 
@@ -375,9 +376,15 @@ def compute_joints_from_ee_pose(
         joint_bounds_rad: Optional per-joint (lower, upper) bounds in radians
                          passed to the IK solver, overriding the URDF joint
                          limits when provided.
+        return_diagnostics: When True, return ``(joints, diag)`` where
+            ``diag`` is the dict described in ``RobotKinematics.inverse_kinematics``
+            (or ``None`` if IK raised an exception before solving).
 
     Returns:
-        6D joint angles, or None if IK fails
+        If ``return_diagnostics`` is False (default): 6D joint angles, or
+        ``None`` if IK fails.
+
+        If ``return_diagnostics`` is True: tuple ``(joints_or_None, diag_or_None)``.
     """
     try:
         # Extract pose components
@@ -397,10 +404,16 @@ def compute_joints_from_ee_pose(
             current_deg = current_joints
 
         # IK solving (first 5 joints)
-        ik_result_deg = solver.inverse_kinematics(
+        ik_out = solver.inverse_kinematics(
             current_deg, T, position_weight=1.0, orientation_weight=orientation_weight,
             joint_bounds_rad=joint_bounds_rad,
+            return_diagnostics=return_diagnostics,
         )
+        if return_diagnostics:
+            ik_result_deg, diag = ik_out
+        else:
+            ik_result_deg = ik_out
+            diag = None
 
         # Convert back to original unit
         if state_unit == "rad":
@@ -411,8 +424,13 @@ def compute_joints_from_ee_pose(
         # Combine: first 5 from IK, gripper from ee_pose
         result = ik_joints.copy()
         result[5] = gripper
+        result = result[:6]
 
-        return result[:6]
+        if return_diagnostics:
+            return result, diag
+        return result
 
     except Exception:
+        if return_diagnostics:
+            return None, None
         return None
