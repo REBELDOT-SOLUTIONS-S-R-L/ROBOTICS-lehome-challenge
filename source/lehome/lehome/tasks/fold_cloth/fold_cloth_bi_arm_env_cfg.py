@@ -304,8 +304,25 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     subtask_release_zone_width_fraction: float = 0.60
     subtask_release_zone_lower_fraction: float = 0.50
     subtask_lower_to_upper_threshold_m: float = 0.15
+    # ``prepare_for_grasp_*`` subtask thresholds.  The Z cutoff is the main
+    # knob (arm has descended into grasp attitude); the XY keypoint gate
+    # disambiguates which grasp the arm is preparing for so the two prep
+    # subtasks per arm show up as distinct 0->1 transitions in the
+    # annotated source trajectory.
+    subtask_prep_for_grasp_eef_z_m: float = 0.53
+    subtask_prep_for_grasp_xy_threshold_m: float = 0.15
     subtask_signal_min_consecutive_steps: int = 3
     return_home_min_consecutive_steps: int = 10
+    # Verify-only thresholds used by ``verify_subtask_completion`` during
+    # MimicGen generation.  DataGenerator pads each subtask by a random
+    # ``subtask_term_offset_range`` after the annotated signal fires, so the
+    # strict online thresholds above usually evaluate False at trajectory
+    # end even when the subtask goal was achieved mid-window.  These looser
+    # values give verification enough grace to accept those trajectories.
+    # Set a value to ``None`` to fall back to the strict online threshold.
+    verify_subtask_grasp_eef_to_keypoint_threshold_m: float | None = 0.30
+    verify_subtask_release_zone_width_fraction: float | None = 0.90
+    verify_subtask_release_zone_lower_fraction: float | None = 0.80
 
     def __post_init__(self):
         """Post initialization."""

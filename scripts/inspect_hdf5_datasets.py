@@ -568,9 +568,13 @@ def analyze_subtask_consistency():
         demos = get_demos(f)
 
         signal_order = [
-            "grasp_left_lower", "grasp_right_lower",
-            "left_middle_to_lower", "right_middle_to_lower",
+            "prepare_for_grasp_left_middle", "prepare_for_grasp_right_middle",
             "grasp_left_middle", "grasp_right_middle",
+            "left_middle_to_lower", "right_middle_to_lower",
+            "release_left_middle", "release_right_middle",
+            "left_at_waiting_pos", "right_at_waiting_pos",
+            "prepare_for_grasp_left_lower", "prepare_for_grasp_right_lower",
+            "grasp_left_lower", "grasp_right_lower",
             "left_lower_to_upper", "right_lower_to_upper",
             "left_return_home", "right_return_home",
         ]

@@ -115,6 +115,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="Write a pose-trace CSV alongside generation for offline debugging.",
     )
     runtime_group.add_argument(
+        "--save_failed",
+        action="store_true",
+        default=False,
+        help=(
+            "Save failed generated episodes with the full recorded trajectory "
+            "(observations, actions, states) — the pre-minimal-save behavior. "
+            "When omitted, failed episodes are collapsed to the minimal record "
+            "(initial_state/garment_initial_pose, source_demo_indices, fail_reason)."
+        ),
+    )
+    runtime_group.add_argument(
         "--pose_output_file",
         type=str,
         default=None,

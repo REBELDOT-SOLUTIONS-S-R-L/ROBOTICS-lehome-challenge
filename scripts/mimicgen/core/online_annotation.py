@@ -24,19 +24,23 @@ _GRASP_SIGNALS = {
 }
 _DEFAULT_ARM_QUEUES = {
     "left_arm": [
+        "prepare_for_grasp_left_middle",
         "grasp_left_middle",
         "left_middle_to_lower",
         "release_left_middle",
         "left_at_waiting_pos",
+        "prepare_for_grasp_left_lower",
         "grasp_left_lower",
         "left_lower_to_upper",
         "left_return_home",
     ],
     "right_arm": [
+        "prepare_for_grasp_right_middle",
         "grasp_right_middle",
         "right_middle_to_lower",
         "release_right_middle",
         "right_at_waiting_pos",
+        "prepare_for_grasp_right_lower",
         "grasp_right_lower",
         "right_lower_to_upper",
         "right_return_home",

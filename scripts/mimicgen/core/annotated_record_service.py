@@ -165,12 +165,16 @@ def _build_pose_sequence(args: argparse.Namespace, env: DirectRLEnv) -> PoseSequ
 
 
 _SIGNAL_LABELS = {
+    "prepare_for_grasp_left_middle": "approach left middle",
+    "prepare_for_grasp_right_middle": "approach right middle",
     "grasp_left_middle": "grasp left middle",
     "grasp_right_middle": "grasp right middle",
     "left_middle_to_lower": "move left middle to lower",
     "right_middle_to_lower": "move right middle to lower",
     "left_at_waiting_pos": "left arm to waiting position",
     "right_at_waiting_pos": "right arm to waiting position",
+    "prepare_for_grasp_left_lower": "approach left lower",
+    "prepare_for_grasp_right_lower": "approach right lower",
     "grasp_left_lower": "grasp left lower",
     "grasp_right_lower": "grasp right lower",
     "left_lower_to_upper": "move left lower to upper",

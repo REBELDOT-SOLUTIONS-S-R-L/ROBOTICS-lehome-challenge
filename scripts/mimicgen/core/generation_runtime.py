@@ -144,6 +144,126 @@ def _restore_cuda_cloth_visual_pose_to_initial(env: ManagerBasedRLMimicEnv) -> N
         obj.set_world_pose(position=init_pos, orientation=init_ori)
 
 
+def _extract_source_demo_selections_from_buffer(
+    env: ManagerBasedRLMimicEnv, env_id: int
+) -> dict[str, list[int]]:
+    """Read source_demo_indices out of the in-memory recorder buffer.
+
+    DataGenerator appends these under ``data["source_demo_indices"]/<arm>`` as
+    a list of tensors (pre_export has not yet been called when we read this,
+    so values are still lists).  We flatten whatever is there into Python ints
+    so ``record_failed_episode_minimal`` can rebuild a clean minimal record.
+    """
+    recorder = getattr(env, "recorder_manager", None)
+    if recorder is None:
+        return {}
+    episode = getattr(recorder, "_episodes", {}).get(int(env_id))
+    if episode is None:
+        return {}
+    data = getattr(episode, "data", None) or {}
+    src = data.get("source_demo_indices")
+    if not isinstance(src, dict):
+        return {}
+
+    out: dict[str, list[int]] = {}
+    for arm_name, val in src.items():
+        if isinstance(val, list):
+            if not val:
+                continue
+            tensor = val[0] if len(val) == 1 else torch.stack(val)
+        elif isinstance(val, torch.Tensor):
+            tensor = val
+        else:
+            continue
+        try:
+            flat = tensor.detach().reshape(-1).tolist()
+        except Exception:
+            continue
+        out[str(arm_name)] = [int(v) for v in flat]
+    return out
+
+
+def _write_minimal_failed_episode(
+    env: ManagerBasedRLMimicEnv,
+    env_id: int,
+    *,
+    source_demo_selections: dict[str, list[int]] | None,
+    fail_reason: str,
+) -> None:
+    """Delegate to env.record_failed_episode_minimal with safe logging."""
+    _record_failed = getattr(env, "record_failed_episode_minimal", None)
+    if not callable(_record_failed):
+        return
+    try:
+        _record_failed(
+            env_id=env_id,
+            source_demo_selections=source_demo_selections,
+            fail_reason=fail_reason,
+        )
+    except Exception as inner_exc:
+        logger.error(
+            "Failed to write minimal failed episode for env %d: %s",
+            env_id,
+            inner_exc,
+        )
+
+
+def _export_full_failed_episode(
+    env: ManagerBasedRLMimicEnv,
+    env_id: int,
+    *,
+    source_demo_selections: dict[str, list[int]] | None,
+    fail_reason: str,
+) -> None:
+    """Export the in-memory recorder buffer as a failed episode (full trajectory).
+
+    Used when ``--save_failed`` is on and a ``SubtaskVerificationError`` aborts
+    the trial before DataGenerator reaches its own ``export_episodes`` call.
+    The buffer already holds every pre-step observation/action/state recorded
+    up to the failure; we tack on ``source_demo_indices`` and ``fail_reason``,
+    mark success=False, and flush through the normal recorder path.
+    """
+    recorder = getattr(env, "recorder_manager", None)
+    if recorder is None or not getattr(recorder, "active_terms", []):
+        return
+    env_id_tensor = torch.tensor([int(env_id)], dtype=torch.int64, device=env.device)
+
+    # Attach source_demo_indices (DataGenerator never reached its own add).
+    for arm_name, selections in (source_demo_selections or {}).items():
+        if not selections:
+            continue
+        tensor = torch.tensor(
+            [[int(v) for v in selections]], dtype=torch.int64, device=env.device,
+        )
+        recorder.add_to_episodes(
+            f"source_demo_indices/{arm_name}",
+            tensor,
+            env_ids=env_id_tensor,
+        )
+
+    # Encode fail_reason as uint8 bytes so it survives HDF5 serialization
+    # alongside the fixed-length trajectory tensors.
+    reason_str = str(fail_reason) if fail_reason else "unknown"
+    reason_bytes = reason_str.encode("utf-8") or b"unknown"
+    reason_tensor = torch.tensor(
+        [list(reason_bytes)], dtype=torch.uint8, device=env.device,
+    )
+    recorder.add_to_episodes("fail_reason", reason_tensor, env_ids=env_id_tensor)
+
+    recorder.set_success_to_episodes(
+        env_id_tensor,
+        torch.tensor([[False]], dtype=torch.bool, device=env.device),
+    )
+    try:
+        recorder.export_episodes(env_ids=env_id_tensor)
+    except Exception as inner_exc:
+        logger.error(
+            "Failed to export full failed episode for env %d: %s",
+            env_id,
+            inner_exc,
+        )
+
+
 async def run_data_generator_with_object_pose_failures(
     env: ManagerBasedRLMimicEnv,
     env_id: int,
@@ -153,8 +273,25 @@ async def run_data_generator_with_object_pose_failures(
     success_term: TerminationTermCfg,
     pause_subtask: bool = False,
     motion_planner: Any = None,
+    save_failed_full: bool = False,
 ):
-    """Run Mimic generation while treating cloth object-pose failures as failed trials."""
+    """Run Mimic generation while treating cloth object-pose failures as failed trials.
+
+    Export policy:
+
+    * Successful trials are always written in full to the primary dataset.
+    * Failed trials follow ``save_failed_full``:
+
+      - ``False`` (default) — wrapper owns the export (``export_demo=False``)
+        and collapses every failure (mid-episode ``SubtaskVerificationError``
+        or final fold-success check) to the minimal record
+        ``{initial_state/garment_initial_pose, source_demo_indices, fail_reason}``.
+      - ``True`` — DataGenerator writes the full recorded trajectory to the
+        failed-episode handler on fold-success failure; mid-episode
+        ``SubtaskVerificationError`` still triggers the minimal record since
+        DataGenerator never reaches its own export call in that path.
+    """
+    env_id_tensor = torch.tensor([int(env_id)], dtype=torch.int64, device=env.device)
     while True:
         try:
             results = await data_generator.generate(
@@ -164,10 +301,18 @@ async def run_data_generator_with_object_pose_failures(
                 env_action_queue=env_action_queue,
                 pause_subtask=pause_subtask,
                 motion_planner=motion_planner,
+                export_demo=bool(save_failed_full),
             )
         except (ClothObjectPoseUnavailableError, ClothObjectPoseValidationError) as exc:
             mimic_generation.num_failures += 1
             mimic_generation.num_attempts += 1
+            # No valid initial state was established; drop the buffer without
+            # attempting to write a failed record.
+            recorder = getattr(env, "recorder_manager", None)
+            if recorder is not None:
+                from isaaclab.utils.datasets import EpisodeData
+
+                recorder._episodes[int(env_id)] = EpisodeData()
             print(
                 f"Warning: generation trial for env {env_id} failed due to invalid cloth object poses: {exc}"
             )
@@ -175,20 +320,24 @@ async def run_data_generator_with_object_pose_failures(
         except SubtaskVerificationError as exc:
             mimic_generation.num_failures += 1
             mimic_generation.num_attempts += 1
-            _record_failed = getattr(env, "record_failed_episode_minimal", None)
-            if callable(_record_failed):
-                try:
-                    _record_failed(
-                        env_id=env_id,
-                        source_demo_selections=exc.source_demo_selections,
-                        fail_reason=exc.fail_reason,
-                    )
-                except Exception as inner_exc:
-                    logger.error(
-                        "Failed to write minimal failed episode for env %d: %s",
-                        env_id,
-                        inner_exc,
-                    )
+            # DataGenerator never reached its own export in this path, so we
+            # write the failed record here either way.  With ``--save_failed``
+            # we flush the partial trajectory accumulated up to the failure;
+            # without it we collapse to the minimal 3-field record.
+            if save_failed_full:
+                _export_full_failed_episode(
+                    env,
+                    env_id,
+                    source_demo_selections=exc.source_demo_selections,
+                    fail_reason=exc.fail_reason,
+                )
+            else:
+                _write_minimal_failed_episode(
+                    env,
+                    env_id,
+                    source_demo_selections=exc.source_demo_selections,
+                    fail_reason=exc.fail_reason,
+                )
             print(
                 f"Warning: subtask verification failed for env {env_id} "
                 f"({exc.arm_name} subtask={exc.subtask_index}): {exc.fail_reason}"
@@ -201,8 +350,29 @@ async def run_data_generator_with_object_pose_failures(
 
         if bool(results["success"]):
             mimic_generation.num_success += 1
+            if not save_failed_full:
+                # Wrapper owns export — write the successful episode now.
+                try:
+                    env.recorder_manager.export_episodes(env_ids=env_id_tensor)
+                except Exception as export_exc:
+                    logger.error(
+                        "Failed to export successful episode for env %d: %s",
+                        env_id,
+                        export_exc,
+                    )
         else:
             mimic_generation.num_failures += 1
+            if not save_failed_full:
+                source_demo_selections = _extract_source_demo_selections_from_buffer(
+                    env, env_id
+                )
+                _write_minimal_failed_episode(
+                    env,
+                    env_id,
+                    source_demo_selections=source_demo_selections,
+                    fail_reason="fold_success_check_failed",
+                )
+            # else: DataGenerator already wrote the full failed episode.
         mimic_generation.num_attempts += 1
 
 
@@ -220,6 +390,7 @@ def setup_async_generation(
     post_reset_settle_steps: int = 0,
     post_reset_hold_action: torch.Tensor | None = None,
     motion_planners: Any = None,
+    save_failed_full: bool = False,
 ) -> dict[str, Any]:
     """Setup async generation with robust HDF5 datagen pool loading."""
     asyncio_event_loop = asyncio.get_event_loop()
@@ -270,6 +441,7 @@ def setup_async_generation(
                 success_term,
                 pause_subtask=pause_subtask,
                 motion_planner=env_motion_planner,
+                save_failed_full=save_failed_full,
             )
         )
         data_generator_asyncio_tasks.append(task)

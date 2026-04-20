@@ -33,6 +33,14 @@ _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M = 0.05
 _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
 _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M = 0.53
 _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M = 0.12
+# ``prepare_for_grasp_*`` fires when the arm has descended into grasp
+# attitude with the gripper still open, above a specific target keypoint.
+# Z threshold is the user-facing "eef_z < 0.53" cutoff; the per-keypoint
+# XY proximity gate keeps the two prep subtasks per arm (middle vs lower)
+# distinguishable in the annotation timeline — without it, the first
+# descent transition would claim both prep subtasks' boundaries.
+_DEFAULT_PREP_FOR_GRASP_EEF_Z_M = 0.53
+_DEFAULT_PREP_FOR_GRASP_XY_THRESHOLD_M = 0.15
 # Narrow release-zone geometry (in the garment's own in-plane frame).
 # The "big square" is the quad formed by the 4 corner keypoints
 # (garment_{left,right}_{lower,upper}).  Inside that square we carve out a
@@ -99,6 +107,8 @@ class FoldClothSubtaskObservationContext:
     middle_to_lower_threshold_m: float
     middle_to_lower_middle_keypoint_max_z_m: float
     lower_to_upper_threshold_m: float
+    prep_for_grasp_eef_z_m: float
+    prep_for_grasp_xy_threshold_m: float
     # Per-arm ``(num_envs, 1)`` bool tensor: EEF's world XY is inside the narrow
     # release zone built from the 4 garment corner keypoints.  Empty dict when
     # the corners are not available (degenerate cloth state), in which case the
@@ -526,6 +536,16 @@ def build_subtask_observation_context(
             "subtask_lower_to_upper_threshold_m",
             _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
         ),
+        prep_for_grasp_eef_z_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_eef_z_m",
+            _DEFAULT_PREP_FOR_GRASP_EEF_Z_M,
+        ),
+        prep_for_grasp_xy_threshold_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_xy_threshold_m",
+            _DEFAULT_PREP_FOR_GRASP_XY_THRESHOLD_M,
+        ),
         eef_in_release_zone_by_arm=eef_in_release_zone_map,
         fold_success=fold_success_column,
     )
@@ -565,12 +585,53 @@ def _context_eef_to_keypoint_distance(
     return torch.linalg.norm(eef_pos - kp_pos, dim=-1, keepdim=True)
 
 
+def _context_eef_z(
+    context: FoldClothSubtaskObservationContext,
+    arm_name: str,
+) -> torch.Tensor:
+    eef_pos = context.eef_world_positions.get(arm_name)
+    if eef_pos is None:
+        return _context_full_float_column(context, float("inf"))
+    return eef_pos[..., 2:3]
+
+
+def _context_prep_for_grasp(
+    context: FoldClothSubtaskObservationContext,
+    arm_name: str,
+    target_keypoint: str,
+) -> torch.Tensor:
+    """``prepare_for_grasp_*`` predicate for one arm/keypoint pair.
+
+    True when: gripper is still open, EEF has descended below the z cutoff,
+    and the EEF is already horizontally close to the target keypoint (so
+    the signal fires in the final approach to *that* grasp, not to the
+    other one).
+    """
+    gripper_open = ~context.gripper_closed_by_arm.get(
+        arm_name, _context_false_bool_column(context)
+    )
+    eef_z_below = _context_eef_z(context, arm_name) < context.prep_for_grasp_eef_z_m
+    near_target = (
+        _context_eef_to_keypoint_distance(context, arm_name, target_keypoint)
+        <= context.prep_for_grasp_xy_threshold_m
+    )
+    return gripper_open & eef_z_below & near_target
+
+
 def get_subtask_signal_observation_from_context(
     context: FoldClothSubtaskObservationContext,
     signal_name: str,
 ) -> torch.Tensor:
     """Evaluate a single instantaneous subtask predicate from precomputed state."""
     signal_name = str(signal_name)
+    if signal_name == "prepare_for_grasp_left_middle":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_middle")
+    if signal_name == "prepare_for_grasp_right_middle":
+        return _context_prep_for_grasp(context, "right_arm", "garment_right_middle")
+    if signal_name == "prepare_for_grasp_left_lower":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_lower")
+    if signal_name == "prepare_for_grasp_right_lower":
+        return _context_prep_for_grasp(context, "right_arm", "garment_right_lower")
     if signal_name == "grasp_left_middle":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
             _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_middle")
@@ -817,6 +878,38 @@ def keypoint_pair_distance(
     return torch.linalg.norm(pos_a - pos_b, dim=-1, keepdim=True)
 
 
+def prepare_for_grasp_left_middle(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_middle", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_middle(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_middle", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_lower", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_lower", env_ids=env_ids
+    )
+
+
 def grasp_left_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     threshold = _cfg_float(
         env,
@@ -982,6 +1075,8 @@ def right_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
 
 
 SUBTASK_SIGNAL_OBSERVATION_FNS = {
+    "prepare_for_grasp_left_middle": prepare_for_grasp_left_middle,
+    "prepare_for_grasp_right_middle": prepare_for_grasp_right_middle,
     "grasp_left_middle": grasp_left_middle,
     "grasp_right_middle": grasp_right_middle,
     "left_middle_to_lower": left_middle_to_lower,
@@ -990,6 +1085,8 @@ SUBTASK_SIGNAL_OBSERVATION_FNS = {
     "release_right_middle": release_right_middle,
     "left_at_waiting_pos": left_at_waiting_pos,
     "right_at_waiting_pos": right_at_waiting_pos,
+    "prepare_for_grasp_left_lower": prepare_for_grasp_left_lower,
+    "prepare_for_grasp_right_lower": prepare_for_grasp_right_lower,
     "grasp_left_lower": grasp_left_lower,
     "grasp_right_lower": grasp_right_lower,
     "left_lower_to_upper": left_lower_to_upper,
@@ -1042,6 +1139,10 @@ __all__ = [
     "grasp_left_middle",
     "grasp_right_lower",
     "grasp_right_middle",
+    "prepare_for_grasp_left_lower",
+    "prepare_for_grasp_left_middle",
+    "prepare_for_grasp_right_lower",
+    "prepare_for_grasp_right_middle",
     "arm_at_waiting_pos",
     "gripper_closed",
     "keypoint_pair_distance",

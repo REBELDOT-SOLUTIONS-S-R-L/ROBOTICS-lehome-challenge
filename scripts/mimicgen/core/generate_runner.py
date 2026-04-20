@@ -532,6 +532,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         log_success=bool(parsed_args.log_success),
         post_reset_settle_steps=garment_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
+        save_failed_full=bool(getattr(parsed_args, "save_failed", False)),
     )
 
     import isaaclab_mimic.datagen.generation as mimic_generation

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import random
+from contextlib import contextmanager
 from pathlib import Path
 from collections.abc import Mapping, Sequence
 from typing import Any, Dict
@@ -1481,19 +1482,30 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     # discard otherwise-recoverable episodes because, for example, a brief
     # joint excursion leaves ``*_at_waiting_pos`` False at the exact moment
     # the offset range elapses, yet the eventual fold still lands.
-    # With the ``release_*_middle`` subtask inserted at index 2, the indices
-    # for the critical drop / grasp checks shift by +1 from ``grasp_*_lower``
-    # onward.  Verified subtasks are:
-    #   0 -> grasp_*_middle
-    #   1 -> *_middle_to_lower (EEF in drop zone, gripper still closed)
-    #   2 -> release_*_middle  (gripper open inside zone + middle keypoint low)
-    #   4 -> grasp_*_lower
-    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (0, 1, 2, 4)
+    # Subtask numbering (prepare_for_grasp_* inserted before both grasps):
+    #   0 -> prepare_for_grasp_*_middle
+    #   1 -> grasp_*_middle
+    #   2 -> *_middle_to_lower        (carry, gripper still closed)
+    #   3 -> release_*_middle         (open, drop zone, middle kp low)
+    #   4 -> *_at_waiting_pos
+    #   5 -> prepare_for_grasp_*_lower
+    #   6 -> grasp_*_lower
+    #   7 -> *_lower_to_upper
+    #   8 -> *_return_home
+    #
+    # Verified subtasks: only the two grasps.  The other critical signals
+    # (carry, release) are sensitive to DataGenerator's subtask_term_offset
+    # padding — they evaluate False at the verify moment even on correct
+    # trajectories because the arm has usually moved on or the gripper has
+    # opened/closed again by then.  The grasps are stable end-of-window
+    # checkpoints and are enough to catch fundamentally broken rollouts;
+    # the rest is re-validated by the final fold-success check.
+    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (1, 6)
 
     # Zero-based index of the ``*_lower_to_upper`` subtask (the actual fold).
     # Only after both arms have completed this subtask does the fold-success
     # check become meaningful — see ``is_final_fold_complete``.
-    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 5
+    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 7
 
     def verify_subtask_completion(
         self,
@@ -1549,7 +1561,8 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
         env_id_tensor = torch.tensor([int(env_id)], dtype=torch.int64, device=self.device)
         try:
-            signals = self.get_subtask_term_signals(env_ids=env_id_tensor)
+            with self._verify_subtask_threshold_overrides():
+                signals = self.get_subtask_term_signals(env_ids=env_id_tensor)
         except Exception as exc:
             logger.debug(
                 "verify_subtask_completion: signal eval failed for %s[%d]: %s",
@@ -1572,6 +1585,48 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             f"subtask_term_signal '{signal_name}' was False at subtask "
             f"{subtask_index} completion ({arm_name})"
         )
+
+    # Map of cfg attributes that ``verify_subtask_completion`` may loosen.
+    # Each entry points to the optional ``verify_*`` attribute whose value,
+    # when not None, temporarily overrides the strict online threshold.
+    _VERIFY_SUBTASK_THRESHOLD_ATTR_MAP: tuple[tuple[str, str], ...] = (
+        (
+            "subtask_grasp_eef_to_keypoint_threshold_m",
+            "verify_subtask_grasp_eef_to_keypoint_threshold_m",
+        ),
+        (
+            "subtask_release_zone_width_fraction",
+            "verify_subtask_release_zone_width_fraction",
+        ),
+        (
+            "subtask_release_zone_lower_fraction",
+            "verify_subtask_release_zone_lower_fraction",
+        ),
+    )
+
+    @contextmanager
+    def _verify_subtask_threshold_overrides(self):
+        """Temporarily swap strict online thresholds for looser verify values.
+
+        The subtask-termination signals are driven by a handful of cfg floats
+        (grasp radius, release-zone width/lower fractions).  During normal
+        online evaluation we want the tight thresholds that define clean
+        annotation boundaries; during MimicGen subtask verification we want
+        the grace-margin values so the end-of-window snapshot still evaluates
+        True after DataGenerator's offset padding.
+        """
+        previous: dict[str, Any] = {}
+        try:
+            for strict_attr, verify_attr in self._VERIFY_SUBTASK_THRESHOLD_ATTR_MAP:
+                override = getattr(self.cfg, verify_attr, None)
+                if override is None:
+                    continue
+                previous[strict_attr] = getattr(self.cfg, strict_attr)
+                setattr(self.cfg, strict_attr, override)
+            yield
+        finally:
+            for strict_attr, original in previous.items():
+                setattr(self.cfg, strict_attr, original)
 
     # ------------------------------------------------------------------
     # Subtask-completion bookkeeping (drives the success-check gate)
@@ -1662,9 +1717,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             getattr(garment_obj, "reset_pose", None) if garment_obj is not None else None
         )
         if garment_reset_pose is not None:
+            # Match the normal-path shape (1, 7) written by DataGenerator so
+            # downstream readers don't have to special-case failed rows.
             pose_tensor = torch.as_tensor(
                 garment_reset_pose, dtype=torch.float32, device=self.device,
-            ).detach().clone()
+            ).detach().clone().reshape(-1).unsqueeze(0)
             new_data["initial_state"] = {"garment_initial_pose": pose_tensor}
 
         src_group: Dict[str, torch.Tensor] = {}
@@ -1672,8 +1729,9 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             selections_list = [int(v) for v in selections] if selections else []
             if not selections_list:
                 continue
+            # Match the normal-path shape (1, N) for consistency.
             src_group[str(arm_name)] = torch.tensor(
-                selections_list, dtype=torch.int64, device=self.device,
+                [selections_list], dtype=torch.int64, device=self.device,
             )
         if src_group:
             new_data["source_demo_indices"] = src_group
