@@ -1481,12 +1481,19 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     # discard otherwise-recoverable episodes because, for example, a brief
     # joint excursion leaves ``*_at_waiting_pos`` False at the exact moment
     # the offset range elapses, yet the eventual fold still lands.
-    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (0, 1, 3)
+    # With the ``release_*_middle`` subtask inserted at index 2, the indices
+    # for the critical drop / grasp checks shift by +1 from ``grasp_*_lower``
+    # onward.  Verified subtasks are:
+    #   0 -> grasp_*_middle
+    #   1 -> *_middle_to_lower (EEF in drop zone, gripper still closed)
+    #   2 -> release_*_middle  (gripper open inside zone + middle keypoint low)
+    #   4 -> grasp_*_lower
+    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (0, 1, 2, 4)
 
     # Zero-based index of the ``*_lower_to_upper`` subtask (the actual fold).
     # Only after both arms have completed this subtask does the fold-success
     # check become meaningful — see ``is_final_fold_complete``.
-    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 4
+    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 5
 
     def verify_subtask_completion(
         self,
@@ -1503,12 +1510,15 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         as the ``fail_reason`` written to the failed-episode dataset.
 
         Only the subtasks in ``_VERIFIED_SUBTASK_INDICES`` are verified — by
-        default the two grasp subtasks (``grasp_*_middle``, ``grasp_*_lower``)
-        and the first transfer (``*_middle_to_lower``).  Failing any of these
-        means the arm never picked up or dropped the cloth where it should,
-        and the fold cannot succeed downstream.  Other subtasks are left to
-        the final success term so we don't discard trials for transient
-        joint-range excursions that the episode recovers from.
+        default the two grasp subtasks (``grasp_*_middle``, ``grasp_*_lower``),
+        the pre-release transfer (``*_middle_to_lower``), and the release
+        itself (``release_*_middle``).  Failing any of these means the arm
+        either never picked up the cloth, never reached the drop zone, or
+        failed to actually detach the cloth in the zone — none of which the
+        fold can recover from.  Other subtasks (``*_at_waiting_pos``,
+        ``*_lower_to_upper``, ``*_return_home``) are left to the final
+        success term so we don't discard trials for transient joint-range
+        excursions that the episode recovers from.
 
         For the verified indices, the implementation reads the
         ``subtask_term_signal`` declared on the matching :class:`SubTaskConfig`

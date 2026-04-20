@@ -6,10 +6,12 @@ determine spatial relationships between the robot and grasp targets.
 
 Subtask phases:
   1. Reach & grasp middle keypoints
-  2. Bring middle keypoints to lower keypoints
-  3. Re-grasp lower keypoints
-  4. Bring lower keypoints to upper keypoints
-  5. Return both arms to the home pose
+  2. Bring middle keypoints over the release zone (gripper still closed)
+  3. Open gripper and release middle keypoints inside the drop zone
+  4. Move both arms to the waiting pose
+  5. Re-grasp lower keypoints
+  6. Bring lower keypoints to upper keypoints
+  7. Return both arms to the home pose
 
 Task success in this environment is measured by:
   - Garment fold success from 6 garment check_points and garment-specific
@@ -124,7 +126,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 1: Bring left middle keypoint to left lower keypoint
+        # Subtask 1: Bring left middle keypoint over the release zone
+        #   New termination semantics: gripper still closed AND left EEF's XY
+        #   is inside the narrow drop zone derived from the 4 garment corner
+        #   keypoints.  The actual cloth release is its own subtask (2).
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_lower",
@@ -141,12 +146,37 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 # Short hold at subtask entry so contacts settle after interp.
                 num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
-                description="Left arm brings left middle keypoint to left lower keypoint",
+                description="Left arm carries left middle keypoint over the release zone",
+                next_subtask_description="Release left middle keypoint inside the drop zone",
+            )
+        )
+
+        # Subtask 2: Release left middle keypoint inside the drop zone
+        #   Termination: gripper OPEN + EEF still inside the narrow drop zone +
+        #   tracked middle keypoint has fallen below the configured max Z.
+        left_subtask_configs.append(
+            SubTaskConfig(
+                object_ref="garment_left_lower",
+                subtask_term_signal="release_left_middle",
+                subtask_term_offset_range=(5, 15),
+                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy_kwargs={
+                    "keypoint_names": ["garment_left_middle", "garment_left_lower"],
+                    "nn_k": 1,
+                },
+                # Zero noise during the release: jitter at the moment the jaws
+                # open can drag the cloth off the target lower corner.
+                action_noise=0.0,
+                num_interpolation_steps=5,
+                # Hold open long enough for the cloth to detach and settle.
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Left arm opens gripper and releases middle keypoint in the drop zone",
                 next_subtask_description="Move left arm to waiting position",
             )
         )
 
-        # Subtask 2: Move left arm to waiting position (home pose)
+        # Subtask 3: Move left arm to waiting position (home pose)
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -162,7 +192,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 3: Re-grasp left lower keypoint
+        # Subtask 4: Re-grasp left lower keypoint
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_lower",
@@ -185,7 +215,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 4: Bring left lower keypoint to left upper keypoint
+        # Subtask 5: Bring left lower keypoint to left upper keypoint
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_upper",
@@ -208,7 +238,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 5: Return left arm to home position
+        # Subtask 6: Return left arm to home position
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -253,7 +283,8 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 1: Bring right middle keypoint to right lower keypoint
+        # Subtask 1: Bring right middle keypoint over the release zone
+        #   See left-arm subtask 1 for the new termination semantics.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_lower",
@@ -268,12 +299,32 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 num_interpolation_steps=5,
                 num_fixed_steps=5,
                 apply_noise_during_interpolation=False,
-                description="Right arm brings right middle keypoint to right lower keypoint",
+                description="Right arm carries right middle keypoint over the release zone",
+                next_subtask_description="Release right middle keypoint inside the drop zone",
+            )
+        )
+
+        # Subtask 2: Release right middle keypoint inside the drop zone
+        right_subtask_configs.append(
+            SubTaskConfig(
+                object_ref="garment_right_lower",
+                subtask_term_signal="release_right_middle",
+                subtask_term_offset_range=(5, 15),
+                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy_kwargs={
+                    "keypoint_names": ["garment_right_middle", "garment_right_lower"],
+                    "nn_k": 1,
+                },
+                action_noise=0.0,
+                num_interpolation_steps=5,
+                num_fixed_steps=10,
+                apply_noise_during_interpolation=False,
+                description="Right arm opens gripper and releases middle keypoint in the drop zone",
                 next_subtask_description="Move right arm to waiting position",
             )
         )
 
-        # Subtask 2: Move right arm to waiting position (home pose)
+        # Subtask 3: Move right arm to waiting position (home pose)
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -289,7 +340,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 3: Re-grasp right lower keypoint
+        # Subtask 4: Re-grasp right lower keypoint
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_lower",
@@ -310,7 +361,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 4: Bring right lower keypoint to right upper keypoint
+        # Subtask 5: Bring right lower keypoint to right upper keypoint
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_upper",
@@ -332,7 +383,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             )
         )
 
-        # Subtask 5: Return right arm to home position
+        # Subtask 6: Return right arm to home position
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
@@ -353,23 +404,14 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # Arm synchronization constraints
         # -----------------------------------------------------------------
         # Subtask numbering: 0=grasp_middle, 1=middle_to_lower,
-        # 2=move_to_waiting_pos, 3=grasp_lower, 4=lower_to_upper,
-        # 5=return_home.
+        # 2=release_middle, 3=move_to_waiting_pos, 4=grasp_lower,
+        # 5=lower_to_upper, 6=return_home.
         #
         # Sync point 1: Both arms finish waiting_pos before grasp_lower.
         # Sync point 2: Both arms finish grasp_lower before lower_to_upper.
         # Sync point 3: Both arms finish lower_to_upper before return_home.
         self.task_constraint_configs = [
-            # Sync before subtask 3 (grasp_lower)
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("left_arm", 2), ("right_arm", 3)],
-                constraint_type=SubTaskConstraintType.SEQUENTIAL,
-            ),
-            SubTaskConstraintConfig(
-                eef_subtask_constraint_tuple=[("right_arm", 2), ("left_arm", 3)],
-                constraint_type=SubTaskConstraintType.SEQUENTIAL,
-            ),
-            # Sync before subtask 4 (lower_to_upper)
+            # Sync before subtask 4 (grasp_lower)
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 4)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
@@ -378,13 +420,22 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 eef_subtask_constraint_tuple=[("right_arm", 3), ("left_arm", 4)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
-            # Sync before subtask 5 (return_home)
+            # Sync before subtask 5 (lower_to_upper)
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 5)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
             SubTaskConstraintConfig(
                 eef_subtask_constraint_tuple=[("right_arm", 4), ("left_arm", 5)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            # Sync before subtask 6 (return_home)
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("left_arm", 5), ("right_arm", 6)],
+                constraint_type=SubTaskConstraintType.SEQUENTIAL,
+            ),
+            SubTaskConstraintConfig(
+                eef_subtask_constraint_tuple=[("right_arm", 5), ("left_arm", 6)],
                 constraint_type=SubTaskConstraintType.SEQUENTIAL,
             ),
         ]

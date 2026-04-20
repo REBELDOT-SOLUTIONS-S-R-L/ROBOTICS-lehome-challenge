@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -30,7 +33,55 @@ _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M = 0.05
 _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
 _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M = 0.53
 _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M = 0.12
+# Narrow release-zone geometry (in the garment's own in-plane frame).
+# The "big square" is the quad formed by the 4 corner keypoints
+# (garment_{left,right}_{lower,upper}).  Inside that square we carve out a
+# narrow rectangle centered on the left<->right midline, covering the lower
+# half along the upper<->lower axis and 60% of the span along the
+# left<->right axis.
+_DEFAULT_RELEASE_ZONE_WIDTH_FRACTION = 0.60
+_DEFAULT_RELEASE_ZONE_LOWER_FRACTION = 0.50
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
+
+_RELEASE_ZONE_LOG = logging.getLogger("lehome.fold_cloth.release_zone")
+_RELEASE_ZONE_DEBUG_ENV_VAR = "LEHOME_DEBUG_RELEASE_ZONE"
+# One log block per second at most; set to 0 via the env var to log every call.
+_RELEASE_ZONE_DEBUG_MIN_INTERVAL_S = 1.0
+_release_zone_debug_last_ts: list[float] = [0.0]
+_release_zone_debug_handler_installed: list[bool] = [False]
+
+
+def _release_zone_debug_enabled() -> bool:
+    raw = os.environ.get(_RELEASE_ZONE_DEBUG_ENV_VAR, "").strip().lower()
+    enabled = raw not in ("", "0", "false", "no", "off")
+    if enabled and not _release_zone_debug_handler_installed[0]:
+        # Self-configure so users can just ``export LEHOME_DEBUG_RELEASE_ZONE=1``
+        # without also tweaking the root logger level.
+        if not _RELEASE_ZONE_LOG.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            )
+            _RELEASE_ZONE_LOG.addHandler(handler)
+            _RELEASE_ZONE_LOG.propagate = False
+        _RELEASE_ZONE_LOG.setLevel(logging.INFO)
+        _release_zone_debug_handler_installed[0] = True
+    return enabled
+
+
+def _release_zone_debug_should_log() -> bool:
+    if not _release_zone_debug_enabled():
+        return False
+    min_interval = _RELEASE_ZONE_DEBUG_MIN_INTERVAL_S
+    try:
+        min_interval = float(os.environ.get("LEHOME_DEBUG_RELEASE_ZONE_INTERVAL_S", min_interval))
+    except Exception:
+        pass
+    now = time.monotonic()
+    if now - _release_zone_debug_last_ts[0] < max(0.0, min_interval):
+        return False
+    _release_zone_debug_last_ts[0] = now
+    return True
 
 
 @dataclass
@@ -48,6 +99,11 @@ class FoldClothSubtaskObservationContext:
     middle_to_lower_threshold_m: float
     middle_to_lower_middle_keypoint_max_z_m: float
     lower_to_upper_threshold_m: float
+    # Per-arm ``(num_envs, 1)`` bool tensor: EEF's world XY is inside the narrow
+    # release zone built from the 4 garment corner keypoints.  Empty dict when
+    # the corners are not available (degenerate cloth state), in which case the
+    # signals depending on this fall back to False.
+    eef_in_release_zone_by_arm: dict[str, torch.Tensor] | None = None
     fold_success: torch.Tensor | None = None
 
 
@@ -227,6 +283,152 @@ def _normalize_optional_bool_column(
     return tensor[:num_envs].reshape(num_envs, 1)
 
 
+def _compute_eef_in_release_zone(
+    env: ManagerBasedEnv,
+    num_envs: int,
+    semantic_points: dict[str, torch.Tensor],
+    eef_positions: dict[str, torch.Tensor],
+    width_fraction: float,
+    lower_fraction: float,
+) -> dict[str, torch.Tensor]:
+    """Return per-arm ``(num_envs, 1)`` bool: EEF XY in the narrow release zone.
+
+    The zone is built in the garment's own in-plane frame:
+
+    * ``u`` is the unit vector along the left->right corner axis, taken as the
+      mean of (left_lower -> right_lower) and (left_upper -> right_upper).
+    * ``v_perp`` is Gram-Schmidt orthogonalized from ``v`` (upper->lower axis)
+      against ``u``, so ``(u, v_perp)`` is a right-handed orthonormal basis
+      lying in the world XY plane.
+    * ``W`` / ``H`` are the full spans between the corner midpoints along
+      ``u`` / ``v`` respectively.  The narrow zone is the lower
+      ``lower_fraction`` along ``v_perp`` intersected with the central
+      ``width_fraction`` along ``u``.
+
+    If any corner keypoint is missing or the span collapses, every arm's
+    membership is reported as False (safe / conservative).
+    """
+    device = next(
+        (t.device for t in list(semantic_points.values()) + list(eef_positions.values())),
+        env.device,
+    )
+
+    def _false_zone() -> dict[str, torch.Tensor]:
+        return {
+            arm_name: torch.zeros((num_envs, 1), dtype=torch.bool, device=device)
+            for arm_name in eef_positions
+        }
+
+    corners = (
+        "garment_left_lower",
+        "garment_left_upper",
+        "garment_right_lower",
+        "garment_right_upper",
+    )
+    missing = [name for name in corners if name not in semantic_points]
+    if missing:
+        if _release_zone_debug_should_log():
+            _RELEASE_ZONE_LOG.info(
+                "[release_zone] corners missing -> zone=False for all arms. missing=%s available=%s",
+                missing,
+                sorted(semantic_points.keys()),
+            )
+        return _false_zone()
+
+    # (num_envs, 2) tensors in world XY.
+    kp_ll = semantic_points["garment_left_lower"][..., :2]
+    kp_lu = semantic_points["garment_left_upper"][..., :2]
+    kp_rl = semantic_points["garment_right_lower"][..., :2]
+    kp_ru = semantic_points["garment_right_upper"][..., :2]
+
+    left_mid = 0.5 * (kp_ll + kp_lu)
+    right_mid = 0.5 * (kp_rl + kp_ru)
+    upper_mid = 0.5 * (kp_lu + kp_ru)
+    lower_mid = 0.5 * (kp_ll + kp_rl)
+    center = 0.25 * (kp_ll + kp_lu + kp_rl + kp_ru)
+
+    u_vec = right_mid - left_mid
+    v_vec = lower_mid - upper_mid
+
+    eps = 1e-6
+    w_full = torch.linalg.norm(u_vec, dim=-1, keepdim=True)
+    h_full = torch.linalg.norm(v_vec, dim=-1, keepdim=True)
+    valid_span = (w_full > eps) & (h_full > eps)
+    if not bool(valid_span.all()):
+        # Any env with a degenerate span falls back to False; we still compute
+        # the rest for the valid envs below.  Mask is applied at the end.
+        pass
+
+    u_hat = u_vec / torch.clamp(w_full, min=eps)
+    # Gram-Schmidt: v_perp = normalize(v - (v . u) u).  ``v_norm`` is therefore
+    # the orthogonal component of the upper->lower vector projected against
+    # ``u_hat``; this is the correct span to use for the lower-half bound
+    # when the quad isn't perfectly rectangular.  For a rectangle it equals
+    # ``h_full`` exactly.
+    v_dot_u = (v_vec * u_hat).sum(dim=-1, keepdim=True)
+    v_orth = v_vec - v_dot_u * u_hat
+    v_norm = torch.linalg.norm(v_orth, dim=-1, keepdim=True)
+    valid_span = valid_span & (v_norm > eps)
+    v_hat = v_orth / torch.clamp(v_norm, min=eps)
+
+    # ``half_*`` describes half-spans in the orthonormal (u_hat, v_hat) basis.
+    half_u = 0.5 * w_full
+    half_v = 0.5 * v_norm
+    width_half = half_u * float(width_fraction)
+    # Lower half along v_hat corresponds to s_v in [0, +||v_orth||/2].  With
+    # ``lower_fraction=0.5`` this is exactly the lower half of the square,
+    # measured in the same orthonormal frame as ``s_v``.
+    v_upper_bound = float(lower_fraction) * v_norm
+    v_lower_bound = torch.zeros_like(v_upper_bound)
+
+    result: dict[str, torch.Tensor] = {}
+    per_arm_diag: dict[str, dict[str, float]] = {}
+    for arm_name, eef_xyz in eef_positions.items():
+        eef_xy = eef_xyz[..., :2]
+        d = eef_xy - center
+        s_u = (d * u_hat).sum(dim=-1, keepdim=True)
+        s_v = (d * v_hat).sum(dim=-1, keepdim=True)
+        inside_width = s_u.abs() <= width_half
+        inside_lower = (s_v >= v_lower_bound) & (s_v <= v_upper_bound)
+        inside = inside_width & inside_lower & valid_span
+        result[arm_name] = inside.reshape(num_envs, 1)
+
+        if _release_zone_debug_enabled():
+            per_arm_diag[arm_name] = {
+                "eef_x": float(eef_xy[0, 0].item()),
+                "eef_y": float(eef_xy[0, 1].item()),
+                "s_u": float(s_u[0, 0].item()),
+                "s_v": float(s_v[0, 0].item()),
+                "s_u_abs_le_width_half": bool(inside_width[0, 0].item()),
+                "s_v_in_lower": bool(inside_lower[0, 0].item()),
+                "valid_span": bool(valid_span[0, 0].item()),
+                "inside": bool(inside[0, 0].item()),
+            }
+
+    if _release_zone_debug_enabled() and _release_zone_debug_should_log():
+        try:
+            corners_xy = {name: semantic_points[name][0, :2].tolist() for name in corners}
+            u_hat_vec = u_hat[0].tolist()
+            v_hat_vec = v_hat[0].tolist()
+            _RELEASE_ZONE_LOG.info(
+                "[release_zone] corners=%s center=%s u_hat=%s v_hat=%s W=%.4f ||v_orth||=%.4f "
+                "width_half=%.4f v_upper_bound=%.4f | %s",
+                corners_xy,
+                center[0].tolist(),
+                u_hat_vec,
+                v_hat_vec,
+                float(w_full[0, 0].item()),
+                float(v_norm[0, 0].item()),
+                float(width_half[0, 0].item()),
+                float(v_upper_bound[0, 0].item()),
+                per_arm_diag,
+            )
+        except Exception as exc:
+            _RELEASE_ZONE_LOG.debug("release-zone diagnostic formatting failed: %s", exc)
+
+    return result
+
+
 def build_subtask_observation_context(
     env: ManagerBasedEnv,
     env_ids: Sequence[int] | None = None,
@@ -277,6 +479,25 @@ def build_subtask_observation_context(
             else _false_bool_column(env, num_envs)
         )
 
+    zone_width_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_width_fraction",
+        _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
+    )
+    zone_lower_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_lower_fraction",
+        _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+    )
+    eef_in_release_zone_map = _compute_eef_in_release_zone(
+        env,
+        num_envs,
+        semantic_points,
+        eef_positions,
+        width_fraction=zone_width_fraction,
+        lower_fraction=zone_lower_fraction,
+    )
+
     return FoldClothSubtaskObservationContext(
         device=env.device,
         num_envs=num_envs,
@@ -305,6 +526,7 @@ def build_subtask_observation_context(
             "subtask_lower_to_upper_threshold_m",
             _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
         ),
+        eef_in_release_zone_by_arm=eef_in_release_zone_map,
         fold_success=fold_success_column,
     )
 
@@ -360,22 +582,39 @@ def get_subtask_signal_observation_from_context(
             <= context.grasp_eef_to_keypoint_threshold_m
         )
     if signal_name == "left_middle_to_lower":
-        return (
-            ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
-        ) & (
-            _context_keypoint_z(
-                context,
-                "garment_left_middle",
-            ) < context.middle_to_lower_middle_keypoint_max_z_m
-        )
+        # Arm still holding the middle keypoint and has moved its EEF into the
+        # narrow drop zone above the lower-corner half of the garment.
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("left_arm", _context_false_bool_column(context))
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & in_zone
     if signal_name == "right_middle_to_lower":
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("right_arm", _context_false_bool_column(context))
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & in_zone
+    if signal_name == "release_left_middle":
+        # Arm's EEF is inside the zone, gripper has opened, and the tracked
+        # middle keypoint has dropped below the configured max Z (i.e. the
+        # cloth actually detached and is resting on the lower garment half).
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("left_arm", _context_false_bool_column(context))
         return (
-            ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
-        ) & (
-            _context_keypoint_z(
-                context,
-                "garment_right_middle",
-            ) < context.middle_to_lower_middle_keypoint_max_z_m
+            in_zone
+            & (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_z(context, "garment_left_middle")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_middle":
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("right_arm", _context_false_bool_column(context))
+        return (
+            in_zone
+            & (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_z(context, "garment_right_middle")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
         )
     if signal_name == "grasp_left_lower":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
@@ -600,34 +839,76 @@ def grasp_right_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = Non
     )
 
 
-def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    threshold_z = _cfg_float(
-        env,
-        "subtask_middle_to_lower_middle_keypoint_max_z_m",
-        _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
-    )
+def _release_zone_signal(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None,
+    arm_name: str,
+) -> torch.Tensor:
+    """Compute ``(num_envs, 1)`` bool: ``arm_name`` EEF XY in the narrow release zone."""
     _, num_envs = _resolve_env_ids(env, env_ids)
     semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
-    if semantic_points is None or "garment_left_middle" not in semantic_points:
+    if semantic_points is None:
         return _false_bool_column(env, num_envs)
-    return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
-        semantic_points["garment_left_middle"][..., 2:3] < threshold_z
+    eef_positions = {arm_name: _get_eef_world_position(env, arm_name, env_ids=env_ids)}
+    width_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_width_fraction",
+        _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
     )
+    lower_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_lower_fraction",
+        _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+    )
+    in_zone = _compute_eef_in_release_zone(
+        env,
+        num_envs,
+        semantic_points,
+        eef_positions,
+        width_fraction=width_fraction,
+        lower_fraction=lower_fraction,
+    )
+    return in_zone.get(arm_name, _false_bool_column(env, num_envs))
+
+
+def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    # New semantics: gripper still CLOSED (holding the middle keypoint) and
+    # the EEF has moved into the narrow drop zone derived from the 4 corner
+    # keypoints.  The release itself is handled by ``release_left_middle``.
+    return gripper_closed(env, "left_arm", env_ids=env_ids) & _release_zone_signal(env, env_ids, "left_arm")
 
 
 def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return gripper_closed(env, "right_arm", env_ids=env_ids) & _release_zone_signal(env, env_ids, "right_arm")
+
+
+def _release_middle_signal(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None,
+    arm_name: str,
+    middle_keypoint: str,
+) -> torch.Tensor:
+    _, num_envs = _resolve_env_ids(env, env_ids)
     threshold_z = _cfg_float(
         env,
         "subtask_middle_to_lower_middle_keypoint_max_z_m",
         _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
     )
-    _, num_envs = _resolve_env_ids(env, env_ids)
     semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
-    if semantic_points is None or "garment_right_middle" not in semantic_points:
+    if semantic_points is None or middle_keypoint not in semantic_points:
         return _false_bool_column(env, num_envs)
-    return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
-        semantic_points["garment_right_middle"][..., 2:3] < threshold_z
-    )
+    in_zone = _release_zone_signal(env, env_ids, arm_name)
+    gripper_open = ~gripper_closed(env, arm_name, env_ids=env_ids)
+    kp_z_below = semantic_points[middle_keypoint][..., 2:3] < threshold_z
+    return in_zone & gripper_open & kp_z_below
+
+
+def release_left_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return _release_middle_signal(env, env_ids, "left_arm", "garment_left_middle")
+
+
+def release_right_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return _release_middle_signal(env, env_ids, "right_arm", "garment_right_middle")
 
 
 def grasp_left_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -705,6 +986,8 @@ SUBTASK_SIGNAL_OBSERVATION_FNS = {
     "grasp_right_middle": grasp_right_middle,
     "left_middle_to_lower": left_middle_to_lower,
     "right_middle_to_lower": right_middle_to_lower,
+    "release_left_middle": release_left_middle,
+    "release_right_middle": release_right_middle,
     "left_at_waiting_pos": left_at_waiting_pos,
     "right_at_waiting_pos": right_at_waiting_pos,
     "grasp_left_lower": grasp_left_lower,
@@ -766,6 +1049,8 @@ __all__ = [
     "left_lower_to_upper",
     "left_middle_to_lower",
     "left_return_home",
+    "release_left_middle",
+    "release_right_middle",
     "right_at_waiting_pos",
     "right_lower_to_upper",
     "right_middle_to_lower",

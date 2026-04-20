@@ -10,7 +10,10 @@ import torch
 from lehome.assets.robots.lerobot import get_so101_rest_pose_range
 from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS
 from lehome.tasks.fold_cloth.mdp.observations import (
+    _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+    _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
     FoldClothSubtaskObservationContext,
+    _compute_eef_in_release_zone,
     arm_at_waiting_pos as _arm_at_waiting_pos,
     fold_success as fold_success_observation,
 )
@@ -229,6 +232,28 @@ def capture_annotated_runtime_snapshot(
     if include_fold_success:
         fold_success_value = fold_success_observation(env, env_ids=[0])
 
+    # Per-arm "EEF in narrow release zone" bool, computed from the 4 corner
+    # garment keypoints.  Needed by the ``*_middle_to_lower`` and
+    # ``release_*_middle`` signals; without this field they evaluate to False
+    # unconditionally because the hot-path snapshot bypasses
+    # ``build_subtask_observation_context``.
+    eef_in_release_zone_by_arm = _compute_eef_in_release_zone(
+        env,
+        num_envs=1,
+        semantic_points=semantic_keypoints_world,
+        eef_positions=eef_world_positions,
+        width_fraction=_cfg_float(
+            env,
+            "subtask_release_zone_width_fraction",
+            _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
+        ),
+        lower_fraction=_cfg_float(
+            env,
+            "subtask_release_zone_lower_fraction",
+            _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+        ),
+    )
+
     observation_context = FoldClothSubtaskObservationContext(
         device=env.device,
         num_envs=1,
@@ -260,6 +285,7 @@ def capture_annotated_runtime_snapshot(
             "subtask_lower_to_upper_threshold_m",
             0.12,
         ),
+        eef_in_release_zone_by_arm=eef_in_release_zone_by_arm,
         fold_success=_normalize_optional_bool_column(env.device, fold_success_value),
     )
 

@@ -297,6 +297,12 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     subtask_gripper_close_threshold: float = 0.20
     subtask_middle_to_lower_threshold_m: float = 0.10
     subtask_middle_to_lower_middle_keypoint_max_z_m: float = 0.60
+    # Narrow release-zone geometry inside the 4-corner garment quad.  Width is
+    # the central fraction of the left<->right span; lower is the fraction of
+    # the upper<->lower span measured from the lower edge toward the center.
+    # Defaults match the "lower half, middle 60%" spec.
+    subtask_release_zone_width_fraction: float = 0.60
+    subtask_release_zone_lower_fraction: float = 0.50
     subtask_lower_to_upper_threshold_m: float = 0.15
     subtask_signal_min_consecutive_steps: int = 3
     return_home_min_consecutive_steps: int = 10

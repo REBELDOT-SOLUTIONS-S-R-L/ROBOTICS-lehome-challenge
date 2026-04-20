@@ -26,6 +26,7 @@ _DEFAULT_ARM_QUEUES = {
     "left_arm": [
         "grasp_left_middle",
         "left_middle_to_lower",
+        "release_left_middle",
         "left_at_waiting_pos",
         "grasp_left_lower",
         "left_lower_to_upper",
@@ -34,6 +35,7 @@ _DEFAULT_ARM_QUEUES = {
     "right_arm": [
         "grasp_right_middle",
         "right_middle_to_lower",
+        "release_right_middle",
         "right_at_waiting_pos",
         "grasp_right_lower",
         "right_lower_to_upper",
