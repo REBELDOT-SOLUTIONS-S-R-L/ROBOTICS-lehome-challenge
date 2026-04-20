@@ -34,6 +34,99 @@ from .pose_trace import write_pose_snapshot as _write_pose_snapshot
 logger = get_logger(__name__)
 SUCCESS_LOG_INTERVAL = 50
 
+# Exact Z of the table top in the bedroom scene (world frame).  Used to
+# anchor grasp-subtask source trajectories to the physical surface during
+# generation so the gripper always bottoms out on the cloth regardless of
+# which source demo mimic's nearest-neighbor selector picks.
+GRASP_TABLE_TOP_Z = 0.52
+# Only subtasks whose ``subtask_term_signal`` begins with one of these
+# prefixes are treated as grasping subtasks by the Z-anchoring shim.
+_GRASP_SUBTASK_SIGNAL_PREFIXES: tuple[str, ...] = ("grasp_",)
+
+
+class GarmentDataGenerator(DataGenerator):
+    """DataGenerator variant that anchors grasping subtasks to the table top.
+
+    For any subtask whose ``subtask_term_signal`` starts with ``"grasp_"``,
+    we post-process the generated :class:`WaypointTrajectory` so that its
+    minimum end-effector Z equals :data:`GRASP_TABLE_TOP_Z`.  This fixes the
+    "bottom-out above the cloth" failure mode seen when the source garment
+    sits lower than the runtime garment: MimicGen's object-relative transform
+    preserves the source's Z envelope, so a hand that only descended to
+    ``0.527 m`` on the source stays at ``0.527 m`` on the runtime even when
+    the target cloth surface is several centimeters higher.
+
+    The shift is applied once per subtask trajectory, after the source-demo
+    selection and object-relative transform, and only when the trajectory's
+    minimum EEF Z is *above* the table (``shift > 0``).  No-op for
+    non-grasping subtasks or when the source already reaches the table.
+    """
+
+    def __init__(self, *args: Any, grasp_table_top_z: float = GRASP_TABLE_TOP_Z, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._grasp_table_top_z = float(grasp_table_top_z)
+
+    def _is_grasping_subtask(self, eef_name: str, subtask_ind: int) -> bool:
+        subtask_cfgs = getattr(self.env_cfg, "subtask_configs", {}).get(eef_name, [])
+        if not (0 <= subtask_ind < len(subtask_cfgs)):
+            return False
+        signal = getattr(subtask_cfgs[subtask_ind], "subtask_term_signal", None)
+        if not signal:
+            return False
+        return str(signal).startswith(_GRASP_SUBTASK_SIGNAL_PREFIXES)
+
+    def _shift_trajectory_z_to_table(
+        self, trajectory: Any, eef_name: str, subtask_ind: int
+    ) -> None:
+        """Shift every waypoint's Z so min-Z of the trajectory sits on the table."""
+        min_z: float | None = None
+        for seq in getattr(trajectory, "waypoint_sequences", []):
+            for wp in getattr(seq, "sequence", []):
+                try:
+                    z = float(wp.pose[2, 3].item())
+                except Exception:
+                    continue
+                if min_z is None or z < min_z:
+                    min_z = z
+        if min_z is None:
+            return
+
+        shift = min_z - self._grasp_table_top_z
+        if shift <= 0.0:
+            # Source trajectory already bottoms out at or below the table —
+            # don't push the hand up and away from the cloth.
+            return
+
+        for seq in trajectory.waypoint_sequences:
+            for wp in seq.sequence:
+                try:
+                    wp.pose[2, 3] = wp.pose[2, 3] - shift
+                except Exception:
+                    continue
+
+        logger.debug(
+            "Anchored grasp subtask to table: arm=%s subtask=%d min_src_z=%.4f shift=%.4f",
+            eef_name,
+            int(subtask_ind),
+            min_z,
+            shift,
+        )
+
+    def generate_eef_subtask_trajectory(
+        self,
+        env_id: int,
+        eef_name: str,
+        subtask_ind: int,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        trajectory = super().generate_eef_subtask_trajectory(
+            env_id, eef_name, subtask_ind, *args, **kwargs
+        )
+        if self._is_grasping_subtask(eef_name, subtask_ind):
+            self._shift_trajectory_z_to_table(trajectory, eef_name, subtask_ind)
+        return trajectory
+
 
 def _cuda_runtime_enabled(env: ManagerBasedRLMimicEnv) -> bool:
     """Return whether generation is running on a CUDA-backed env device."""
@@ -421,7 +514,7 @@ def setup_async_generation(
     if align_object_pose_to_runtime:
         print(f"Applying source object-pose runtime alignment in mode: {align_object_pose_mode}")
 
-    data_generator = DataGenerator(
+    data_generator = GarmentDataGenerator(
         env=env,
         src_demo_datagen_info_pool=shared_datagen_info_pool,
         post_reset_settle_steps=post_reset_settle_steps,
