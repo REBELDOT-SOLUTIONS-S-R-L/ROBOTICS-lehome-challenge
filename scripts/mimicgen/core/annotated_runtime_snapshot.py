@@ -285,6 +285,16 @@ def capture_annotated_runtime_snapshot(
             "subtask_lower_to_upper_threshold_m",
             0.12,
         ),
+        prep_for_grasp_eef_z_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_eef_z_m",
+            0.53,
+        ),
+        prep_for_grasp_xy_threshold_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_xy_threshold_m",
+            0.15,
+        ),
         eef_in_release_zone_by_arm=eef_in_release_zone_by_arm,
         fold_success=_normalize_optional_bool_column(env.device, fold_success_value),
     )
