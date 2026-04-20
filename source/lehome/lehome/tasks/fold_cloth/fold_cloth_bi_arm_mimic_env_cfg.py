@@ -117,7 +117,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_upper"],
+                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 # Small noise during the approach broadens the training
@@ -139,7 +139,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 15),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_upper"],
+                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
@@ -165,7 +165,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_lower"],
+                    "keypoint_names": ["garment_left_lower", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 # Small noise widens the training distribution on transfer motions.
@@ -317,7 +317,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(3, 8),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_upper"],
+                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.01,
@@ -337,7 +337,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 15),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_upper"],
+                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
@@ -361,7 +361,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_lower"],
+                    "keypoint_names": ["garment_right_lower", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.01,
