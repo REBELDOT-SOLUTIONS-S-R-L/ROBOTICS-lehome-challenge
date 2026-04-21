@@ -86,8 +86,12 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         self.datagen_config.generation_guarantee = True
         self.datagen_config.generation_keep_failed = True
         self.datagen_config.generation_num_trials = 10
-        # Keep generation deterministic/stable by default.
-        self.datagen_config.generation_select_src_per_subtask = True
+        # Select a single source demo per arm on the first subtask and reuse
+        # it for the whole episode.  Subtask 0 uses
+        # ``nearest_neighbor_all_keypoints`` so the pick is driven by the full
+        # garment layout (all six garment check_points), not the three
+        # keypoints relevant to one subtask.
+        self.datagen_config.generation_select_src_per_subtask = False
         self.datagen_config.generation_select_src_per_arm = True
         # Include the source demo's first measured EEF pose in the transformed
         # segment so interpolation goes to where the robot *actually was* at
@@ -108,16 +112,18 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # Subtask 0: Descend into approach pose above left middle keypoint
         #   Termination: gripper still open, EEF z below the configured
         #   ``subtask_prep_for_grasp_eef_z_m`` cutoff, and EEF horizontally
-        #   near the left middle keypoint.  Selection strategy mirrors
-        #   ``grasp_left_middle`` so the two subtasks share a source demo.
+        #   near the left middle keypoint.  With
+        #   ``generation_select_src_per_subtask = False`` this is the only
+        #   subtask that runs selection; every later subtask inherits the
+        #   chosen demo, so we match against the full 6-keypoint garment
+        #   layout instead of just the 3 keypoints near this subtask.
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_middle",
                 subtask_term_signal="prepare_for_grasp_left_middle",
                 subtask_term_offset_range=(3, 8),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="nearest_neighbor_all_keypoints",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 # Small noise during the approach broadens the training
@@ -132,15 +138,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 1: Reach & grasp left middle keypoint
+        #   Reuses the source demo chosen for prepare_for_grasp_left_middle so
+        #   the approach and the grasp come from the same human trajectory.
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_middle",
                 subtask_term_signal="grasp_left_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
-                    "nn_k": 1,
+                    "source_subtask": "prepare_for_grasp_left_middle",
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
@@ -165,7 +172,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_lower", "garment_right_lower"],
+                    "keypoint_names": ["garment_left_lower", "garment_right_lower", "garment_left_middle"],
                     "nn_k": 1,
                 },
                 # Small noise widens the training distribution on transfer motions.
@@ -182,15 +189,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # Subtask 3: Release left middle keypoint inside the drop zone
         #   Termination: gripper OPEN + EEF still inside the narrow drop zone +
         #   tracked middle keypoint has fallen below the configured max Z.
+        #   Reuses the source demo chosen for left_middle_to_lower so carry
+        #   and release come from the same human trajectory.
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_left_lower",
                 subtask_term_signal="release_left_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_left_middle", "garment_left_lower"],
-                    "nn_k": 1,
+                    "source_subtask": "left_middle_to_lower",
                 },
                 # Zero noise during the release: jitter at the moment the jaws
                 # open can drag the cloth off the target lower corner.
@@ -205,12 +213,17 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 4: Move left arm to waiting position (home pose)
+        #   Reuses the source demo chosen for left_middle_to_lower so the
+        #   waiting-pos motion matches the same human trajectory.
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="left_at_waiting_pos",
                 subtask_term_offset_range=(0, 0),
-                selection_strategy="random",
+                selection_strategy="source_from_subtask",
+                selection_strategy_kwargs={
+                    "source_subtask": "left_middle_to_lower",
+                },
                 action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
@@ -288,13 +301,18 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 8: Return left arm to home position
+        #   Reuses the source demo chosen for left_lower_to_upper so the
+        #   retract motion matches the preceding fold trajectory.
         left_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="left_return_home",
                 # Last subtask runs to episode end; Mimic requires offsets = 0.
                 subtask_term_offset_range=(0, 0),
-                selection_strategy="random",
+                selection_strategy="source_from_subtask",
+                selection_strategy_kwargs={
+                    "source_subtask": "left_lower_to_upper",
+                },
                 action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
@@ -310,14 +328,17 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         right_subtask_configs = []
 
         # Subtask 0: Descend into approach pose above right middle keypoint
+        #   With ``generation_select_src_per_subtask = False`` this is the
+        #   only subtask that runs selection; later right-arm subtasks
+        #   inherit the chosen demo, so we match on the full 6-keypoint
+        #   garment layout.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_middle",
                 subtask_term_signal="prepare_for_grasp_right_middle",
                 subtask_term_offset_range=(3, 8),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="nearest_neighbor_all_keypoints",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.01,
@@ -330,15 +351,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 1: Reach & grasp right middle keypoint
+        #   Reuses the source demo chosen for prepare_for_grasp_right_middle so
+        #   the approach and the grasp come from the same human trajectory.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_middle",
                 subtask_term_signal="grasp_right_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
-                    "nn_k": 1,
+                    "source_subtask": "prepare_for_grasp_right_middle",
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
@@ -361,7 +383,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 subtask_term_offset_range=(5, 10),
                 selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_lower", "garment_left_lower"],
+                    "keypoint_names": ["garment_right_lower", "garment_left_lower", "garment_right_middle"],
                     "nn_k": 1,
                 },
                 action_noise=0.01,
@@ -374,15 +396,16 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 3: Release right middle keypoint inside the drop zone
+        #   Reuses the source demo chosen for right_middle_to_lower so carry
+        #   and release come from the same human trajectory.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref="garment_right_lower",
                 subtask_term_signal="release_right_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="nearest_neighbor_multi_keypoint",
+                selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
-                    "keypoint_names": ["garment_right_middle", "garment_right_lower"],
-                    "nn_k": 1,
+                    "source_subtask": "right_middle_to_lower",
                 },
                 action_noise=0.0,
                 num_interpolation_steps=5,
@@ -394,12 +417,17 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 4: Move right arm to waiting position (home pose)
+        #   Reuses the source demo chosen for right_middle_to_lower so the
+        #   waiting-pos motion matches the same human trajectory.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="right_at_waiting_pos",
                 subtask_term_offset_range=(0, 0),
-                selection_strategy="random",
+                selection_strategy="source_from_subtask",
+                selection_strategy_kwargs={
+                    "source_subtask": "right_middle_to_lower",
+                },
                 action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
@@ -473,13 +501,18 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         )
 
         # Subtask 8: Return right arm to home position
+        #   Reuses the source demo chosen for right_lower_to_upper so the
+        #   retract motion matches the preceding fold trajectory.
         right_subtask_configs.append(
             SubTaskConfig(
                 object_ref=None,
                 subtask_term_signal="right_return_home",
                 # Last subtask runs to episode end; Mimic requires offsets = 0.
                 subtask_term_offset_range=(0, 0),
-                selection_strategy="random",
+                selection_strategy="source_from_subtask",
+                selection_strategy_kwargs={
+                    "source_subtask": "right_lower_to_upper",
+                },
                 action_noise=0.01,
                 num_interpolation_steps=8,
                 num_fixed_steps=10,
