@@ -122,8 +122,9 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 object_ref="garment_left_middle",
                 subtask_term_signal="prepare_for_grasp_left_middle",
                 subtask_term_offset_range=(3, 8),
-                selection_strategy="nearest_neighbor_all_keypoints",
+                selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
+                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
                     "nn_k": 1,
                 },
                 # Small noise during the approach broadens the training
@@ -145,9 +146,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 object_ref="garment_left_middle",
                 subtask_term_signal="grasp_left_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="source_from_subtask",
+                selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "source_subtask": "prepare_for_grasp_left_middle",
+                    "keypoint_names": ["garment_left_middle", "garment_left_upper", "garment_left_lower"],
+                    "nn_k": 1,
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
@@ -195,7 +197,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_left_lower",
                 subtask_term_signal="release_left_middle",
-                subtask_term_offset_range=(5, 15),
+                subtask_term_offset_range=(5, 10),
                 selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
                     "source_subtask": "left_middle_to_lower",
@@ -337,8 +339,9 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 object_ref="garment_right_middle",
                 subtask_term_signal="prepare_for_grasp_right_middle",
                 subtask_term_offset_range=(3, 8),
-                selection_strategy="nearest_neighbor_all_keypoints",
+                selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
+                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
                     "nn_k": 1,
                 },
                 action_noise=0.01,
@@ -358,9 +361,10 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
                 object_ref="garment_right_middle",
                 subtask_term_signal="grasp_right_middle",
                 subtask_term_offset_range=(5, 15),
-                selection_strategy="source_from_subtask",
+                selection_strategy="nearest_neighbor_multi_keypoint",
                 selection_strategy_kwargs={
-                    "source_subtask": "prepare_for_grasp_right_middle",
+                    "keypoint_names": ["garment_right_middle", "garment_right_upper", "garment_right_lower"],
+                    "nn_k": 1,
                 },
                 # Zero noise during a grasp: pose jitter at the jaw misses the ridge.
                 action_noise=0.0,
@@ -402,7 +406,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
             SubTaskConfig(
                 object_ref="garment_right_lower",
                 subtask_term_signal="release_right_middle",
-                subtask_term_offset_range=(5, 15),
+                subtask_term_offset_range=(5, 10),
                 selection_strategy="source_from_subtask",
                 selection_strategy_kwargs={
                     "source_subtask": "right_middle_to_lower",
