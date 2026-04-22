@@ -57,6 +57,15 @@ def build(cfg):
     Starts from ``top_long.build(cfg)`` and retargets subtasks 2 and 3 on
     both arms from the lower corners to the upper corners.
     """
+    # ``left_middle_to_lower`` / ``release_*_middle`` read the release-zone
+    # geometry from env cfg at runtime.  Make the top-half zone explicit here
+    # so callers do not need to remember a separate cfg-side override.
+    if hasattr(cfg, "subtask_release_zone_upper_fraction") and hasattr(
+        cfg, "subtask_release_zone_lower_fraction"
+    ):
+        if getattr(cfg, "subtask_release_zone_upper_fraction", None) is None:
+            cfg.subtask_release_zone_upper_fraction = cfg.subtask_release_zone_lower_fraction
+
     subtask_configs, task_constraint_configs = top_long.build(cfg)
     subtask_configs = deepcopy(subtask_configs)
     task_constraint_configs = deepcopy(task_constraint_configs)

@@ -84,15 +84,17 @@ def configure_subtasks_from_garment_cfg(cfg) -> str:
     existing_subtask_configs.update(subtask_configs)
     setattr(cfg, "task_constraint_configs", task_constraint_configs)
 
-    if (
-        garment_type == "top-short-sleeve"
-        and getattr(cfg, "subtask_release_zone_upper_fraction", None) is None
-    ):
-        setattr(
-            cfg,
-            "subtask_release_zone_upper_fraction",
-            getattr(cfg, "subtask_release_zone_lower_fraction"),
-        )
+    if garment_type == "top-short-sleeve":
+        if getattr(cfg, "subtask_release_zone_upper_fraction", None) is None:
+            setattr(
+                cfg,
+                "subtask_release_zone_upper_fraction",
+                getattr(cfg, "subtask_release_zone_lower_fraction"),
+            )
+    else:
+        # Keep non-top-short garments on the default lower-half zone even if
+        # a cfg object is reused across runs.
+        setattr(cfg, "subtask_release_zone_upper_fraction", None)
 
     return str(garment_type)
 
