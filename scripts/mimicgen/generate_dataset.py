@@ -80,6 +80,20 @@ def build_parser() -> argparse.ArgumentParser:
     garment_group = parser.add_argument_group("garment and environment overrides")
     add_garment_override_arguments(garment_group)
 
+    pose_group = parser.add_argument_group("pose sequence")
+    pose_group.add_argument(
+        "--pose_sequence",
+        type=int,
+        default=None,
+        help=(
+            "Number of deterministic garment reset poses drawn from a Halton "
+            "low-discrepancy sequence over (pos_x, pos_y, rot_x, rot_y). "
+            "Each successful episode consumes one pose; sequence advances "
+            "only on success. Overrides --generation_num_trials. If omitted, "
+            "falls back to the env's default random garment reset."
+        ),
+    )
+
     runtime_group = parser.add_argument_group("runtime and debugging")
     runtime_group.add_argument(
         "--pause_subtask",

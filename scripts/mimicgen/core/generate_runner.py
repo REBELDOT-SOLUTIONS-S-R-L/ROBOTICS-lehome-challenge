@@ -41,6 +41,7 @@ from .env_setup import assign_env_garment_metadata
 from .env_setup import normalize_last_subtask_offsets_for_generation as _normalize_last_subtask_offsets_for_generation
 from .env_setup import resolve_env_garment_metadata
 from .env_setup import resolve_task_type as _resolve_task_type
+from .annotated_record_service import _build_pose_sequence
 from .generation_runtime import (
     env_loop_with_pose_output,
     recording_style_success_tensor,
@@ -462,6 +463,16 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
     np.random.seed(env.cfg.datagen_config.seed)
     torch.manual_seed(env.cfg.datagen_config.seed)
 
+    # If --pose_sequence is set, monkey-patch the garment's _sample_reset_pose
+    # so every reset pulls the current Halton pose.  Advance happens once per
+    # successful episode (see run_data_generator_with_object_pose_failures).
+    pose_sequence = _build_pose_sequence(parsed_args, env)
+    if pose_sequence is not None:
+        # The Halton sequence is authoritative over the trial count: generate
+        # exactly as many successful demos as there are poses in the sequence.
+        env.cfg.datagen_config.generation_num_trials = pose_sequence.total
+        pose_sequence.log_status()
+
     env.reset()
     if hasattr(env, "initialize_obs"):
         try:
@@ -533,6 +544,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         post_reset_settle_steps=garment_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
         save_failed_full=bool(getattr(parsed_args, "save_failed", False)),
+        pose_sequence=pose_sequence,
     )
 
     import isaaclab_mimic.datagen.generation as mimic_generation

@@ -367,6 +367,7 @@ async def run_data_generator_with_object_pose_failures(
     pause_subtask: bool = False,
     motion_planner: Any = None,
     save_failed_full: bool = False,
+    pose_sequence: Any = None,
 ):
     """Run Mimic generation while treating cloth object-pose failures as failed trials.
 
@@ -453,6 +454,11 @@ async def run_data_generator_with_object_pose_failures(
                         env_id,
                         export_exc,
                     )
+            # Advance the Halton pose sequence only on success — a failed
+            # attempt retries with the same reset pose.
+            if pose_sequence is not None:
+                pose_sequence.advance()
+                pose_sequence.log_status()
         else:
             mimic_generation.num_failures += 1
             if not save_failed_full:
@@ -484,6 +490,7 @@ def setup_async_generation(
     post_reset_hold_action: torch.Tensor | None = None,
     motion_planners: Any = None,
     save_failed_full: bool = False,
+    pose_sequence: Any = None,
 ) -> dict[str, Any]:
     """Setup async generation with robust HDF5 datagen pool loading."""
     asyncio_event_loop = asyncio.get_event_loop()
@@ -521,6 +528,12 @@ def setup_async_generation(
         post_reset_hold_action=post_reset_hold_action,
     )
     setattr(data_generator, "_log_source_demo_selection", bool(log_success))
+    if pose_sequence is not None and int(num_envs) > 1:
+        logger.warning(
+            "[PoseSequence] num_envs=%d with --pose_sequence: all envs share "
+            "one sequence; concurrent episodes may consume the same index.",
+            int(num_envs),
+        )
     data_generator_asyncio_tasks = []
     for i in range(num_envs):
         env_motion_planner = motion_planners[i] if motion_planners else None
@@ -535,6 +548,7 @@ def setup_async_generation(
                 pause_subtask=pause_subtask,
                 motion_planner=env_motion_planner,
                 save_failed_full=save_failed_full,
+                pose_sequence=pose_sequence,
             )
         )
         data_generator_asyncio_tasks.append(task)
