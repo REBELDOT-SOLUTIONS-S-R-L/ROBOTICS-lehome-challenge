@@ -19,6 +19,9 @@ _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
 _GRASP_SIGNALS = {
     "grasp_left_middle",
     "grasp_right_middle",
+    "grasp_left_upper",
+    "grasp_left_on_right_upper",
+    "grasp_right_on_left_lower",
     "grasp_left_lower",
     "grasp_right_lower",
 }
@@ -127,6 +130,9 @@ class OnlineAnnotationState:
         mapping = {
             "grasp_left_middle": "garment_left_middle",
             "grasp_right_middle": "garment_right_middle",
+            "grasp_left_upper": "garment_left_upper",
+            "grasp_left_on_right_upper": "garment_right_upper",
+            "grasp_right_on_left_lower": "garment_left_lower",
             "grasp_left_lower": "garment_left_lower",
             "grasp_right_lower": "garment_right_lower",
         }

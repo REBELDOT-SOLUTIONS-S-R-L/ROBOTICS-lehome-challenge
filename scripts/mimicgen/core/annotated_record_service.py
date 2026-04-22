@@ -13,6 +13,9 @@ from isaaclab.envs import DirectRLEnv
 from isaaclab_tasks.utils import parse_env_cfg
 from isaacsim.simulation_app import SimulationApp
 
+from lehome.tasks.fold_cloth.fold_cloth_bi_arm_mimic_env_cfg import (
+    configure_subtasks_from_garment_cfg,
+)
 from lehome.utils.logger import get_logger
 from lehome.utils.record import RateLimiter, get_next_experiment_path_with_gap
 
@@ -179,6 +182,20 @@ _SIGNAL_LABELS = {
     "grasp_right_lower": "grasp right lower",
     "left_lower_to_upper": "move left lower to upper",
     "right_lower_to_upper": "move right lower to upper",
+    "prepare_for_grasp_left_upper": "approach left upper",
+    "prepare_for_grasp_left_on_right_upper": "approach right upper with left arm",
+    "prepare_for_grasp_right_on_left_lower": "approach left lower with right arm",
+    "grasp_left_upper": "grasp left upper",
+    "grasp_left_on_right_upper": "grasp right upper with left arm",
+    "grasp_right_on_left_lower": "grasp left lower with right arm",
+    "left_upper_to_right_upper": "move left upper to right upper",
+    "left_lower_to_right_lower": "move left lower to right lower",
+    "right_upper_to_left_upper": "move right upper to left upper",
+    "right_lower_to_left_lower": "move right lower to left lower",
+    "release_left_upper_at_right_upper": "release left upper at right upper",
+    "release_left_lower_at_right_lower": "release left lower at right lower",
+    "release_right_upper_at_left_upper": "release right upper at left upper",
+    "release_right_lower_at_left_lower": "release right lower at left lower",
     "left_return_home": "return left arm home",
     "right_return_home": "return right arm home",
 }
@@ -319,12 +336,26 @@ def _describe_head_status(
     required = int(annotator._required_dwell(head_signal))
     signal_label = _format_signal_label(head_signal)
 
-    if head_signal in {"grasp_left_middle", "grasp_right_middle", "grasp_left_lower", "grasp_right_lower"}:
+    if head_signal in {
+        "grasp_left_middle",
+        "grasp_right_middle",
+        "grasp_left_upper",
+        "grasp_left_on_right_upper",
+        "grasp_right_on_left_lower",
+        "grasp_left_lower",
+        "grasp_right_lower",
+    }:
         checkpoint_name = (
             "garment_left_middle"
             if head_signal == "grasp_left_middle"
             else "garment_right_middle"
             if head_signal == "grasp_right_middle"
+            else "garment_left_upper"
+            if head_signal == "grasp_left_upper"
+            else "garment_right_upper"
+            if head_signal == "grasp_left_on_right_upper"
+            else "garment_left_lower"
+            if head_signal == "grasp_right_on_left_lower"
             else "garment_left_lower"
             if head_signal == "grasp_left_lower"
             else "garment_right_lower"
@@ -525,6 +556,25 @@ def record_dataset(args: argparse.Namespace, simulation_app: SimulationApp) -> N
     env_cfg.garment_version = args.garment_version
     env_cfg.garment_cfg_base_path = args.garment_cfg_base_path
     env_cfg.particle_cfg_path = args.particle_cfg_path
+    garment_type = configure_subtasks_from_garment_cfg(env_cfg)
+    logger.info(
+        "[Annotated Recording] Loaded %s subtask builder for garment %s.",
+        garment_type,
+        args.garment_name,
+    )
+    subtask_cfgs = getattr(env_cfg, "subtask_configs", {})
+    if isinstance(subtask_cfgs, dict):
+        for arm_name, cfgs in sorted(subtask_cfgs.items()):
+            queue = [
+                str(getattr(cfg, "subtask_term_signal", ""))
+                for cfg in cfgs
+                if getattr(cfg, "subtask_term_signal", None) is not None
+            ]
+            logger.info(
+                "[Annotated Recording] %s queue: %s",
+                arm_name,
+                " -> ".join(queue) if queue else "<empty>",
+            )
     if not bool(getattr(args, "enable_cameras", False)) and hasattr(env_cfg, "scene"):
         for camera_name in ("left_camera", "right_camera", "top_camera"):
             if hasattr(env_cfg.scene, camera_name):

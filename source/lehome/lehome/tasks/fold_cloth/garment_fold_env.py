@@ -1502,10 +1502,22 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     # the rest is re-validated by the final fold-success check.
     _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (1, 6)
 
-    # Zero-based index of the ``*_lower_to_upper`` subtask (the actual fold).
-    # Only after both arms have completed this subtask does the fold-success
-    # check become meaningful — see ``is_final_fold_complete``.
-    _LOWER_TO_UPPER_SUBTASK_INDEX: int = 7
+    def _fold_completion_subtask_index(self, arm_name: str) -> int | None:
+        """Return the per-arm subtask index that gates final success checks.
+
+        Most garments expose a ``*_lower_to_upper`` subtask, which is the
+        first point where the final geometry check becomes meaningful.
+        Some asymmetric decompositions do not; in that case we fall back to
+        the arm's last configured subtask.
+        """
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(str(arm_name))
+        if not arm_cfgs:
+            return None
+        for index in range(len(arm_cfgs) - 1, -1, -1):
+            signal_name = getattr(arm_cfgs[index], "subtask_term_signal", None)
+            if isinstance(signal_name, str) and signal_name.endswith("_lower_to_upper"):
+                return int(index)
+        return int(len(arm_cfgs) - 1)
 
     def verify_subtask_completion(
         self,
@@ -1602,6 +1614,10 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             "subtask_release_zone_lower_fraction",
             "verify_subtask_release_zone_lower_fraction",
         ),
+        (
+            "subtask_release_zone_upper_fraction",
+            "verify_subtask_release_zone_upper_fraction",
+        ),
     )
 
     @contextmanager
@@ -1621,7 +1637,14 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 override = getattr(self.cfg, verify_attr, None)
                 if override is None:
                     continue
-                previous[strict_attr] = getattr(self.cfg, strict_attr)
+                strict_value = getattr(self.cfg, strict_attr)
+                # If the strict knob is itself None (e.g. the upper-fraction
+                # mode is off for this garment type), don't enable it via the
+                # verify override — that would silently flip release-zone mode
+                # mid-episode.  Only widen knobs that are already active.
+                if strict_value is None:
+                    continue
+                previous[strict_attr] = strict_value
                 setattr(self.cfg, strict_attr, override)
             yield
         finally:
@@ -1656,7 +1679,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 continue
 
     def is_final_fold_complete(self, env_id: int) -> bool:
-        """Return True when every configured arm has finished ``*_lower_to_upper``.
+        """Return True when every configured arm has finished its fold step.
 
         The MimicGen success term (``recording_style_success_tensor``) uses
         this gate to skip the expensive garment-geometry checker until the
@@ -1671,8 +1694,10 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         arm_names = getattr(self.cfg, "subtask_configs", {}).keys()
         if not arm_names:
             return False
-        target_index = int(self._LOWER_TO_UPPER_SUBTASK_INDEX)
         for arm_name in arm_names:
+            target_index = self._fold_completion_subtask_index(str(arm_name))
+            if target_index is None:
+                return False
             if target_index not in completed.get(str(arm_name), set()):
                 return False
         return True
@@ -1770,4 +1795,10 @@ class GarmentFoldMimicEnv(GarmentFoldEnv):
             cfg.use_teleop_device(mimic_task_type)
         # Keep runtime task type for utility helpers that expect non-mimic labels.
         cfg.task_type = base_task_type
+        # Resolve garment-type-specific subtask decomposition now that the
+        # script has finished populating ``cfg.garment_name``.  See
+        # :meth:`GarmentFoldMimicEnvCfg.configure_subtasks_from_garment`.
+        configure = getattr(cfg, "configure_subtasks_from_garment", None)
+        if callable(configure):
+            configure()
         super().__init__(cfg, render_mode=render_mode, **kwargs)

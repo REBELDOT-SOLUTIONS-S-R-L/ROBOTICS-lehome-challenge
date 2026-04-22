@@ -300,6 +300,7 @@ def _compute_eef_in_release_zone(
     eef_positions: dict[str, torch.Tensor],
     width_fraction: float,
     lower_fraction: float,
+    upper_fraction: float | None = None,
 ) -> dict[str, torch.Tensor]:
     """Return per-arm ``(num_envs, 1)`` bool: EEF XY in the narrow release zone.
 
@@ -309,11 +310,17 @@ def _compute_eef_in_release_zone(
       mean of (left_lower -> right_lower) and (left_upper -> right_upper).
     * ``v_perp`` is Gram-Schmidt orthogonalized from ``v`` (upper->lower axis)
       against ``u``, so ``(u, v_perp)`` is a right-handed orthonormal basis
-      lying in the world XY plane.
+      lying in the world XY plane.  ``v_hat`` points toward the LOWER edge.
     * ``W`` / ``H`` are the full spans between the corner midpoints along
-      ``u`` / ``v`` respectively.  The narrow zone is the lower
-      ``lower_fraction`` along ``v_perp`` intersected with the central
-      ``width_fraction`` along ``u``.
+      ``u`` / ``v`` respectively.
+
+    The narrow zone is the central ``width_fraction`` along ``u`` intersected
+    with one of two ranges along ``v_hat`` (measured from center):
+
+    * ``[0, lower_fraction * ||v_orth||]`` — lower half (default).
+    * ``[-upper_fraction * ||v_orth||, 0]`` — upper half, selected by
+      passing a non-None ``upper_fraction``.  ``lower_fraction`` is ignored
+      in this mode.
 
     If any corner keypoint is missing or the span collapses, every arm's
     membership is reported as False (safe / conservative).
@@ -385,11 +392,16 @@ def _compute_eef_in_release_zone(
     half_u = 0.5 * w_full
     half_v = 0.5 * v_norm
     width_half = half_u * float(width_fraction)
-    # Lower half along v_hat corresponds to s_v in [0, +||v_orth||/2].  With
-    # ``lower_fraction=0.5`` this is exactly the lower half of the square,
-    # measured in the same orthonormal frame as ``s_v``.
-    v_upper_bound = float(lower_fraction) * v_norm
-    v_lower_bound = torch.zeros_like(v_upper_bound)
+    # v_hat points toward the LOWER edge, so s_v > 0 is lower-half and
+    # s_v < 0 is upper-half.  With ``lower_fraction=0.5`` the default zone
+    # is exactly the lower half; passing ``upper_fraction=0.5`` flips it to
+    # the upper half.  Only one mode is active at a time.
+    if upper_fraction is not None:
+        v_upper_bound = torch.zeros_like(v_norm)
+        v_lower_bound = -float(upper_fraction) * v_norm
+    else:
+        v_upper_bound = float(lower_fraction) * v_norm
+        v_lower_bound = torch.zeros_like(v_upper_bound)
 
     result: dict[str, torch.Tensor] = {}
     per_arm_diag: dict[str, dict[str, float]] = {}
@@ -499,6 +511,7 @@ def build_subtask_observation_context(
         "subtask_release_zone_lower_fraction",
         _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
     )
+    zone_upper_fraction = getattr(env.cfg, "subtask_release_zone_upper_fraction", None)
     eef_in_release_zone_map = _compute_eef_in_release_zone(
         env,
         num_envs,
@@ -506,6 +519,7 @@ def build_subtask_observation_context(
         eef_positions,
         width_fraction=zone_width_fraction,
         lower_fraction=zone_lower_fraction,
+        upper_fraction=zone_upper_fraction,
     )
 
     return FoldClothSubtaskObservationContext(
@@ -706,6 +720,106 @@ def get_subtask_signal_observation_from_context(
                 "garment_right_lower",
                 "garment_right_upper",
             ) <= context.lower_to_upper_threshold_m
+        )
+    # --- Pant-fold signals (lateral edge-to-edge folds) ---
+    # The helpers below support both left->right and right->left variants.
+    # The low-level predicates are the same building blocks as the other
+    # garment subtasks: arm-specific prep-for-grasp, EEF-to-keypoint grasp
+    # checks, keypoint-pair distance checks during transport, and release
+    # checks that also require the carried keypoint to settle low.
+    if signal_name == "prepare_for_grasp_left_upper":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_upper")
+    if signal_name == "prepare_for_grasp_left_on_right_upper":
+        return _context_prep_for_grasp(context, "left_arm", "garment_right_upper")
+    if signal_name == "prepare_for_grasp_right_on_left_lower":
+        return _context_prep_for_grasp(context, "right_arm", "garment_left_lower")
+    if signal_name == "grasp_left_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_upper")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_left_on_right_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_right_upper")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_right_on_left_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "right_arm", "garment_left_lower")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "left_upper_to_right_upper":
+        # Left arm still holding left_upper and the two waistband corners
+        # have been brought close together.
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_left_upper", "garment_right_upper")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "left_lower_to_right_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_left_lower", "garment_right_lower")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "right_upper_to_left_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_right_upper", "garment_left_upper")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "right_lower_to_left_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_right_lower", "garment_left_lower")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "release_left_upper_at_right_upper":
+        # Gripper open, waistband corners aligned, carried corner has settled
+        # back down onto the cloth (z below the same cutoff used for the
+        # top-fold release).
+        return (
+            (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_left_upper", "garment_right_upper")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_left_upper")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_upper_at_left_upper":
+        return (
+            (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_right_upper", "garment_left_upper")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_right_upper")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_left_lower_at_right_lower":
+        return (
+            (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_left_lower", "garment_right_lower")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_left_lower")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_lower_at_left_lower":
+        return (
+            (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_right_lower", "garment_left_lower")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_right_lower")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
         )
     if signal_name == "left_at_waiting_pos":
         return context.arm_at_waiting_pos_by_arm.get("left_arm", _context_false_bool_column(context))
@@ -953,6 +1067,7 @@ def _release_zone_signal(
         "subtask_release_zone_lower_fraction",
         _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
     )
+    upper_fraction = getattr(env.cfg, "subtask_release_zone_upper_fraction", None)
     in_zone = _compute_eef_in_release_zone(
         env,
         num_envs,
@@ -960,6 +1075,7 @@ def _release_zone_signal(
         eef_positions,
         width_fraction=width_fraction,
         lower_fraction=lower_fraction,
+        upper_fraction=upper_fraction,
     )
     return in_zone.get(arm_name, _false_bool_column(env, num_envs))
 
@@ -1058,6 +1174,106 @@ def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
     )
 
 
+# --- Pant-fold public signal wrappers ---------------------------------------
+# The bodies live in ``get_subtask_signal_observation_from_context``; these
+# thin wrappers exist so each signal has an entry in ``SUBTASK_SIGNAL_OBSERVATION_FNS``
+# and can be invoked directly by the mimic env's signal lookup.
+
+
+def prepare_for_grasp_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "prepare_for_grasp_left_upper", env_ids=env_ids)
+
+
+def prepare_for_grasp_left_on_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_on_right_upper", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_on_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_on_left_lower", env_ids=env_ids
+    )
+
+
+def grasp_left_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_left_upper", env_ids=env_ids)
+
+
+def grasp_left_on_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_left_on_right_upper", env_ids=env_ids)
+
+
+def grasp_right_on_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_right_on_left_lower", env_ids=env_ids)
+
+
+def left_upper_to_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "left_upper_to_right_upper", env_ids=env_ids)
+
+
+def left_lower_to_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "left_lower_to_right_lower", env_ids=env_ids)
+
+
+def right_upper_to_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "right_upper_to_left_upper", env_ids=env_ids)
+
+
+def right_lower_to_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "right_lower_to_left_lower", env_ids=env_ids)
+
+
+def release_left_upper_at_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_left_upper_at_right_upper", env_ids=env_ids
+    )
+
+
+def release_left_lower_at_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_left_lower_at_right_lower", env_ids=env_ids
+    )
+
+
+def release_right_upper_at_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_right_upper_at_left_upper", env_ids=env_ids
+    )
+
+
+def release_right_lower_at_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_right_lower_at_left_lower", env_ids=env_ids
+    )
+
+
 def left_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     return arm_at_waiting_pos(env, "left_arm", env_ids=env_ids)
 
@@ -1091,6 +1307,21 @@ SUBTASK_SIGNAL_OBSERVATION_FNS = {
     "grasp_right_lower": grasp_right_lower,
     "left_lower_to_upper": left_lower_to_upper,
     "right_lower_to_upper": right_lower_to_upper,
+    # Pant-fold (lateral left->right) signals
+    "prepare_for_grasp_left_upper": prepare_for_grasp_left_upper,
+    "prepare_for_grasp_left_on_right_upper": prepare_for_grasp_left_on_right_upper,
+    "prepare_for_grasp_right_on_left_lower": prepare_for_grasp_right_on_left_lower,
+    "grasp_left_upper": grasp_left_upper,
+    "grasp_left_on_right_upper": grasp_left_on_right_upper,
+    "grasp_right_on_left_lower": grasp_right_on_left_lower,
+    "left_upper_to_right_upper": left_upper_to_right_upper,
+    "left_lower_to_right_lower": left_lower_to_right_lower,
+    "right_upper_to_left_upper": right_upper_to_left_upper,
+    "right_lower_to_left_lower": right_lower_to_left_lower,
+    "release_left_upper_at_right_upper": release_left_upper_at_right_upper,
+    "release_left_lower_at_right_lower": release_left_lower_at_right_lower,
+    "release_right_upper_at_left_upper": release_right_upper_at_left_upper,
+    "release_right_lower_at_left_lower": release_right_lower_at_left_lower,
     "left_return_home": left_return_home,
     "right_return_home": right_return_home,
 }

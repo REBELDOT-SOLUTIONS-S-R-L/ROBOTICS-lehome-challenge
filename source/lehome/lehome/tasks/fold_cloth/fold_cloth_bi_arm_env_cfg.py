@@ -303,6 +303,13 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     # Defaults match the "lower half, middle 60%" spec.
     subtask_release_zone_width_fraction: float = 0.60
     subtask_release_zone_lower_fraction: float = 0.50
+    # Set to flip the release zone to the UPPER half of the garment (e.g.
+    # top_short drops the middle keypoint near the collar, not the hem).
+    # When not None, the zone becomes the central ``width_fraction`` along u
+    # intersected with ``[-upper_fraction * ||v_orth||, 0]`` along v_hat
+    # (measured from the center toward the upper edge).  ``lower_fraction``
+    # is ignored in this mode.
+    subtask_release_zone_upper_fraction: float | None = None
     subtask_lower_to_upper_threshold_m: float = 0.15
     # ``prepare_for_grasp_*`` subtask thresholds.  The Z cutoff is the main
     # knob (arm has descended into grasp attitude); the XY keypoint gate
@@ -323,6 +330,7 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     verify_subtask_grasp_eef_to_keypoint_threshold_m: float | None = 0.30
     verify_subtask_release_zone_width_fraction: float | None = 0.90
     verify_subtask_release_zone_lower_fraction: float | None = 0.80
+    verify_subtask_release_zone_upper_fraction: float | None = 0.80
 
     def __post_init__(self):
         """Post initialization."""

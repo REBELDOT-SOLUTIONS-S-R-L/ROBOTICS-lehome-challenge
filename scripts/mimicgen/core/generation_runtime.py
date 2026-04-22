@@ -584,9 +584,9 @@ def recording_style_success_tensor(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
 
     To avoid burning compute on particle-geometry evaluation while the cloth
     is still in motion (and to eliminate spurious mid-episode "success"
-    triggers), this is gated to run only after both arms have finished
-    ``*_lower_to_upper``.  The gate is sampled per environment via
-    :py:meth:`GarmentFoldEnv.is_final_fold_complete`; environments whose
+    triggers), this is gated to run only after each arm has finished its
+    configured fold-completion subtask. The gate is sampled per environment
+    via :py:meth:`GarmentFoldEnv.is_final_fold_complete`; environments whose
     gate is still closed report False without evaluating the checker.
     """
     num_envs = int(env.num_envs)
