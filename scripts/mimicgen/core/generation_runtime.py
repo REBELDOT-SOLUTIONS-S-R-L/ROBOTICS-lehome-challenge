@@ -410,6 +410,8 @@ async def run_data_generator_with_object_pose_failures(
             print(
                 f"Warning: generation trial for env {env_id} failed due to invalid cloth object poses: {exc}"
             )
+            if pose_sequence is not None:
+                pose_sequence.record_failure("invalid_cloth_object_poses")
             continue
         except SubtaskVerificationError as exc:
             mimic_generation.num_failures += 1
@@ -436,6 +438,10 @@ async def run_data_generator_with_object_pose_failures(
                 f"Warning: subtask verification failed for env {env_id} "
                 f"({exc.arm_name} subtask={exc.subtask_index}): {exc.fail_reason}"
             )
+            if pose_sequence is not None:
+                pose_sequence.record_failure(
+                    f"subtask_verification:{exc.arm_name}:{exc.subtask_index}:{exc.fail_reason}"
+                )
             continue
         except Exception as exc:
             sys.stderr.write(traceback.format_exc())
@@ -472,6 +478,8 @@ async def run_data_generator_with_object_pose_failures(
                     fail_reason="fold_success_check_failed",
                 )
             # else: DataGenerator already wrote the full failed episode.
+            if pose_sequence is not None:
+                pose_sequence.record_failure("fold_success_check_failed")
         mimic_generation.num_attempts += 1
 
 

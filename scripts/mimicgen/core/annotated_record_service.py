@@ -78,6 +78,7 @@ class PoseSequence:
                 ([pos_x, pos_y, self._pos_z], [rot_x, rot_y, self._rot_z])
             )
         self._index = 0
+        self._failures_per_index: list[int] = [0] * n
 
     @staticmethod
     def _halton_value(index: int, base: int) -> float:
@@ -115,14 +116,31 @@ class PoseSequence:
         """Move to the next sequence position (call after a successful save)."""
         self._index += 1
 
+    def record_failure(self, reason: str) -> None:
+        """Record a failure against the current Halton index and log it."""
+        if self.exhausted:
+            return
+        self._failures_per_index[self._index] += 1
+        logger.info(
+            "[PoseSequence] Halton index %d/%d failure #%d (%s)",
+            self._index,
+            self.n,
+            self._failures_per_index[self._index],
+            reason,
+        )
+
+    def failures_at(self, index: int) -> int:
+        return self._failures_per_index[index]
+
     def log_status(self) -> None:
         if self.exhausted:
             logger.info("[PoseSequence] All %d poses exhausted.", self.n)
             return
         pos, ori = self._sequence[self._index]
         logger.info(
-            "[PoseSequence] Index %d/%d | pos=(%.2f, %.2f) rot=(%.2f, %.2f)",
+            "[PoseSequence] Index %d/%d | pos=(%.2f, %.2f) rot=(%.2f, %.2f) | prior failures at this index: %d",
             self._index, self.n, pos[0], pos[1], ori[0], ori[1],
+            self._failures_per_index[self._index],
         )
 
 
