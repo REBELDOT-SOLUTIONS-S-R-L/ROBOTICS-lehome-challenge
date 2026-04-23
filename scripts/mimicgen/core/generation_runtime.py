@@ -659,6 +659,7 @@ def env_loop_with_pose_output(
     logging_interval: int = 1,
     log_success: bool = False,
     worker_tasks: list[asyncio.Task] | None = None,
+    pose_sequence: Any = None,
 ) -> None:
     """Main async loop for generation with CSV logging and optional success logging."""
     env_id_tensor = torch.tensor([0], dtype=torch.int64, device=env.device)
@@ -770,6 +771,12 @@ def env_loop_with_pose_output(
                     )
                     if check_val >= generation_num_trials:
                         print(f"Reached {generation_num_trials} successes/attempts. Exiting.")
+                        break
+                    if pose_sequence is not None and pose_sequence.exhausted:
+                        print(
+                            "Pose sequence exhausted (all Halton indices either succeeded or "
+                            "hit the failure cap). Exiting."
+                        )
                         break
 
                 if env.sim.is_stopped():

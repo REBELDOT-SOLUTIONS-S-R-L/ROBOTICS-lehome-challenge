@@ -56,10 +56,17 @@ class PoseSequence:
 
     _BASES = (2, 3, 5, 7)
 
-    def __init__(self, n: int, pos_range: list[float], rot_range: list[float]) -> None:
+    def __init__(
+        self,
+        n: int,
+        pos_range: list[float],
+        rot_range: list[float],
+        max_failures: int = 0,
+    ) -> None:
         if n < 1:
             raise ValueError(f"--pose_sequence must be >= 1, got {n}")
         self.n = n
+        self._max_failures = int(max_failures)
         self._pos_min = (pos_range[0], pos_range[1])
         self._pos_max = (pos_range[3], pos_range[4])
         self._pos_z = pos_range[2]
@@ -109,7 +116,14 @@ class PoseSequence:
         return self._index >= self.n
 
     def current(self) -> tuple[list[float], list[float]]:
-        """Return ``(pos, ori_euler_degrees)`` for the current sequence position."""
+        """Return ``(pos, ori_euler_degrees)`` for the current sequence position.
+
+        If the sequence is exhausted (all indices consumed), return the
+        last pose so in-flight worker resets don't IndexError before the
+        main loop observes exhaustion and breaks.
+        """
+        if self._index >= self.n:
+            return self._sequence[-1]
         return self._sequence[self._index]
 
     def advance(self) -> None:
@@ -117,17 +131,32 @@ class PoseSequence:
         self._index += 1
 
     def record_failure(self, reason: str) -> None:
-        """Record a failure against the current Halton index and log it."""
+        """Record a failure against the current Halton index and log it.
+
+        If ``max_failures`` is set and exceeded, skip to the next Halton
+        pose so generation doesn't spin forever on an unreachable pose.
+        """
         if self.exhausted:
             return
-        self._failures_per_index[self._index] += 1
+        current_index = self._index
+        self._failures_per_index[current_index] += 1
+        count = self._failures_per_index[current_index]
         logger.info(
             "[PoseSequence] Halton index %d/%d failure #%d (%s)",
-            self._index,
+            current_index,
             self.n,
-            self._failures_per_index[self._index],
+            count,
             reason,
         )
+        if self._max_failures > 0 and count >= self._max_failures:
+            logger.warning(
+                "[PoseSequence] Halton index %d/%d hit failure cap (%d); skipping to next pose.",
+                current_index,
+                self.n,
+                self._max_failures,
+            )
+            self.advance()
+            self.log_status()
 
     def failures_at(self, index: int) -> int:
         return self._failures_per_index[index]
@@ -171,8 +200,13 @@ def _build_pose_sequence(args: argparse.Namespace, env: DirectRLEnv) -> PoseSequ
 
     pos_range, _ = garment_obj._get_config_value("soft_reset_pos_range", "common")
     rot_range, _ = garment_obj._get_config_value("soft_reset_rot_range", "common")
-    seq = PoseSequence(int(n), pos_range, rot_range)
+    max_failures = int(getattr(args, "pose_sequence_max_failures", 0) or 0)
+    seq = PoseSequence(int(n), pos_range, rot_range, max_failures=max_failures)
     logger.info("[PoseSequence] Created %d-point Halton sequence (bases 2,3,5,7)", n)
+    if max_failures > 0:
+        logger.info("[PoseSequence] Per-index failure cap: %d (skips pose on exceed).", max_failures)
+    else:
+        logger.info("[PoseSequence] Per-index failure cap: disabled (retry forever).")
     logger.info(
         "[PoseSequence] Pos range: x=[%.2f, %.2f] y=[%.2f, %.2f] z=%.2f (fixed)",
         pos_range[0], pos_range[3], pos_range[1], pos_range[4], pos_range[2],

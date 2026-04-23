@@ -564,6 +564,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         logging_interval=int(parsed_args.logging_interval),
         log_success=bool(parsed_args.log_success),
         worker_tasks=async_components["tasks"],
+        pose_sequence=pose_sequence,
     )
 
 

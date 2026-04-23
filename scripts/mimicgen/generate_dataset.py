@@ -93,6 +93,15 @@ def build_parser() -> argparse.ArgumentParser:
             "falls back to the env's default random garment reset."
         ),
     )
+    pose_group.add_argument(
+        "--pose_sequence_max_failures",
+        type=int,
+        default=10,
+        help=(
+            "Max consecutive failed attempts per Halton index before skipping "
+            "to the next pose. Set to 0 to retry forever."
+        ),
+    )
 
     runtime_group = parser.add_argument_group("runtime and debugging")
     runtime_group.add_argument(
