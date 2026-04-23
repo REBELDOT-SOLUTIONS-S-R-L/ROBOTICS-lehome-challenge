@@ -32,11 +32,7 @@ Subtask sequence (5 per arm, no re-grasp):
 """
 from __future__ import annotations
 
-from isaaclab.envs.mimic_env_cfg import (
-    SubTaskConfig,
-    SubTaskConstraintConfig,
-    SubTaskConstraintType,
-)
+from isaaclab.envs.mimic_env_cfg import SubTaskConfig
 
 
 def build(cfg):
@@ -228,21 +224,10 @@ def build(cfg):
     # -----------------------------------------------------------------
     # Arm synchronization
     # -----------------------------------------------------------------
-    # Subtask numbering: 0=prep, 1=grasp, 2=carry, 3=release, 4=return_home.
-    # Keep arms loosely synchronized: both must finish the release before
-    # either returns home.  No earlier sync is needed because the two
-    # arms' pickups are on the SAME edge (left side) — parallel motion is
-    # fine and additional sync would just reduce throughput.
-    task_constraint_configs = [
-        SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("left_arm", 3), ("right_arm", 4)],
-            constraint_type=SubTaskConstraintType.SEQUENTIAL,
-        ),
-        SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("right_arm", 3), ("left_arm", 4)],
-            constraint_type=SubTaskConstraintType.SEQUENTIAL,
-        ),
-    ]
+    # No cross-arm constraints: both arms run their own subtask queues
+    # independently. Adding SEQUENTIAL constraints caused one arm to
+    # idle in mid-air while waiting for the other to latch a signal.
+    task_constraint_configs = []
 
     return (
         {"left_arm": left_subtask_configs, "right_arm": right_subtask_configs},

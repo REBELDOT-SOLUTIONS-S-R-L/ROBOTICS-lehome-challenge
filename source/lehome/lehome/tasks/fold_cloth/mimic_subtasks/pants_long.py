@@ -20,11 +20,7 @@ Arm assignment (both arms reach to the right edge of the pant):
 """
 from __future__ import annotations
 
-from isaaclab.envs.mimic_env_cfg import (
-    SubTaskConfig,
-    SubTaskConstraintConfig,
-    SubTaskConstraintType,
-)
+from isaaclab.envs.mimic_env_cfg import SubTaskConfig
 
 
 def build(cfg):
@@ -58,10 +54,13 @@ def build(cfg):
             next_subtask_description="Left arm grasps right_upper",
         ),
         # Subtask 1: grasp garment_right_upper with the left arm.
+        # Offset range kept tight because the annotated carry signal fires
+        # only ~3 frames after grasp in this dataset; a wider range would
+        # violate MimicGen's subtask sanity check.
         SubTaskConfig(
             object_ref="garment_right_upper",
             subtask_term_signal="grasp_left_on_right_upper",
-            subtask_term_offset_range=(5, 15),
+            subtask_term_offset_range=(3, 5),
             selection_strategy="source_from_subtask",
             selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_on_right_upper"},
             action_noise=0.0,
@@ -142,10 +141,12 @@ def build(cfg):
             next_subtask_description="Right arm grasps right_lower",
         ),
         # Subtask 1: grasp garment_right_lower.
+        # Tight offset (see note on left-arm grasp subtask) — carry signal
+        # fires ~3 frames after grasp in the annotated teleop data.
         SubTaskConfig(
             object_ref="garment_right_lower",
             subtask_term_signal="grasp_right_lower",
-            subtask_term_offset_range=(5, 15),
+            subtask_term_offset_range=(3, 5),
             selection_strategy="source_from_subtask",
             selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_right_lower"},
             action_noise=0.0,
@@ -271,29 +272,10 @@ def build(cfg):
     # -----------------------------------------------------------------
     # Arm synchronization
     # -----------------------------------------------------------------
-    # Left subtask numbering: 0=prep, 1=grasp, 2=move, 3=release, 4=home.
-    # Right subtask numbering:
-    #   0=prep_first_fold, 1=grasp_first_fold, 2=move_first_fold,
-    #   3=release_first_fold, 4=prep_lower_regrasp, 5=grasp_lower_regrasp,
-    #   6=lower_to_upper, 7=return_home.
-    #
-    # Keep both arms synchronized through their first-fold releases, then
-    # require the left arm to get home before the right arm begins the
-    # second (lower-to-upper) fold.
-    task_constraint_configs = [
-        # Right arm finishes its first-fold release before the left arm
-        # retracts home.
-        SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("right_arm", 3), ("left_arm", 4)],
-            constraint_type=SubTaskConstraintType.SEQUENTIAL,
-        ),
-        # Left arm is home before the right arm starts its re-grasp, so
-        # the left arm is out of the workspace for the second fold.
-        SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("left_arm", 4), ("right_arm", 4)],
-            constraint_type=SubTaskConstraintType.SEQUENTIAL,
-        ),
-    ]
+    # No cross-arm constraints: both arms run their own subtask queues
+    # independently. Adding SEQUENTIAL constraints here caused one arm to
+    # idle in mid-air while waiting for the other to latch a signal.
+    task_constraint_configs = []
 
     return (
         {"left_arm": left_subtask_configs, "right_arm": right_subtask_configs},
