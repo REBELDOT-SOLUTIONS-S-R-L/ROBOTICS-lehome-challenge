@@ -132,7 +132,7 @@ class GarmentFoldMimicEnvCfg(GarmentFoldEnvCfg, MimicEnvCfg):
         # ``nearest_neighbor_all_keypoints`` so the pick is driven by the full
         # garment layout (all six garment check_points), not the three
         # keypoints relevant to one subtask.
-        self.datagen_config.generation_select_src_per_subtask = False
+        self.datagen_config.generation_select_src_per_subtask = True
         self.datagen_config.generation_select_src_per_arm = True
         # Include the source demo's first measured EEF pose in the transformed
         # segment so interpolation goes to where the robot *actually was* at
