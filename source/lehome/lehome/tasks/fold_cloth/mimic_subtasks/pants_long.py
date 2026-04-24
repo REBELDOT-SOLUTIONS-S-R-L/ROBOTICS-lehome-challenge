@@ -40,9 +40,7 @@ def build(cfg):
             selection_strategy_kwargs={
                 "keypoint_names": [
                     "garment_right_upper",
-                    "garment_left_upper",
                     "garment_right_lower",
-                    "garment_left_lower",
                 ],
                 "nn_k": 1,
             },
@@ -127,9 +125,7 @@ def build(cfg):
             selection_strategy_kwargs={
                 "keypoint_names": [
                     "garment_right_lower",
-                    "garment_left_lower",
                     "garment_right_upper",
-                    "garment_left_upper",
                 ],
                 "nn_k": 1,
             },
@@ -195,9 +191,7 @@ def build(cfg):
             selection_strategy_kwargs={
                 "keypoint_names": [
                     "garment_left_lower",
-                    "garment_right_lower",
                     "garment_left_upper",
-                    "garment_right_upper",
                 ],
                 "nn_k": 1,
             },
@@ -217,9 +211,7 @@ def build(cfg):
             selection_strategy_kwargs={
                 "keypoint_names": [
                     "garment_left_lower",
-                    "garment_right_lower",
                     "garment_left_upper",
-                    "garment_right_upper",
                 ],
                 "nn_k": 1,
             },
@@ -241,8 +233,7 @@ def build(cfg):
             selection_strategy="nearest_neighbor_multi_keypoint",
             selection_strategy_kwargs={
                 "keypoint_names": [
-                    "garment_right_lower",
-                    "garment_right_upper",
+                    "garment_left_lower",
                     "garment_left_upper",
                 ],
                 "nn_k": 1,
