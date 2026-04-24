@@ -3,26 +3,26 @@
 # its own source teleop HDF5.  Each run's stdout+stderr is tee'd to a
 # per-garment log.  If one run fails, the script continues with the next
 # garment and reports a summary at the end.
-
+# nohup ./scripts/mimicgen/generate_all_overnight.sh
 set -u
 
-INPUT_DIR="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop"
-OUTPUT_DIR="Datasets/hdf5_mimicgen_pipeline/2_generated"
+INPUT_DIR="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop/Pant_Long"
+OUTPUT_DIR="Datasets/hdf5_mimicgen_pipeline/2_generated/Pant_Long"
 LOG_DIR="logs/mimicgen_overnight"
 NUM_TRIALS="${NUM_TRIALS:-100}"
 
 # Ordered garment list drives execution order.
 GARMENTS=(
-    Top_Long_Seen_9
-    Top_Long_Seen_5
-    Top_Long_Seen_1
+    Pant_Long_Seen_3
+    Pant_Long_Seen_4
+    Pant_Long_Seen_5
 )
 
 # Per-garment source teleop file (basename relative to $INPUT_DIR).
 declare -A GARMENT_INPUTS=(
-    [Top_Long_Seen_9]="Top_Long_Seen_0-HALTON_64-run_2.hdf5"
-    [Top_Long_Seen_5]="Top_Long_Seen_5-HALTON_64.hdf5"
-    [Top_Long_Seen_1]="Top_Long_Seen_0+5-HALTON_64.hdf5"
+    [Pant_Long_Seen_3]="Pant_Long_Seen_4-HALTON_64.hdf5"
+    [Pant_Long_Seen_4]="Pant_Long_Seen_4-HALTON_64.hdf5"
+    [Pant_Long_Seen_5]="Pant_Long_Seen_4-HALTON_64.hdf5"
 )
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
