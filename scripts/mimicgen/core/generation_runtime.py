@@ -608,20 +608,6 @@ def recording_style_success_tensor(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
             device=env.device,
         )
         if not bool(gated_mask.any()):
-            # DEBUG: gate is closed — print every ~100 calls + completed-subtask state.
-            _dbg = getattr(recording_style_success_tensor, "_dbg_count", 0) + 1
-            recording_style_success_tensor._dbg_count = _dbg
-            if _dbg == 1 or _dbg % 100 == 0:
-                completed = getattr(env, "_completed_subtasks", {})
-                arm_names = list(getattr(env.cfg, "subtask_configs", {}).keys())
-                fold_idx_fn = getattr(env, "_fold_completion_subtask_index", None)
-                fold_idxs = (
-                    {a: fold_idx_fn(a) for a in arm_names} if callable(fold_idx_fn) else {}
-                )
-                print(
-                    f"[mimic_success GATE_CLOSED #{_dbg}] arms={arm_names} "
-                    f"fold_completion_idx={fold_idxs} completed={dict(completed)}"
-                )
             return result
     else:
         gated_mask = torch.ones(num_envs, dtype=torch.bool, device=env.device)
@@ -630,19 +616,6 @@ def recording_style_success_tensor(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
     # gated env.  Envs whose gate is closed stay False regardless.
     eval_result = _evaluate_generation_success_result(env)
     success = bool(eval_result.get("success", False)) if eval_result is not None else False
-    # DEBUG: gate is OPEN — always print the eval to see condition values.
-    if eval_result is not None:
-        details = eval_result.get("details", {})
-        cond_summary = " | ".join(
-            f"{k}: {v.get('description','')} -> {'P' if v.get('passed') else 'F'}"
-            for k, v in details.items()
-        )
-        print(
-            f"[mimic_success GATE_OPEN] gated={gated_mask.tolist()} "
-            f"success={success} thresholds={eval_result.get('thresholds', [])} {cond_summary}"
-        )
-    else:
-        print("[mimic_success GATE_OPEN] eval_result=None (env missing object/garment_loader)")
     if not success:
         return result
     result[gated_mask] = True
