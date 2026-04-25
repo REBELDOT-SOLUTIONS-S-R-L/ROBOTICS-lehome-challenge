@@ -31,13 +31,19 @@ from isaaclab.envs.mimic_env_cfg import (
 def build(cfg):
     """Return (subtask_configs, task_constraint_configs) for top_short."""
     # ``left_middle_to_lower`` / ``release_*_middle`` read the release-zone
-    # geometry from env cfg at runtime.  Make the top-half zone explicit here
+    # geometry from env cfg at runtime.  Set the top-half zone explicit here
     # so callers do not need to remember a separate cfg-side override.
-    if hasattr(cfg, "subtask_release_zone_upper_fraction") and hasattr(
-        cfg, "subtask_release_zone_lower_fraction"
-    ):
+    #
+    # Short-sleeve tops have the middle keypoint near the sleeve tip, which
+    # often sits at or past the ``garment_*_upper`` corners.  An ``upper_fraction``
+    # of 1.0 makes the zone reach all the way from the garment center to the
+    # upper corners (and the corner-derived span includes the sleeves), giving
+    # the carry/release signals a forgiving target without straying outside
+    # the garment footprint.
+    _TOP_SHORT_UPPER_FRACTION = 1.0
+    if hasattr(cfg, "subtask_release_zone_upper_fraction"):
         if getattr(cfg, "subtask_release_zone_upper_fraction", None) is None:
-            cfg.subtask_release_zone_upper_fraction = cfg.subtask_release_zone_lower_fraction
+            cfg.subtask_release_zone_upper_fraction = _TOP_SHORT_UPPER_FRACTION
 
     # -----------------------------------------------------------------
     # Left arm subtasks
