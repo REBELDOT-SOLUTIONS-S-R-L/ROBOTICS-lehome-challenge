@@ -72,7 +72,7 @@ def build(cfg):
         SubTaskConfig(
             object_ref="garment_left_upper",
             subtask_term_signal="grasp_left_upper",
-            subtask_term_offset_range=(5, 15),
+            subtask_term_offset_range=(0, 3),
             selection_strategy="source_from_subtask",
             selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_upper"},
             # Zero noise during a grasp.
@@ -164,7 +164,7 @@ def build(cfg):
         SubTaskConfig(
             object_ref="garment_left_lower",
             subtask_term_signal="grasp_right_on_left_lower",
-            subtask_term_offset_range=(5, 15),
+            subtask_term_offset_range=(0, 3),
             selection_strategy="source_from_subtask",
             selection_strategy_kwargs={
                 "source_subtask": "prepare_for_grasp_right_on_left_lower"
