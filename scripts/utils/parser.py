@@ -663,6 +663,54 @@ def setup_eval_parser() -> argparse.ArgumentParser:
         help="Path of the train dataset (for metadata).",
     )
 
+    gr00t_group = parser.add_argument_group("gr00t policy (client)")
+    gr00t_group.add_argument(
+        "--gr00t_host",
+        type=str,
+        default="localhost",
+        help="Host of the running GR00T inference server.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_port",
+        type=int,
+        default=5555,
+        help="Port of the running GR00T inference server.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_action_horizon",
+        type=int,
+        default=8,
+        help="Number of actions consumed from each server-returned chunk before re-querying.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_action_repeat",
+        type=int,
+        default=3,
+        help=(
+            "How many env.step() calls each predicted action is held for. "
+            "Matches policy control rate (training fps) to sim rate (1/sim.dt). "
+            "Default 3 = training 30fps vs fold_cloth env 90Hz."
+        ),
+    )
+    gr00t_group.add_argument(
+        "--gr00t_modality_json",
+        type=str,
+        default="configs/gr00t/modality.json",
+        help="Path to the modality.json matching the deployed GR00T checkpoint.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_api_token",
+        type=str,
+        default=None,
+        help="Optional API token if the GR00T server was launched with one.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_timeout_ms",
+        type=int,
+        default=60000,
+        help="ZMQ send/recv timeout for GR00T client calls, in milliseconds.",
+    )
+
     compatibility_group = parser.add_argument_group("compatibility and legacy")
     compatibility_group.add_argument(
         "--use_ee_pose",
