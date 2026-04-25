@@ -6,23 +6,29 @@
 # nohup ./scripts/mimicgen/generate_all_overnight.sh
 set -u
 
-INPUT_DIR="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop/Pant_Long"
-OUTPUT_DIR="Datasets/hdf5_mimicgen_pipeline/2_generated/Pant_Long"
+INPUT_DIR="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop/Top_Long"
+OUTPUT_DIR="Datasets/hdf5_mimicgen_pipeline/2_generated/Top_Long"
 LOG_DIR="logs/mimicgen_overnight"
-NUM_TRIALS="${NUM_TRIALS:-100}"
+NUM_TRIALS="${NUM_TRIALS:-200}"
 
 # Ordered garment list drives execution order.
 GARMENTS=(
-    Pant_Long_Seen_3
-    Pant_Long_Seen_4
-    Pant_Long_Seen_5
+    Top_Long_Seen_0
+    Top_Long_Seen_1
+    Top_Long_Seen_2
+    Top_Long_Seen_5
+    Top_Long_Seen_7
+    Top_Long_Seen_9
 )
 
 # Per-garment source teleop file (basename relative to $INPUT_DIR).
 declare -A GARMENT_INPUTS=(
-    [Pant_Long_Seen_3]="Pant_Long_Seen_4-HALTON_64.hdf5"
-    [Pant_Long_Seen_4]="Pant_Long_Seen_4-HALTON_64.hdf5"
-    [Pant_Long_Seen_5]="Pant_Long_Seen_4-HALTON_64.hdf5"
+    [Top_Long_Seen_0]="Top_Long_Seen_0-HALTON_64-run_2.hdf5"
+    [Top_Long_Seen_1]="Top_Long_Seen_0+5-HALTON_64.hdf5"
+    [Top_Long_Seen_2]="Top_Long_Seen_0+5-HALTON_64.hdf5"
+    [Top_Long_Seen_5]="Top_Long_Seen_5-HALTON_64.hdf5"
+    [Top_Long_Seen_7]="Top_Long_Seen_0+5-HALTON_64.hdf5"
+    [Top_Long_Seen_9]="Top_Long_Seen_0-HALTON_64-run_2.hdf5"
 )
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -86,7 +92,7 @@ for garment in "${GARMENTS[@]}"; do
         --garment_name "$garment" \
         --input_file "$input_file" \
         --output_file "$output_file" \
-        --generation_num_trials "$NUM_TRIALS" \
+        --pose_sequence "$NUM_TRIALS" \
         --device cuda \
         --num_envs 1 \
         --enable_cameras \
