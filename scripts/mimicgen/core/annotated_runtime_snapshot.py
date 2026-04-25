@@ -252,6 +252,11 @@ def capture_annotated_runtime_snapshot(
             "subtask_release_zone_lower_fraction",
             _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
         ),
+        # Top-short tops drop the middle keypoint near the collar, so the
+        # release zone must flip to the upper half.  Without this the
+        # ``*_middle_to_lower`` signals during annotation only fire when the
+        # EEF is dragged into the lower half — wrong target for short-sleeve.
+        upper_fraction=getattr(env.cfg, "subtask_release_zone_upper_fraction", None),
     )
 
     observation_context = FoldClothSubtaskObservationContext(
