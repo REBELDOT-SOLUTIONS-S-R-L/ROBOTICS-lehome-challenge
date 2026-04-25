@@ -6,29 +6,58 @@
 # nohup ./scripts/mimicgen/generate_all_overnight.sh
 set -u
 
-INPUT_DIR="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop/Top_Long"
-OUTPUT_DIR="Datasets/hdf5_mimicgen_pipeline/2_generated/Top_Long"
+INPUT_BASE="Datasets/hdf5_mimicgen_pipeline/1_annotated_teleop"
+OUTPUT_BASE="Datasets/hdf5_mimicgen_pipeline/2_generated"
 LOG_DIR="logs/mimicgen_overnight"
-NUM_TRIALS="${NUM_TRIALS:-200}"
+NUM_TRIALS="${NUM_TRIALS:-100}"
+
+# Map garment name -> category subdirectory (under both INPUT_BASE and
+# OUTPUT_BASE).  Add new categories here when introducing other garment types.
+garment_category() {
+    case "$1" in
+        Top_Long_*)   echo "Top_Long" ;;
+        Top_Short_*)  echo "Top_Short" ;;
+        Pant_Long_*)  echo "Pant_Long" ;;
+        Pant_Short_*) echo "Pant_Short" ;;
+        *)
+            echo "ERROR: cannot derive category for garment: $1" >&2
+            return 1
+            ;;
+    esac
+}
 
 # Ordered garment list drives execution order.
 GARMENTS=(
-    Top_Long_Seen_0
-    Top_Long_Seen_1
-    Top_Long_Seen_2
-    Top_Long_Seen_5
-    Top_Long_Seen_7
-    Top_Long_Seen_9
+    Top_Short_Seen_0
+    Top_Short_Seen_1
+    Top_Short_Seen_2
+    Pant_Short_Seen_0
+    Pant_Short_Seen_1
+    Pant_Short_Seen_2
+    Pant_Short_Seen_3
+    Pant_Short_Seen_4
+    Pant_Short_Seen_5
+    Pant_Short_Seen_6
+    Pant_Short_Seen_7
+    Pant_Short_Seen_8
+    Pant_Short_Seen_9
 )
 
 # Per-garment source teleop file (basename relative to $INPUT_DIR).
 declare -A GARMENT_INPUTS=(
-    [Top_Long_Seen_0]="Top_Long_Seen_0-HALTON_64-run_2.hdf5"
-    [Top_Long_Seen_1]="Top_Long_Seen_0+5-HALTON_64.hdf5"
-    [Top_Long_Seen_2]="Top_Long_Seen_0+5-HALTON_64.hdf5"
-    [Top_Long_Seen_5]="Top_Long_Seen_5-HALTON_64.hdf5"
-    [Top_Long_Seen_7]="Top_Long_Seen_0+5-HALTON_64.hdf5"
-    [Top_Long_Seen_9]="Top_Long_Seen_0-HALTON_64-run_2.hdf5"
+    [Top_Short_Seen_0]="Top_Short_Seen_0-HALTON_64.hdf5"
+    [Top_Short_Seen_1]="Top_Short_Seen_0-HALTON_64.hdf5"
+    [Top_Short_Seen_2]="Top_Short_Seen_0-HALTON_64.hdf5"
+    [Pant_Short_Seen_0]="Pant_Short_Seen_0-HALTON_64.hdf5"
+    [Pant_Short_Seen_1]="Pant_Short_Seen_0-HALTON_64.hdf5"
+    [Pant_Short_Seen_2]="Pant_Short_Seen_0-HALTON_64.hdf5"
+    [Pant_Short_Seen_3]="Pant_Short_Seen_3-HALTON_64.hdf5"
+    [Pant_Short_Seen_4]="Pant_Short_Seen_3-HALTON_64.hdf5"
+    [Pant_Short_Seen_5]="Pant_Short_Seen_3-HALTON_64.hdf5"
+    [Pant_Short_Seen_6]="Pant_Short_Seen_6-HALTON_64.hdf5"
+    [Pant_Short_Seen_7]="Pant_Short_Seen_6-HALTON_64.hdf5"
+    [Pant_Short_Seen_8]="Pant_Short_Seen_8-HALTON_64.hdf5"
+    [Pant_Short_Seen_9]="Pant_Short_Seen_8-HALTON_64.hdf5"
 )
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -43,7 +72,7 @@ fi
 source "$VENV_ACTIVATE"
 echo "Using python: $(command -v python)"
 
-mkdir -p "$OUTPUT_DIR" "$LOG_DIR"
+mkdir -p "$LOG_DIR"
 
 # Fail fast: every referenced input must exist before we start the overnight run.
 for garment in "${GARMENTS[@]}"; do
@@ -52,10 +81,13 @@ for garment in "${GARMENTS[@]}"; do
         echo "ERROR: no input mapping for garment: $garment" >&2
         exit 1
     fi
-    if [[ ! -f "${INPUT_DIR}/${input_basename}" ]]; then
-        echo "ERROR: input file not found: ${INPUT_DIR}/${input_basename}" >&2
+    category="$(garment_category "$garment")" || exit 1
+    input_path="${INPUT_BASE}/${category}/${input_basename}"
+    if [[ ! -f "$input_path" ]]; then
+        echo "ERROR: input file not found: $input_path" >&2
         exit 1
     fi
+    mkdir -p "${OUTPUT_BASE}/${category}"
 done
 
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -72,12 +104,14 @@ echo "----" | tee -a "$SUMMARY_LOG"
 
 for garment in "${GARMENTS[@]}"; do
     input_basename="${GARMENT_INPUTS[$garment]}"
-    input_file="${INPUT_DIR}/${input_basename}"
+    category="$(garment_category "$garment")"
+    input_file="${INPUT_BASE}/${category}/${input_basename}"
     # Output name: "<garment>-generated-<input-stem-without-garment-prefix>.hdf5"
     input_stem="${input_basename%.hdf5}"
-    # Strip a leading "Top_Long_Seen_<anything>-" so outputs aren't double-labeled.
-    output_suffix="${input_stem#Top_Long_Seen_*-}"
-    output_file="${OUTPUT_DIR}/${garment}-generated-${output_suffix}.hdf5"
+    # Strip the source garment's leading "<Garment_Name>-" so outputs aren't
+    # double-labeled with the source demo's garment prefix.
+    output_suffix="${input_stem#*-}"
+    output_file="${OUTPUT_BASE}/${category}/${garment}-generated-${output_suffix}.hdf5"
     run_log="${LOG_DIR}/${garment}_${TIMESTAMP}.log"
 
     echo "" | tee -a "$SUMMARY_LOG"
@@ -92,7 +126,7 @@ for garment in "${GARMENTS[@]}"; do
         --garment_name "$garment" \
         --input_file "$input_file" \
         --output_file "$output_file" \
-        --pose_sequence "$NUM_TRIALS" \
+        --generation_num_trials "$NUM_TRIALS" \
         --device cuda \
         --num_envs 1 \
         --enable_cameras \
