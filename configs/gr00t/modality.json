@@ -36,13 +36,13 @@
         }
     },
     "video": {
-        "top": {
+        "observation.images.top": {
             "original_key": "observation.images.top_rgb"
         },
-        "left_wrist": {
+        "observation.images.left_wrist": {
             "original_key": "observation.images.left_rgb"
         },
-        "right_wrist": {
+        "observation.images.right_wrist": {
             "original_key": "observation.images.right_rgb"
         }
     },

@@ -96,7 +96,7 @@ def build_parser() -> argparse.ArgumentParser:
     pose_group.add_argument(
         "--pose_sequence_max_failures",
         type=int,
-        default=10,
+        default=3,
         help=(
             "Max consecutive failed attempts per Halton index before skipping "
             "to the next pose. Set to 0 to retry forever."
