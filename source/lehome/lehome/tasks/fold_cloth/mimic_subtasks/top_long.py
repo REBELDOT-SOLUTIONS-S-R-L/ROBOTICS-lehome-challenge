@@ -470,7 +470,8 @@ def build(cfg):
     #
     # Sync point 1: Both arms finish waiting_pos before the prep_for_grasp_lower
     # approach, so the two arms re-engage the garment together.
-    # Sync point 2: Both arms finish grasp_lower before lower_to_upper.
+    # Sync point 2: Both arms finish prepare_for_grasp_lower before grasp_lower,
+    # so the grippers close on the cloth simultaneously.
     # Sync point 3: Both arms finish lower_to_upper before return_home.
     task_constraint_configs = [
         # Sync before subtask 5 (prepare_for_grasp_lower)
@@ -482,13 +483,15 @@ def build(cfg):
             eef_subtask_constraint_tuple=[("right_arm", 4), ("left_arm", 5)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
-        # Sync before subtask 7 (lower_to_upper)
+        # Sync before subtask 6 (grasp_lower): both arms hold at the
+        # prepare_for_grasp pose until both have arrived, then close
+        # their grippers together.
         SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("left_arm", 6), ("right_arm", 7)],
+            eef_subtask_constraint_tuple=[("left_arm", 5), ("right_arm", 6)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
         SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("right_arm", 6), ("left_arm", 7)],
+            eef_subtask_constraint_tuple=[("right_arm", 5), ("left_arm", 6)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
         # Sync before subtask 8 (return_home)

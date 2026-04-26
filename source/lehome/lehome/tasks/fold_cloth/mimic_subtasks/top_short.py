@@ -426,13 +426,15 @@ def build(cfg):
             eef_subtask_constraint_tuple=[("right_arm", 4), ("left_arm", 5)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
-        # Sync before subtask 7 (lower_to_upper)
+        # Sync before subtask 6 (grasp_lower): both arms hold at the
+        # prepare_for_grasp pose until both have arrived, then close
+        # their grippers together.
         SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("left_arm", 6), ("right_arm", 7)],
+            eef_subtask_constraint_tuple=[("left_arm", 5), ("right_arm", 6)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
         SubTaskConstraintConfig(
-            eef_subtask_constraint_tuple=[("right_arm", 6), ("left_arm", 7)],
+            eef_subtask_constraint_tuple=[("right_arm", 5), ("left_arm", 6)],
             constraint_type=SubTaskConstraintType.SEQUENTIAL,
         ),
         # Sync before subtask 8 (return_home)
