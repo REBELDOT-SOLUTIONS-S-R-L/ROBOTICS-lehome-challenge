@@ -296,7 +296,7 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     subtask_grasp_eef_to_keypoint_threshold_m: float = 0.15
     subtask_gripper_close_threshold: float = 0.20
     subtask_middle_to_lower_threshold_m: float = 0.10
-    subtask_middle_to_lower_middle_keypoint_max_z_m: float = 0.60
+    subtask_middle_to_lower_middle_keypoint_max_z_m: float = 0.65
     # Narrow release-zone geometry inside the 4-corner garment quad.  Width is
     # the central fraction of the left<->right span; lower is the fraction of
     # the upper<->lower span measured from the lower edge toward the center.
@@ -328,9 +328,9 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     # values give verification enough grace to accept those trajectories.
     # Set a value to ``None`` to fall back to the strict online threshold.
     verify_subtask_grasp_eef_to_keypoint_threshold_m: float | None = 0.30
-    verify_subtask_release_zone_width_fraction: float | None = 0.90
+    verify_subtask_release_zone_width_fraction: float | None = 1.0
     verify_subtask_release_zone_lower_fraction: float | None = 0.80
-    verify_subtask_release_zone_upper_fraction: float | None = 0.80
+    verify_subtask_release_zone_upper_fraction: float | None = 1.0
 
     def __post_init__(self):
         """Post initialization."""
