@@ -1,0 +1,80 @@
+# GR00T 1.7 Inference Server — bi-SO101 (model baked in)
+#
+# Same as Dockerfile.gr00t, but copies the trained checkpoint into the image
+# at /model so the resulting image is fully self-contained.
+#
+# Build via docker/build_gr00t_image.sh, which wires up the `model` build context.
+# Manual equivalent:
+#   DOCKER_BUILDKIT=1 docker build \
+#       --build-context model=/host/path/to/checkpoint \
+#       -f docker/Dockerfile.gr00t-bundled \
+#       -t gr00t-inference-bundled:bi-so101 .
+
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ISAAC_GROOT_REF=main
+# Default embodiment baked into the image. Still overridable at `docker run` time
+# via -e GR00T_EMBODIMENT_TAG=...
+ARG GR00T_EMBODIMENT_TAG=new_embodiment
+
+# ── System dependencies ────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl wget \
+        build-essential \
+        python3.10 python3.10-venv python3.10-dev \
+        ffmpeg \
+        libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+ && update-alternatives --install /usr/bin/python  python  /usr/bin/python3.10 1
+
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+ && pip install uv==0.8.14
+
+# ── Clone Isaac-GR00T ──────────────────────────────────────────────────────────
+RUN git clone --depth 1 --branch ${ISAAC_GROOT_REF} \
+        https://github.com/NVIDIA/Isaac-GR00T.git /workspace
+
+WORKDIR /workspace
+
+RUN python3 -m venv /workspace/.venv
+ENV PATH="/workspace/.venv/bin:$PATH"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+
+RUN uv pip install -e .
+
+# ── Bake the trained checkpoint into the image ─────────────────────────────────
+# `model` is a named build context supplied via:
+#     docker build --build-context model=/host/path/to/checkpoint ...
+COPY --from=model . /model
+
+# ── GPU / rendering env ────────────────────────────────────────────────────────
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV EGL_VENDOR_LIBRARY="libEGL_nvidia.so.0"
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
+ENV MUJOCO_GL=egl
+ENV PYOPENGL_PLATFORM=egl
+
+# ── Server defaults ────────────────────────────────────────────────────────────
+ENV GR00T_MODEL_PATH="/model"
+ENV GR00T_EMBODIMENT_TAG="${GR00T_EMBODIMENT_TAG}"
+ENV GR00T_DEVICE="cuda"
+ENV GR00T_PORT="5555"
+ENV GR00T_STRICT="true"
+
+EXPOSE 5555
+
+COPY docker/gr00t_entrypoint.sh /gr00t_entrypoint.sh
+RUN chmod +x /gr00t_entrypoint.sh
+
+# Image metadata for the recipient.
+LABEL org.opencontainers.image.title="GR00T 1.7 inference server (bi-SO101)" \
+      org.opencontainers.image.description="Self-contained GR00T inference server with model baked at /model. ZMQ on :5555." \
+      gr00t.embodiment_tag="${GR00T_EMBODIMENT_TAG}"
+
+ENTRYPOINT ["/gr00t_entrypoint.sh"]
