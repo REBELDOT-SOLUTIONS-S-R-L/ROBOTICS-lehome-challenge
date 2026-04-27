@@ -1,21 +1,21 @@
 """MimicGen subtask decomposition for long pants.
 
-Long pants use an asymmetric mirrored sequence (right->left fold):
+Long pants use an asymmetric mirrored sequence (left->right fold):
 
-1. Left arm performs the upper right-to-left fold and retracts home.
-2. Right arm performs the lower right-to-left fold.
+1. Left arm performs the upper left-to-right fold and retracts home.
+2. Right arm performs the lower left-to-right fold.
 3. Right arm re-grasps the stacked lower edge and performs the final
    lower-to-upper fold.
 
-After the first fold, ``garment_right_upper`` is stacked on
-``garment_left_upper`` and ``garment_right_lower`` is stacked on
-``garment_left_lower``.  The right arm's second-phase re-grasp therefore
+After the first fold, ``garment_left_upper`` is stacked on
+``garment_right_upper`` and ``garment_left_lower`` is stacked on
+``garment_right_lower``.  The right arm's second-phase re-grasp therefore
 pulls the stacked lower layer upward (toward the stacked upper layer)
 without needing a separate left-arm re-grasp sequence.
 
-Arm assignment (both arms reach to the right edge of the pant):
-    * left_arm  picks up  garment_right_upper  ->  garment_left_upper  ->  home
-    * right_arm picks up  garment_right_lower  ->  garment_left_lower,
+Arm assignment (both arms reach to the left edge of the pant):
+    * left_arm  picks up  garment_left_upper  ->  garment_right_upper  ->  home
+    * right_arm picks up  garment_left_lower  ->  garment_right_lower,
                  then     re-grasps stacked lowers -> stacked uppers -> home
 """
 from __future__ import annotations
@@ -28,19 +28,19 @@ def build(cfg):
     del cfg
 
     # -----------------------------------------------------------------
-    # Left arm subtasks: 5-step first fold (upper right -> upper left)
+    # Left arm subtasks: 5-step first fold (upper left -> upper right)
     # -----------------------------------------------------------------
     left_subtask_configs = [
-        # Subtask 0: descend into approach pose above garment_right_upper.
+        # Subtask 0: descend into approach pose above garment_left_upper.
         SubTaskConfig(
-            object_ref="garment_right_upper",
-            subtask_term_signal="prepare_for_grasp_left_on_right_upper",
+            object_ref="garment_left_upper",
+            subtask_term_signal="prepare_for_grasp_left_upper",
             subtask_term_offset_range=(3, 8),
             selection_strategy="nearest_neighbor_multi_keypoint",
             selection_strategy_kwargs={
                 "keypoint_names": [
-                    "garment_right_upper",
-                    "garment_right_lower",
+                    "garment_left_upper",
+                    "garment_left_lower",
                 ],
                 "nn_k": 1,
             },
@@ -48,52 +48,52 @@ def build(cfg):
             num_interpolation_steps=5,
             num_fixed_steps=5,
             apply_noise_during_interpolation=False,
-            description="Left arm descends into approach pose above right_upper",
-            next_subtask_description="Left arm grasps right_upper",
+            description="Left arm descends into approach pose above left_upper",
+            next_subtask_description="Left arm grasps left_upper",
         ),
-        # Subtask 1: grasp garment_right_upper with the left arm.
+        # Subtask 1: grasp garment_left_upper with the left arm.
         # Offset range kept tight because the annotated carry signal fires
         # only ~3 frames after grasp in this dataset; a wider range would
         # violate MimicGen's subtask sanity check.
         SubTaskConfig(
-            object_ref="garment_right_upper",
-            subtask_term_signal="grasp_left_on_right_upper",
+            object_ref="garment_left_upper",
+            subtask_term_signal="grasp_left_upper",
             subtask_term_offset_range=(3, 5),
             selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_on_right_upper"},
+            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_upper"},
             action_noise=0.0,
             num_interpolation_steps=5,
             num_fixed_steps=10,
             apply_noise_during_interpolation=False,
-            description="Left arm grasps right_upper",
-            next_subtask_description="Left arm carries right_upper over left_upper",
+            description="Left arm grasps left_upper",
+            next_subtask_description="Left arm carries left_upper over right_upper",
         ),
-        # Subtask 2: carry right_upper across to left_upper.
+        # Subtask 2: carry left_upper across to right_upper.
         SubTaskConfig(
-            object_ref="garment_left_upper",
-            subtask_term_signal="right_upper_to_left_upper",
+            object_ref="garment_right_upper",
+            subtask_term_signal="left_upper_to_right_upper",
             subtask_term_offset_range=(5, 10),
             selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_on_right_upper"},
+            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_left_upper"},
             action_noise=0.01,
             num_interpolation_steps=5,
             num_fixed_steps=5,
             apply_noise_during_interpolation=False,
-            description="Left arm carries right_upper over left_upper",
-            next_subtask_description="Left arm releases right_upper at left_upper",
+            description="Left arm carries left_upper over right_upper",
+            next_subtask_description="Left arm releases left_upper at right_upper",
         ),
-        # Subtask 3: release right_upper at left_upper.
+        # Subtask 3: release left_upper at right_upper.
         SubTaskConfig(
-            object_ref="garment_left_upper",
-            subtask_term_signal="release_right_upper_at_left_upper",
+            object_ref="garment_right_upper",
+            subtask_term_signal="release_left_upper_at_right_upper",
             subtask_term_offset_range=(5, 10),
             selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "right_upper_to_left_upper"},
+            selection_strategy_kwargs={"source_subtask": "left_upper_to_right_upper"},
             action_noise=0.0,
             num_interpolation_steps=5,
             num_fixed_steps=10,
             apply_noise_during_interpolation=False,
-            description="Left arm opens gripper and releases right_upper at left_upper",
+            description="Left arm opens gripper and releases left_upper at right_upper",
             next_subtask_description="Left arm returns home",
         ),
         # Subtask 4: return home.
@@ -102,7 +102,7 @@ def build(cfg):
             subtask_term_signal="left_return_home",
             subtask_term_offset_range=(0, 0),
             selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "right_upper_to_left_upper"},
+            selection_strategy_kwargs={"source_subtask": "left_upper_to_right_upper"},
             action_noise=0.01,
             num_interpolation_steps=8,
             num_fixed_steps=10,
@@ -112,77 +112,11 @@ def build(cfg):
     ]
 
     # -----------------------------------------------------------------
-    # Right arm subtasks: lower right->left fold, then re-grasp and
+    # Right arm subtasks: lower left->right fold, then re-grasp and
     # fold stacked lowers up onto stacked uppers.
     # -----------------------------------------------------------------
     right_subtask_configs = [
-        # Subtask 0: descend into approach pose above garment_right_lower.
-        SubTaskConfig(
-            object_ref="garment_right_lower",
-            subtask_term_signal="prepare_for_grasp_right_lower",
-            subtask_term_offset_range=(3, 8),
-            selection_strategy="nearest_neighbor_multi_keypoint",
-            selection_strategy_kwargs={
-                "keypoint_names": [
-                    "garment_right_lower",
-                    "garment_right_upper",
-                ],
-                "nn_k": 1,
-            },
-            action_noise=0.01,
-            num_interpolation_steps=5,
-            num_fixed_steps=5,
-            apply_noise_during_interpolation=False,
-            description="Right arm descends into approach pose above right_lower",
-            next_subtask_description="Right arm grasps right_lower",
-        ),
-        # Subtask 1: grasp garment_right_lower.
-        # Tight offset (see note on left-arm grasp subtask) — carry signal
-        # fires ~3 frames after grasp in the annotated teleop data.
-        SubTaskConfig(
-            object_ref="garment_right_lower",
-            subtask_term_signal="grasp_right_lower",
-            subtask_term_offset_range=(3, 5),
-            selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_right_lower"},
-            action_noise=0.0,
-            num_interpolation_steps=5,
-            num_fixed_steps=10,
-            apply_noise_during_interpolation=False,
-            description="Right arm grasps right_lower",
-            next_subtask_description="Right arm carries right_lower over left_lower",
-        ),
-        # Subtask 2: carry right_lower to left_lower.
-        SubTaskConfig(
-            object_ref="garment_left_lower",
-            subtask_term_signal="right_lower_to_left_lower",
-            subtask_term_offset_range=(5, 10),
-            selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_right_lower"},
-            action_noise=0.01,
-            num_interpolation_steps=5,
-            num_fixed_steps=5,
-            apply_noise_during_interpolation=False,
-            description="Right arm carries right_lower over left_lower",
-            next_subtask_description="Right arm releases right_lower at left_lower",
-        ),
-        # Subtask 3: release right_lower at left_lower.
-        SubTaskConfig(
-            object_ref="garment_left_lower",
-            subtask_term_signal="release_right_lower_at_left_lower",
-            subtask_term_offset_range=(5, 10),
-            selection_strategy="source_from_subtask",
-            selection_strategy_kwargs={"source_subtask": "right_lower_to_left_lower"},
-            action_noise=0.0,
-            num_interpolation_steps=5,
-            num_fixed_steps=10,
-            apply_noise_during_interpolation=False,
-            description="Right arm opens gripper and releases right_lower at left_lower",
-            next_subtask_description="Right arm prepares to re-grasp stacked lowers",
-        ),
-        # Subtask 4: descend into approach pose above the stacked lowers
-        # (both garment_right_lower and garment_left_lower now sit at the
-        # left_lower position; target keypoint is garment_left_lower).
+        # Subtask 0: descend into approach pose above garment_left_lower.
         SubTaskConfig(
             object_ref="garment_left_lower",
             subtask_term_signal="prepare_for_grasp_right_on_left_lower",
@@ -199,19 +133,85 @@ def build(cfg):
             num_interpolation_steps=5,
             num_fixed_steps=5,
             apply_noise_during_interpolation=False,
-            description="Right arm descends into approach pose above stacked lowers",
-            next_subtask_description="Right arm grasps stacked lowers",
+            description="Right arm descends into approach pose above left_lower",
+            next_subtask_description="Right arm grasps left_lower",
         ),
-        # Subtask 5: grasp the stacked lowers (keypoint target: left_lower).
+        # Subtask 1: grasp garment_left_lower.
+        # Tight offset (see note on left-arm grasp subtask) — carry signal
+        # fires ~3 frames after grasp in the annotated teleop data.
         SubTaskConfig(
             object_ref="garment_left_lower",
             subtask_term_signal="grasp_right_on_left_lower",
+            subtask_term_offset_range=(3, 5),
+            selection_strategy="source_from_subtask",
+            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_right_on_left_lower"},
+            action_noise=0.0,
+            num_interpolation_steps=5,
+            num_fixed_steps=10,
+            apply_noise_during_interpolation=False,
+            description="Right arm grasps left_lower",
+            next_subtask_description="Right arm carries left_lower over right_lower",
+        ),
+        # Subtask 2: carry left_lower to right_lower.
+        SubTaskConfig(
+            object_ref="garment_right_lower",
+            subtask_term_signal="left_lower_to_right_lower",
+            subtask_term_offset_range=(5, 10),
+            selection_strategy="source_from_subtask",
+            selection_strategy_kwargs={"source_subtask": "prepare_for_grasp_right_on_left_lower"},
+            action_noise=0.01,
+            num_interpolation_steps=5,
+            num_fixed_steps=5,
+            apply_noise_during_interpolation=False,
+            description="Right arm carries left_lower over right_lower",
+            next_subtask_description="Right arm releases left_lower at right_lower",
+        ),
+        # Subtask 3: release left_lower at right_lower.
+        SubTaskConfig(
+            object_ref="garment_right_lower",
+            subtask_term_signal="release_left_lower_at_right_lower",
+            subtask_term_offset_range=(5, 10),
+            selection_strategy="source_from_subtask",
+            selection_strategy_kwargs={"source_subtask": "left_lower_to_right_lower"},
+            action_noise=0.0,
+            num_interpolation_steps=5,
+            num_fixed_steps=10,
+            apply_noise_during_interpolation=False,
+            description="Right arm opens gripper and releases left_lower at right_lower",
+            next_subtask_description="Right arm prepares to re-grasp stacked lowers",
+        ),
+        # Subtask 4: descend into approach pose above the stacked lowers
+        # (both garment_left_lower and garment_right_lower now sit at the
+        # right_lower position; target keypoint is garment_right_lower).
+        SubTaskConfig(
+            object_ref="garment_right_lower",
+            subtask_term_signal="prepare_for_grasp_right_lower",
             subtask_term_offset_range=(3, 8),
             selection_strategy="nearest_neighbor_multi_keypoint",
             selection_strategy_kwargs={
                 "keypoint_names": [
-                    "garment_left_lower",
-                    "garment_left_upper",
+                    "garment_right_lower",
+                    "garment_right_upper",
+                ],
+                "nn_k": 1,
+            },
+            action_noise=0.01,
+            num_interpolation_steps=5,
+            num_fixed_steps=5,
+            apply_noise_during_interpolation=False,
+            description="Right arm descends into approach pose above stacked lowers",
+            next_subtask_description="Right arm grasps stacked lowers",
+        ),
+        # Subtask 5: grasp the stacked lowers (keypoint target: right_lower).
+        SubTaskConfig(
+            object_ref="garment_right_lower",
+            subtask_term_signal="grasp_right_lower",
+            subtask_term_offset_range=(3, 8),
+            selection_strategy="nearest_neighbor_multi_keypoint",
+            selection_strategy_kwargs={
+                "keypoint_names": [
+                    "garment_right_lower",
+                    "garment_right_upper",
                 ],
                 "nn_k": 1,
             },
@@ -219,12 +219,12 @@ def build(cfg):
             num_interpolation_steps=5,
             num_fixed_steps=10,
             apply_noise_during_interpolation=False,
-            description="Right arm grasps stacked lowers at left_lower",
+            description="Right arm grasps stacked lowers at right_lower",
             next_subtask_description="Right arm brings stacked lowers up to stacked uppers",
         ),
         # Subtask 6: bring stacked lowers up to the stacked uppers.
-        # Signal checks distance between garment_right_lower (now at the
-        # stacked-lower position) and garment_right_upper (now at the
+        # Signal checks distance between garment_right_lower (now lifted
+        # from the stacked-lower position) and garment_right_upper (at the
         # stacked-upper position), with right arm gripper open.
         SubTaskConfig(
             object_ref="garment_right_upper",
@@ -233,8 +233,8 @@ def build(cfg):
             selection_strategy="nearest_neighbor_multi_keypoint",
             selection_strategy_kwargs={
                 "keypoint_names": [
-                    "garment_left_lower",
-                    "garment_left_upper",
+                    "garment_right_lower",
+                    "garment_right_upper",
                 ],
                 "nn_k": 1,
             },
