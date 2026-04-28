@@ -3,9 +3,10 @@ Convert multiple Isaac Lab HDF5 synthetic-data files into a single merged
 LeRobot **v2.1** dataset (independent of the installed lerobot version).
 
 Source HDF5 layout (per episode, under data/demo_N):
-    obs/left_joint_pos    (T, 6)   float32  ┐ concat -> `action`
-    obs/right_joint_pos   (T, 6)   float32  ┘
-    obs/actions           (T, 12)  float32  -> `observation.state`
+    obs/left_joint_pos    (T, 6)   float32  ┐ concat -> `observation.state`
+    obs/right_joint_pos   (T, 6)   float32  ┘   (measured joint angles)
+    obs/actions           (T, 12)  float32  -> `action`
+                                                (commanded target joint angles)
     obs/left_wrist        (T, 480, 640, 3) uint8 -> observation.images.left_wrist
     obs/right_wrist       (T, 480, 640, 3) uint8 -> observation.images.right_wrist
     obs/top               (T, 480, 640, 3) uint8 -> observation.images.top
@@ -370,13 +371,13 @@ def sorted_demo_names(data_group: h5py.Group) -> list[str]:
 def load_episode(ep: h5py.Group):
     left = ep["obs/left_joint_pos"][:].astype(np.float32)
     right = ep["obs/right_joint_pos"][:].astype(np.float32)
-    action = np.concatenate([left, right], axis=-1)
+    state = np.concatenate([left, right], axis=-1)
+    if state.shape[-1] != ACTION_DIM:
+        raise ValueError(f"Expected {ACTION_DIM}D observation.state, got {state.shape}")
+
+    action = ep["obs/actions"][:].astype(np.float32)
     if action.shape[-1] != ACTION_DIM:
         raise ValueError(f"Expected {ACTION_DIM}D action, got {action.shape}")
-
-    state = ep["obs/actions"][:].astype(np.float32)
-    if state.shape[-1] != ACTION_DIM:
-        raise ValueError(f"Expected {ACTION_DIM}D obs/actions, got {state.shape}")
 
     images = {}
     for feat_key, h5_key in CAM_KEYS.items():
@@ -463,11 +464,22 @@ def convert(
                     )
                     encode_mp4_from_array(frames, video_path, FPS)
 
+                timestamps = (np.arange(T, dtype=np.float32) / FPS)
+                frame_indices = np.arange(T, dtype=np.int64)
+                episode_indices = np.full(T, ep_idx, dtype=np.int64)
+                global_indices = np.arange(global_start, global_start + T, dtype=np.int64)
+                task_indices = np.zeros(T, dtype=np.int64)
+
                 ep_stats_dict = compute_episode_stats(
                     {
                         "action": action,
                         "observation.state": state,
                         **images,
+                        "timestamp": timestamps,
+                        "frame_index": frame_indices,
+                        "episode_index": episode_indices,
+                        "index": global_indices,
+                        "task_index": task_indices,
                     },
                     features,
                 )
