@@ -32,12 +32,14 @@ Videos are encoded directly from numpy arrays with h264_nvenc (GPU).
 
 import argparse
 import json
-import logging
 import shutil
+import subprocess
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from queue import Queue
+from threading import Thread
 
-import av
 import h5py
 import numpy as np
 import pyarrow as pa
@@ -94,6 +96,11 @@ GARMENT_DATASETS: dict[str, dict] = {
 # Skip any *.hdf5 whose filename contains one of these substrings.
 # MimicGen writes failed rollouts to a companion "..._failed.hdf5" file we never want.
 EXCLUDE_NAME_SUBSTRINGS: tuple[str, ...] = ("_failed",)
+
+# Pipeline depth: a background reader thread loads up to this many episode
+# payloads ahead of the encoder. 2 keeps RAM bounded (~3 episodes in flight ≈
+# a few GB worst case for 1k-frame demos) while still hiding I/O latency.
+PREFETCH_DEPTH = 2
 
 CAM_KEYS = {
     "observation.images.left_wrist": "obs/left_wrist",
@@ -245,33 +252,52 @@ def aggregate_stats(stats_list: list[dict]) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# NVENC video encoder (direct from numpy, no PNG intermediates)
+# NVENC video encoder (raw RGB piped to ffmpeg, no per-frame Python overhead)
 # ---------------------------------------------------------------------------
 
 
 def encode_mp4_from_array(frames_thwc: np.ndarray, out_path: Path, fps: int) -> None:
-    """Encode a (T, H, W, 3) uint8 RGB array to mp4 using h264_nvenc."""
+    """Encode a (T, H, W, 3) uint8 RGB array to mp4 using h264_nvenc.
+
+    Pipes raw RGB bytes through stdin to ffmpeg so the colorspace conversion
+    runs once via SIMD-optimized libswscale inside ffmpeg, instead of looping
+    through PyAV's `VideoFrame.from_ndarray` per frame.
+    """
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    if frames_thwc.dtype != np.uint8:
+        frames_thwc = frames_thwc.astype(np.uint8)
+    if not frames_thwc.flags["C_CONTIGUOUS"]:
+        frames_thwc = np.ascontiguousarray(frames_thwc)
     h, w = frames_thwc.shape[1:3]
-    options = {
-        "preset": "p1",      # NVENC fastest preset
-        "tune": "ull",       # ultra-low latency
-        "rc": "vbr",
-        "cq": "30",
-        "bf": "0",           # no B-frames
-        "g": "2",            # keyframe interval
-    }
-    with av.open(str(out_path), mode="w") as container:
-        stream = container.add_stream(GPU_VCODEC, rate=fps, options=options)
-        stream.width = w
-        stream.height = h
-        stream.pix_fmt = PIX_FMT
-        for frame in frames_thwc:
-            vf = av.VideoFrame.from_ndarray(frame, format="rgb24")
-            for packet in stream.encode(vf):
-                container.mux(packet)
-        for packet in stream.encode():
-            container.mux(packet)
+
+    cmd = [
+        "ffmpeg", "-y",
+        "-loglevel", "error",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-s", f"{w}x{h}",
+        "-framerate", str(fps),
+        "-i", "-",
+        "-c:v", GPU_VCODEC,        # h264_nvenc
+        "-preset", "p1",           # fastest NVENC preset
+        "-tune", "ull",            # ultra-low latency
+        "-rc", "vbr",
+        "-cq", "30",
+        "-bf", "0",                # no B-frames
+        "-g", "2",                 # keyframe interval
+        "-pix_fmt", PIX_FMT,       # output yuv420p
+        str(out_path),
+    ]
+    proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        proc.stdin.write(frames_thwc.tobytes())
+    finally:
+        proc.stdin.close()
+    ret = proc.wait()
+    if ret != 0:
+        err = proc.stderr.read().decode("utf-8", errors="replace")
+        raise RuntimeError(f"ffmpeg failed encoding {out_path}: {err.strip()}")
+    proc.stderr.close()
 
 
 # ---------------------------------------------------------------------------
@@ -491,74 +517,111 @@ def convert(
     episode_entries: list[dict] = []
     episode_stats: list[dict] = []
 
-    for garment_key, task_idx, hdf5_path in sources:
-        task_string = task_strings[task_idx]
-        print(f"\n=== [{garment_key}] {hdf5_path.name} ===")
-        with h5py.File(hdf5_path, "r") as f:
-            if "data" not in f:
-                print(f"[WARN] No /data group in {hdf5_path.name}, skipping.")
-                continue
-            demos = sorted_demo_names(f["data"])
-            for demo_name in tqdm(demos, desc=hdf5_path.name):
-                ep = f["data"][demo_name]
+    # Producer/consumer pipeline:
+    #   reader thread ──► queue ──► main thread (parquet + parallel-camera mp4 + stats)
+    # The reader hides HDF5 read+gzip-decompress latency behind encoding, and the
+    # camera ThreadPoolExecutor runs the 3 NVENC encodes for an episode in parallel.
+    queue: Queue = Queue(maxsize=PREFETCH_DEPTH)
+    SENTINEL = None
 
-                if skip_failed and not bool(ep.attrs.get("success", True)):
-                    continue
-
+    def reader() -> None:
+        try:
+            for garment_key, task_idx, hdf5_path in sources:
+                print(f"\n=== [{garment_key}] {hdf5_path.name} ===")
                 try:
-                    action, state, images, T = load_episode(ep)
-                except (KeyError, ValueError) as e:
-                    print(f"[WARN] Skipping {hdf5_path.name}/{demo_name}: {e}")
+                    fh = h5py.File(hdf5_path, "r")
+                except Exception as e:
+                    print(f"[WARN] Failed to open {hdf5_path.name}: {e}")
                     continue
+                try:
+                    if "data" not in fh:
+                        print(f"[WARN] No /data group in {hdf5_path.name}, skipping.")
+                        continue
+                    for demo_name in sorted_demo_names(fh["data"]):
+                        ep = fh["data"][demo_name]
+                        if skip_failed and not bool(ep.attrs.get("success", True)):
+                            continue
+                        try:
+                            action, state, images, T = load_episode(ep)
+                        except (KeyError, ValueError) as e:
+                            print(f"[WARN] Skipping {hdf5_path.name}/{demo_name}: {e}")
+                            continue
+                        queue.put((task_idx, hdf5_path.name, demo_name,
+                                   action, state, images, T))
+                finally:
+                    fh.close()
+        finally:
+            queue.put(SENTINEL)
 
-                chunk_index = ep_idx // CHUNK_SIZE
-                parquet_path = output_root / DATA_PATH_TEMPLATE.format(
-                    episode_chunk=chunk_index, episode_index=ep_idx
+    reader_thread = Thread(target=reader, name="hdf5-reader", daemon=True)
+    reader_thread.start()
+
+    # Rough demo-count estimate for the progress bar (most MimicGen files emit ~64-100 demos).
+    total_demos_estimate = len(sources) * 100
+
+    with ThreadPoolExecutor(max_workers=len(CAM_KEYS), thread_name_prefix="nvenc") as cam_pool, \
+         tqdm(total=total_demos_estimate, desc="Encoding episodes", unit="ep") as pbar:
+        while True:
+            item = queue.get()
+            if item is SENTINEL:
+                break
+            task_idx, hdf5_name, demo_name, action, state, images, T = item
+            task_string = task_strings[task_idx]
+
+            chunk_index = ep_idx // CHUNK_SIZE
+            parquet_path = output_root / DATA_PATH_TEMPLATE.format(
+                episode_chunk=chunk_index, episode_index=ep_idx
+            )
+            write_episode_parquet(
+                action=action,
+                state=state,
+                ep_idx=ep_idx,
+                global_start=global_start,
+                fps=FPS,
+                task_idx=task_idx,
+                out_path=parquet_path,
+            )
+
+            cam_futures = []
+            for feat_key, frames in images.items():
+                video_path = output_root / VIDEO_PATH_TEMPLATE.format(
+                    episode_chunk=chunk_index,
+                    video_key=feat_key,
+                    episode_index=ep_idx,
                 )
-                write_episode_parquet(
-                    action=action,
-                    state=state,
-                    ep_idx=ep_idx,
-                    global_start=global_start,
-                    fps=FPS,
-                    task_idx=task_idx,
-                    out_path=parquet_path,
-                )
+                cam_futures.append(cam_pool.submit(encode_mp4_from_array, frames, video_path, FPS))
+            for fut in cam_futures:
+                fut.result()
 
-                for feat_key, frames in images.items():
-                    video_path = output_root / VIDEO_PATH_TEMPLATE.format(
-                        episode_chunk=chunk_index,
-                        video_key=feat_key,
-                        episode_index=ep_idx,
-                    )
-                    encode_mp4_from_array(frames, video_path, FPS)
+            timestamps = (np.arange(T, dtype=np.float32) / FPS)
+            frame_indices = np.arange(T, dtype=np.int64)
+            episode_indices = np.full(T, ep_idx, dtype=np.int64)
+            global_indices = np.arange(global_start, global_start + T, dtype=np.int64)
+            task_indices = np.full(T, task_idx, dtype=np.int64)
 
-                timestamps = (np.arange(T, dtype=np.float32) / FPS)
-                frame_indices = np.arange(T, dtype=np.int64)
-                episode_indices = np.full(T, ep_idx, dtype=np.int64)
-                global_indices = np.arange(global_start, global_start + T, dtype=np.int64)
-                task_indices = np.full(T, task_idx, dtype=np.int64)
+            ep_stats_dict = compute_episode_stats(
+                {
+                    "action": action,
+                    "observation.state": state,
+                    **images,
+                    "timestamp": timestamps,
+                    "frame_index": frame_indices,
+                    "episode_index": episode_indices,
+                    "index": global_indices,
+                    "task_index": task_indices,
+                },
+                features,
+            )
+            episode_stats.append(ep_stats_dict)
+            episode_entries.append(
+                {"episode_index": ep_idx, "tasks": [task_string], "length": T}
+            )
 
-                ep_stats_dict = compute_episode_stats(
-                    {
-                        "action": action,
-                        "observation.state": state,
-                        **images,
-                        "timestamp": timestamps,
-                        "frame_index": frame_indices,
-                        "episode_index": episode_indices,
-                        "index": global_indices,
-                        "task_index": task_indices,
-                    },
-                    features,
-                )
-                episode_stats.append(ep_stats_dict)
-                episode_entries.append(
-                    {"episode_index": ep_idx, "tasks": [task_string], "length": T}
-                )
+            ep_idx += 1
+            global_start += T
+            pbar.update(1)
 
-                ep_idx += 1
-                global_start += T
+    reader_thread.join()
 
     if ep_idx == 0:
         raise RuntimeError("No episodes written — aborting before meta write.")
@@ -605,8 +668,6 @@ def main():
     )
     parser.add_argument("--skip_failed", action="store_true", help="Skip demos where attrs['success'] is False")
     args = parser.parse_args()
-
-    logging.getLogger("libav").setLevel(logging.ERROR)
 
     convert(
         output_root=Path(args.output_root),
