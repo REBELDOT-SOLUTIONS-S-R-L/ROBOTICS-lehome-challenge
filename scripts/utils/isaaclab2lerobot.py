@@ -2,6 +2,12 @@
 Convert multiple Isaac Lab HDF5 synthetic-data files into a single merged
 LeRobot **v2.1** dataset (independent of the installed lerobot version).
 
+Inputs are configured in `GARMENT_DATASETS` near the top of this file. Each
+garment-type entry binds a unique task string (one row in `tasks.jsonl`) to a
+list of root directories scanned recursively for `*.hdf5` files. Every episode
+in the merged dataset carries the `task_index` of its source garment, which is
+how GR00T's language modality switches between fold programs at train/eval.
+
 Source HDF5 layout (per episode, under data/demo_N):
     obs/left_joint_pos    (T, 6)   float32  ┐ concat -> `observation.state`
     obs/right_joint_pos   (T, 6)   float32  ┘   (measured joint angles)
@@ -42,7 +48,6 @@ from tqdm import tqdm
 # Configuration
 # ---------------------------------------------------------------------------
 
-TASK_STRING = "Fold the Long Sleeve Top on the table"
 FPS = 30
 IMG_H, IMG_W = 480, 640
 ACTION_DIM = 12
@@ -51,14 +56,44 @@ CODEBASE_VERSION = "v2.1"
 GPU_VCODEC = "h264_nvenc"
 PIX_FMT = "yuv420p"
 
-DEFAULT_INPUT_FILES = [
-    "Top_Long_Seen_0-generated-HALTON_64-run_2.hdf5",
-    "Top_Long_Seen_1-generated-HALTON_64.hdf5",
-    "Top_Long_Seen_2-generated-HALTON_64-run_2.hdf5",
-    "Top_Long_Seen_5-generated-HALTON_64.hdf5",
-    "Top_Long_Seen_7-generated-HALTON_64-run_2.hdf5",
-    "Top_Long_Seen_9-generated-HALTON_64-run_2.hdf5",
-]
+# Per-garment-type sources. Each entry maps a unique task string (one row in
+# tasks.jsonl) to one or more directories scanned for *.hdf5 files. All entries
+# are merged into a single LeRobot v2.1 dataset; each episode's task_index
+# points back to the entry it came from. Add/remove garment keys freely.
+GARMENT_DATASETS: dict[str, dict] = {
+    "top_long": {
+        "task": "Fold the long-sleeve top on the table",
+        "roots": [
+            "/media/alexluci/480eeb06-1ed9-4099-af71-85b9cc90b82b/synthetic_data_garment/Top_Long",
+            "/workspace/IsaacTools/ROBOTICS-lehome-challenge/Datasets/hdf5_mimicgen_pipeline/2_generated/Top_Long",
+        ],
+    },
+    "top_short": {
+        "task": "Fold the short-sleeve top on the table",
+        "roots": [
+            "/media/alexluci/480eeb06-1ed9-4099-af71-85b9cc90b82b/synthetic_data_garment/Top_Short",
+            "/workspace/IsaacTools/ROBOTICS-lehome-challenge/Datasets/hdf5_mimicgen_pipeline/2_generated/Top_Short",
+        ],
+    },
+    "pant_long": {
+        "task": "Fold the long pants on the table",
+        "roots": [
+            "/media/alexluci/480eeb06-1ed9-4099-af71-85b9cc90b82b/synthetic_data_garment/Pant_Long",
+            "/workspace/IsaacTools/ROBOTICS-lehome-challenge/Datasets/hdf5_mimicgen_pipeline/2_generated/Pant_Long",
+        ],
+    },
+    "pant_short": {
+        "task": "Fold the short pants on the table",
+        "roots": [
+            "/media/alexluci/480eeb06-1ed9-4099-af71-85b9cc90b82b/synthetic_data_garment/Pant_Short",
+            "/workspace/IsaacTools/ROBOTICS-lehome-challenge/Datasets/hdf5_mimicgen_pipeline/2_generated/Pant_Short",
+        ],
+    },
+}
+
+# Skip any *.hdf5 whose filename contains one of these substrings.
+# MimicGen writes failed rollouts to a companion "..._failed.hdf5" file we never want.
+EXCLUDE_NAME_SUBSTRINGS: tuple[str, ...] = ("_failed",)
 
 CAM_KEYS = {
     "observation.images.left_wrist": "obs/left_wrist",
@@ -99,7 +134,7 @@ def build_features() -> dict:
     cam_feature = {
         "dtype": "video",
         "shape": [IMG_H, IMG_W, 3],
-        "names": ["height", "width", "channel"],
+        "names": ["height", "width", "channels"],
         "info": video_info,
     }
     state_feature = {"dtype": "float32", "shape": [ACTION_DIM], "names": JOINT_NAMES}
@@ -320,6 +355,7 @@ def write_meta(
     episode_stats: list[dict],
     aggregated_stats: dict,
     robot_type: str | None,
+    task_strings: list[str],
 ) -> None:
     meta_dir = output_root / "meta"
     meta_dir.mkdir(parents=True, exist_ok=True)
@@ -330,7 +366,7 @@ def write_meta(
         "robot_type": robot_type,
         "total_episodes": total_episodes,
         "total_frames": total_frames,
-        "total_tasks": 1,
+        "total_tasks": len(task_strings),
         "total_videos": total_videos,
         "total_chunks": total_chunks,
         "chunks_size": CHUNK_SIZE,
@@ -344,7 +380,8 @@ def write_meta(
         json.dump(info, f, indent=4)
 
     with open(meta_dir / "tasks.jsonl", "w") as f:
-        f.write(json.dumps({"task_index": 0, "task": TASK_STRING}) + "\n")
+        for task_idx, task in enumerate(task_strings):
+            f.write(json.dumps({"task_index": task_idx, "task": task}) + "\n")
 
     with open(meta_dir / "episodes.jsonl", "w") as f:
         for ep in episode_entries:
@@ -400,9 +437,37 @@ def load_episode(ep: h5py.Group):
 # ---------------------------------------------------------------------------
 
 
+def discover_sources() -> tuple[list[str], list[tuple[str, int, Path]]]:
+    """Resolve `GARMENT_DATASETS` into a flat work list.
+
+    Returns:
+        task_strings: ordered list mapping task_index -> task description.
+        sources: list of (garment_key, task_index, hdf5_path), preserving the
+            order of `GARMENT_DATASETS` so output episode_index is deterministic.
+    """
+    task_strings: list[str] = []
+    for entry in GARMENT_DATASETS.values():
+        task = entry["task"]
+        if task not in task_strings:
+            task_strings.append(task)
+
+    sources: list[tuple[str, int, Path]] = []
+    for garment_key, entry in GARMENT_DATASETS.items():
+        task_idx = task_strings.index(entry["task"])
+        for root in entry["roots"]:
+            root_path = Path(root)
+            if not root_path.is_dir():
+                print(f"[WARN] [{garment_key}] root not found: {root_path}")
+                continue
+            matched = sorted(p for p in root_path.glob("*.hdf5"))
+            for hdf5_path in matched:
+                if any(s in hdf5_path.name for s in EXCLUDE_NAME_SUBSTRINGS):
+                    continue
+                sources.append((garment_key, task_idx, hdf5_path))
+    return task_strings, sources
+
+
 def convert(
-    input_dir: Path,
-    filenames: list[str],
     output_root: Path,
     modality_json: Path | None,
     skip_failed: bool,
@@ -412,25 +477,29 @@ def convert(
     output_root.mkdir(parents=True, exist_ok=True)
 
     features = build_features()
+    task_strings, sources = discover_sources()
+    if not sources:
+        raise RuntimeError("No HDF5 files discovered from GARMENT_DATASETS roots.")
+
+    print(f"Discovered {len(sources)} HDF5 file(s) across {len(task_strings)} task(s):")
+    for task_idx, task in enumerate(task_strings):
+        n = sum(1 for _, t, _ in sources if t == task_idx)
+        print(f"  [task_index={task_idx}] {n:3d} files — {task}")
 
     ep_idx = 0
     global_start = 0
     episode_entries: list[dict] = []
     episode_stats: list[dict] = []
 
-    for filename in filenames:
-        hdf5_path = input_dir / filename
-        if not hdf5_path.exists():
-            print(f"[WARN] {hdf5_path} not found, skipping.")
-            continue
-
-        print(f"\n=== {filename} ===")
+    for garment_key, task_idx, hdf5_path in sources:
+        task_string = task_strings[task_idx]
+        print(f"\n=== [{garment_key}] {hdf5_path.name} ===")
         with h5py.File(hdf5_path, "r") as f:
             if "data" not in f:
-                print(f"[WARN] No /data group in {filename}, skipping.")
+                print(f"[WARN] No /data group in {hdf5_path.name}, skipping.")
                 continue
             demos = sorted_demo_names(f["data"])
-            for demo_name in tqdm(demos, desc=filename):
+            for demo_name in tqdm(demos, desc=hdf5_path.name):
                 ep = f["data"][demo_name]
 
                 if skip_failed and not bool(ep.attrs.get("success", True)):
@@ -439,7 +508,7 @@ def convert(
                 try:
                     action, state, images, T = load_episode(ep)
                 except (KeyError, ValueError) as e:
-                    print(f"[WARN] Skipping {filename}/{demo_name}: {e}")
+                    print(f"[WARN] Skipping {hdf5_path.name}/{demo_name}: {e}")
                     continue
 
                 chunk_index = ep_idx // CHUNK_SIZE
@@ -452,7 +521,7 @@ def convert(
                     ep_idx=ep_idx,
                     global_start=global_start,
                     fps=FPS,
-                    task_idx=0,
+                    task_idx=task_idx,
                     out_path=parquet_path,
                 )
 
@@ -468,7 +537,7 @@ def convert(
                 frame_indices = np.arange(T, dtype=np.int64)
                 episode_indices = np.full(T, ep_idx, dtype=np.int64)
                 global_indices = np.arange(global_start, global_start + T, dtype=np.int64)
-                task_indices = np.zeros(T, dtype=np.int64)
+                task_indices = np.full(T, task_idx, dtype=np.int64)
 
                 ep_stats_dict = compute_episode_stats(
                     {
@@ -485,7 +554,7 @@ def convert(
                 )
                 episode_stats.append(ep_stats_dict)
                 episode_entries.append(
-                    {"episode_index": ep_idx, "tasks": [TASK_STRING], "length": T}
+                    {"episode_index": ep_idx, "tasks": [task_string], "length": T}
                 )
 
                 ep_idx += 1
@@ -507,6 +576,7 @@ def convert(
         episode_stats=episode_stats,
         aggregated_stats=aggregated,
         robot_type="so101_bimanual",
+        task_strings=task_strings,
     )
 
     if modality_json is not None and modality_json.exists():
@@ -520,10 +590,10 @@ def convert(
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Merge Isaac Lab HDF5s into a LeRobot v2.1 dataset.")
-    parser.add_argument(
-        "--input_dir",
-        default="/media/alexluci/480eeb06-1ed9-4099-af71-85b9cc90b82b/synthetic_data_garment",
+    parser = argparse.ArgumentParser(
+        description="Merge Isaac Lab HDF5s into a LeRobot v2.1 dataset. "
+                    "Source files and per-garment task strings are configured "
+                    "via GARMENT_DATASETS at the top of this file.",
     )
     parser.add_argument(
         "--output_root",
@@ -533,15 +603,12 @@ def main():
         "--modality_json",
         default="/workspace/IsaacTools/ROBOTICS-lehome-challenge/configs/gr00t/modality.json",
     )
-    parser.add_argument("--files", nargs="+", default=DEFAULT_INPUT_FILES)
     parser.add_argument("--skip_failed", action="store_true", help="Skip demos where attrs['success'] is False")
     args = parser.parse_args()
 
     logging.getLogger("libav").setLevel(logging.ERROR)
 
     convert(
-        input_dir=Path(args.input_dir),
-        filenames=list(args.files),
         output_root=Path(args.output_root),
         modality_json=Path(args.modality_json) if args.modality_json else None,
         skip_failed=args.skip_failed,
