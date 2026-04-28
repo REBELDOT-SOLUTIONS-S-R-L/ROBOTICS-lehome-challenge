@@ -170,7 +170,7 @@ def build(cfg):
         SubTaskConfig(
             object_ref="garment_right_lower",
             subtask_term_signal="release_left_lower_at_right_lower",
-            subtask_term_offset_range=(5, 10),
+            subtask_term_offset_range=(0, 5),
             selection_strategy="source_from_subtask",
             selection_strategy_kwargs={"source_subtask": "left_lower_to_right_lower"},
             action_noise=0.0,
@@ -186,7 +186,7 @@ def build(cfg):
         SubTaskConfig(
             object_ref="garment_right_lower",
             subtask_term_signal="prepare_for_grasp_right_lower",
-            subtask_term_offset_range=(3, 8),
+            subtask_term_offset_range=(0, 5),
             selection_strategy="nearest_neighbor_multi_keypoint",
             selection_strategy_kwargs={
                 "keypoint_names": [
