@@ -34,6 +34,7 @@ import argparse
 import json
 import shutil
 import subprocess
+import sys
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -652,6 +653,25 @@ def convert(
     print(f"     Finished at: {datetime.now().isoformat(timespec='seconds')}")
 
 
+def upload_dataset_to_databricks(
+    output_root: Path,
+    volume_path: str | None,
+    upload_script: Path | None = None,
+) -> None:
+    """Upload the completed LeRobot dataset by invoking databricks_upload_dataset.py."""
+    script = upload_script or Path(__file__).with_name("databricks_upload_dataset.py")
+    if not script.is_file():
+        raise FileNotFoundError(f"Databricks upload script not found: {script}")
+
+    cmd = [sys.executable, str(script), str(output_root)]
+    if volume_path:
+        cmd.append(volume_path)
+
+    destination = volume_path or "default Databricks volume path"
+    print(f"\nUploading dataset to Databricks ({destination})...")
+    subprocess.run(cmd, check=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Merge Isaac Lab HDF5s into a LeRobot v2.1 dataset. "
@@ -667,13 +687,47 @@ def main():
         default="/workspace/IsaacTools/ROBOTICS-lehome-challenge/configs/gr00t/modality.json",
     )
     parser.add_argument("--skip_failed", action="store_true", help="Skip demos where attrs['success'] is False")
+    upload_group = parser.add_mutually_exclusive_group()
+    upload_group.add_argument(
+        "--upload_to_databricks",
+        dest="upload_to_databricks",
+        action="store_true",
+        default=True,
+        help="Upload the converted dataset to Databricks after conversion (default).",
+    )
+    upload_group.add_argument(
+        "--no_databricks_upload",
+        dest="upload_to_databricks",
+        action="store_false",
+        help="Skip the post-conversion Databricks upload.",
+    )
+    parser.add_argument(
+        "--databricks_volume_path",
+        default=None,
+        help=(
+            "Destination Databricks volume path. If omitted, "
+            "scripts/utils/databricks_upload_dataset.py uses its default."
+        ),
+    )
+    parser.add_argument(
+        "--databricks_upload_script",
+        default=None,
+        help="Path to the Databricks upload helper script.",
+    )
     args = parser.parse_args()
 
+    output_root = Path(args.output_root)
     convert(
-        output_root=Path(args.output_root),
+        output_root=output_root,
         modality_json=Path(args.modality_json) if args.modality_json else None,
         skip_failed=args.skip_failed,
     )
+    if args.upload_to_databricks:
+        upload_dataset_to_databricks(
+            output_root=output_root,
+            volume_path=args.databricks_volume_path,
+            upload_script=Path(args.databricks_upload_script) if args.databricks_upload_script else None,
+        )
 
 
 if __name__ == "__main__":
