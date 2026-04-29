@@ -157,6 +157,7 @@ def build_features() -> dict:
         "episode_index": {"dtype": "int64", "shape": [1], "names": None},
         "index": {"dtype": "int64", "shape": [1], "names": None},
         "task_index": {"dtype": "int64", "shape": [1], "names": None},
+        "task": {"dtype": "string", "shape": [1], "names": None},
     }
 
 
@@ -313,6 +314,7 @@ def write_episode_parquet(
     global_start: int,
     fps: int,
     task_idx: int,
+    task: str,
     out_path: Path,
 ) -> None:
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -328,6 +330,7 @@ def write_episode_parquet(
             "episode_index": pa.array([ep_idx] * T, type=pa.int64()),
             "index": pa.array(list(range(global_start, global_start + T)), type=pa.int64()),
             "task_index": pa.array([task_idx] * T, type=pa.int64()),
+            "task": pa.array([task] * T, type=pa.string()),
         }
     )
     pq.write_table(table, out_path)
@@ -591,6 +594,7 @@ def convert(
                 global_start=global_start,
                 fps=FPS,
                 task_idx=task_idx,
+                task=task_string,
                 out_path=parquet_path,
             )
 
