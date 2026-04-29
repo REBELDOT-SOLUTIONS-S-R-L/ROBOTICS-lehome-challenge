@@ -1,6 +1,7 @@
 """Dataset replay utility functions for replaying recorded episodes."""
 
 import argparse
+import contextlib
 import json
 from pathlib import Path
 import shutil
@@ -17,6 +18,12 @@ from lehome.utils.record import get_next_experiment_path_with_gap, RateLimiter
 from lehome.utils.logger import get_logger
 
 from .common import stabilize_garment_after_reset
+from scripts.mimicgen.core.cuda_visual_sync import (
+    apply_cuda_fabric_render_settings,
+    cuda_visual_sync_enabled,
+    force_cuda_render_sync,
+    post_reset_cuda_visual_sync,
+)
 
 logger = get_logger(__name__)
 
@@ -391,11 +398,13 @@ def replay_episode(
     try:
         # Reset environment
         env.reset()
+        post_reset_cuda_visual_sync(env)
 
         # Set initial pose from recorded data (critical for reproducibility)
         # This ensures garment starts at the same position as during recording
         if initial_pose is not None:
             env.set_all_pose(initial_pose)
+            post_reset_cuda_visual_sync(env)
             logger.debug(f"Set initial pose from recorded data: {initial_pose}")
         else:
             logger.warning("No initial pose found in recorded data, using default pose")
@@ -430,6 +439,11 @@ def replay_episode(
 
             # Step environment
             env.step(action)
+            if cuda_visual_sync_enabled(env):
+                force_cuda_render_sync(env)
+            else:
+                with contextlib.suppress(Exception):
+                    env.render()
 
             # If saving, record observations
             if replay_dataset is not None:
@@ -550,15 +564,39 @@ def replay(args: argparse.Namespace) -> None:
 
     logger.info(f"Creating environment: {args.task}")
     env_cfg = parse_env_cfg(args.task, device=device)
+    apply_cuda_fabric_render_settings(env_cfg, device, context="dataset replay")
 
-    # Set garment configuration
-    try:
-        detected_garment_name = get_garment_name_from_json(args.dataset_root)
-        logger.info(f"Auto-detected garment name from json: {detected_garment_name}")
-        env_cfg.garment_name = detected_garment_name
-    except Exception as e:
-        logger.error(f"Could not determine garment name from dataset: {e}")
-        raise
+    # Set garment configuration. Some legacy LeRobot datasets do not carry
+    # LeHome's extra garment_info.json, so allow the CLI override to drive replay.
+    garment_name = getattr(args, "garment_name", None)
+    if isinstance(garment_name, str):
+        garment_name = garment_name.strip() or None
+
+    if garment_name is not None:
+        logger.info(f"Using garment name from CLI: {garment_name}")
+    else:
+        try:
+            garment_name = get_garment_name_from_json(args.dataset_root)
+            logger.info(f"Auto-detected garment name from json: {garment_name}")
+        except FileNotFoundError as e:
+            garment_name = getattr(env_cfg, "garment_name", None)
+            if isinstance(garment_name, str):
+                garment_name = garment_name.strip() or None
+            if garment_name is not None:
+                logger.warning(
+                    f"{e}; using task config default garment_name={garment_name}"
+                )
+            else:
+                logger.error(f"Could not determine garment name from dataset: {e}")
+                raise ValueError(
+                    "Could not determine garment name for replay. "
+                    "Pass --garment_name, for example Top_Long_Seen_0."
+                ) from e
+        except Exception as e:
+            logger.error(f"Could not determine garment name from dataset: {e}")
+            raise
+
+    env_cfg.garment_name = garment_name
     env_cfg.garment_version = args.garment_version
     env_cfg.garment_cfg_base_path = args.garment_cfg_base_path
     env_cfg.particle_cfg_path = args.particle_cfg_path

@@ -290,13 +290,47 @@ class GarmentFoldEnvCfg(ManagerBasedRLEnvCfg):
     task_description: str = "Fold the garment on the table."
     # Teleop / action contract name (updated by scripts)
     task_type: str = "bi-so101leader"
+    # Generation-only override: keep 12D joint-action contract and use env IK solver.
+    force_pinocchio_generation: bool = False
     # Online subtask-observation thresholds
     subtask_grasp_eef_to_keypoint_threshold_m: float = 0.15
-    subtask_gripper_close_threshold: float = 0.35
+    subtask_gripper_close_threshold: float = 0.20
     subtask_middle_to_lower_threshold_m: float = 0.10
-    subtask_lower_to_upper_threshold_m: float = 0.12
+    subtask_middle_to_lower_middle_keypoint_max_z_m: float = 0.65
+    # Narrow release-zone geometry inside the 4-corner garment quad.  Width is
+    # the central fraction of the left<->right span; lower is the fraction of
+    # the upper<->lower span measured from the lower edge toward the center.
+    # Defaults match the "lower half, middle 60%" spec.
+    subtask_release_zone_width_fraction: float = 0.60
+    subtask_release_zone_lower_fraction: float = 0.50
+    # Set to flip the release zone to the UPPER half of the garment (e.g.
+    # top_short drops the middle keypoint near the collar, not the hem).
+    # When not None, the zone becomes the central ``width_fraction`` along u
+    # intersected with ``[-upper_fraction * ||v_orth||, 0]`` along v_hat
+    # (measured from the center toward the upper edge).  ``lower_fraction``
+    # is ignored in this mode.
+    subtask_release_zone_upper_fraction: float | None = None
+    subtask_lower_to_upper_threshold_m: float = 0.15
+    # ``prepare_for_grasp_*`` subtask thresholds.  The Z cutoff is the main
+    # knob (arm has descended into grasp attitude); the XY keypoint gate
+    # disambiguates which grasp the arm is preparing for so the two prep
+    # subtasks per arm show up as distinct 0->1 transitions in the
+    # annotated source trajectory.
+    subtask_prep_for_grasp_eef_z_m: float = 0.53
+    subtask_prep_for_grasp_xy_threshold_m: float = 0.15
     subtask_signal_min_consecutive_steps: int = 3
     return_home_min_consecutive_steps: int = 10
+    # Verify-only thresholds used by ``verify_subtask_completion`` during
+    # MimicGen generation.  DataGenerator pads each subtask by a random
+    # ``subtask_term_offset_range`` after the annotated signal fires, so the
+    # strict online thresholds above usually evaluate False at trajectory
+    # end even when the subtask goal was achieved mid-window.  These looser
+    # values give verification enough grace to accept those trajectories.
+    # Set a value to ``None`` to fall back to the strict online threshold.
+    verify_subtask_grasp_eef_to_keypoint_threshold_m: float | None = 0.30
+    verify_subtask_release_zone_width_fraction: float | None = 1.0
+    verify_subtask_release_zone_lower_fraction: float | None = 0.80
+    verify_subtask_release_zone_upper_fraction: float | None = 1.0
 
     def __post_init__(self):
         """Post initialization."""

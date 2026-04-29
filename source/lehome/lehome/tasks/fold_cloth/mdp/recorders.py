@@ -16,6 +16,7 @@ in datagen_info.object_pose, compatible with MimicGen's DatagenInfo format.
 """
 from __future__ import annotations
 
+import contextlib
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -117,6 +118,22 @@ class GenerationPoseRecorder(RecorderTerm):
         if eef_pose is not None:
             obs["eef_pose"] = eef_pose
 
+        ik_input_eef_pose = None
+        with contextlib.suppress(Exception):
+            if hasattr(env, "get_last_ik_input_eef_pose_world"):
+                ik_input_eef_pose = env.get_last_ik_input_eef_pose_world()
+        if ik_input_eef_pose is None:
+            with contextlib.suppress(Exception):
+                ik_input_eef_pose = env.action_to_target_eef_pose(env.action_manager.action)
+        if ik_input_eef_pose is not None:
+            obs["ik_input_eef_pose"] = ik_input_eef_pose
+
+        ik_input_joint_pos = None
+        with contextlib.suppress(Exception):
+            ik_input_joint_pos = env.action_to_ik_input_joint_pos(env.action_manager.action)
+        if ik_input_joint_pos is not None:
+            obs["ik_input_joint_pos"] = ik_input_joint_pos
+
         if hasattr(env, "object") and getattr(env.object, "check_points", None):
             object_poses = compute_garment_keypoint_object_poses(
                 env,
@@ -130,6 +147,15 @@ class GenerationPoseRecorder(RecorderTerm):
             return None, None
         return "obs", obs
 
+    def record_post_step(self) -> tuple[str | None, dict | None]:
+        env = self._env
+        with contextlib.suppress(Exception):
+            return "obs/eef_pose_post_step", {
+                "left_arm": env.get_robot_eef_pose("left_arm"),
+                "right_arm": env.get_robot_eef_pose("right_arm"),
+            }
+        return None, None
+
 
 class GarmentDatagenRecorder(RecorderTerm):
     """Records datagen_info with garment keypoint virtual poses and subtask signals.
@@ -140,8 +166,12 @@ class GarmentDatagenRecorder(RecorderTerm):
     3. Transform trajectories relative to object frames (via eef_pose + object_pose)
 
     Subtask termination signals:
+    - prepare_for_grasp_left_middle / prepare_for_grasp_right_middle
     - grasp_left_middle / grasp_right_middle
     - left_middle_to_lower / right_middle_to_lower
+    - release_left_middle / release_right_middle
+    - left_at_waiting_pos / right_at_waiting_pos
+    - prepare_for_grasp_left_lower / prepare_for_grasp_right_lower
     - grasp_left_lower / grasp_right_lower
     - left_lower_to_upper / right_lower_to_upper
     - left_return_home / right_return_home

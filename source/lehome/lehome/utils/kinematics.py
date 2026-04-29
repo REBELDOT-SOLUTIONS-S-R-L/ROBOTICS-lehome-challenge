@@ -230,7 +230,9 @@ class RobotKinematics:
         desired_ee_pose: np.ndarray,
         position_weight: float = 1.0,
         orientation_weight: float = 0.01,
-    ) -> np.ndarray:
+        joint_bounds_rad: list[tuple[float, float]] | None = None,
+        return_diagnostics: bool = False,
+    ):
         """
         Compute inverse kinematics using Pinocchio + scipy.optimize.
 
@@ -239,69 +241,95 @@ class RobotKinematics:
             desired_ee_pose: Target end-effector pose as a 4x4 transformation matrix
             position_weight: Weight for position constraint in IK
             orientation_weight: Weight for orientation constraint in IK, set to 0.0 to only constrain position
+            joint_bounds_rad: Optional per-joint (lower, upper) bounds in radians.
+                When provided these replace the URDF model limits for the
+                L-BFGS-B optimisation.  Length must equal ``self.nq``.
+            return_diagnostics: When True, also return a dict with post-solve
+                residuals and optimizer status.
 
         Returns:
-            Joint positions in degrees that achieve the desired end-effector pose
+            If ``return_diagnostics`` is False (default): joint positions in
+            degrees that achieve (approximately) the desired end-effector pose.
+
+            If ``return_diagnostics`` is True: tuple ``(joint_pos_deg, diag)``
+            where ``diag`` contains:
+
+              - ``pos_residual_m`` (float): ``||FK(q*) - target||`` in metres.
+              - ``rot_residual_rad`` (float): ``||log3(R_FK.T @ R_target)||``
+                in radians. Always computed even when ``orientation_weight``
+                is small, so callers can flag orientation drift.
+              - ``cost`` (float): final objective value.
+              - ``converged`` (bool): whether L-BFGS-B reported convergence.
+              - ``hit_bound`` (bool): whether any joint settled on a hard
+                bound (within 1e-3 rad). A strong hint that the bound itself
+                is what's keeping the optimizer from finding the target.
+              - ``nit`` (int): number of L-BFGS-B iterations used.
         """
         return self._inverse_kinematics_pinocchio(
-            current_joint_pos, desired_ee_pose, position_weight, orientation_weight
+            current_joint_pos, desired_ee_pose, position_weight, orientation_weight,
+            joint_bounds_rad=joint_bounds_rad,
+            return_diagnostics=return_diagnostics,
         )
-    
+
     def _inverse_kinematics_pinocchio(
         self,
         current_joint_pos: np.ndarray,
         desired_ee_pose: np.ndarray,
         position_weight: float,
         orientation_weight: float,
-    ) -> np.ndarray:
+        joint_bounds_rad: list[tuple[float, float]] | None = None,
+        return_diagnostics: bool = False,
+    ):
         """Inverse kinematics using Pinocchio with scipy.optimize."""
         pin = self._pin
-        
+
         # Target pose as Pinocchio SE3
         target_pose = pin.SE3(desired_ee_pose[:3, :3], desired_ee_pose[:3, 3])
-        
+
         # Initial guess (convert to radians)
         current_joint_rad = np.deg2rad(current_joint_pos[: self.nq])
         q0_controlled = np.array(current_joint_rad)
-        
+
         # Optimization objective function
         def objective(q_controlled):
             # Reconstruct full configuration
             q = pin.neutral(self.model)
             for i, q_idx in enumerate(self.joint_q_indices):
                 q[q_idx] = q_controlled[i]
-            
+
             # Forward kinematics
             pin.forwardKinematics(self.model, self.data, q)
             pin.updateFramePlacements(self.model, self.data)
             current_pose = self.data.oMf[self.ee_frame_id]
-            
+
             # Position error
             pos_error = target_pose.translation - current_pose.translation
             pos_cost = position_weight * np.sum(pos_error ** 2)
-            
+
             # Orientation error (logarithmic map)
             if orientation_weight > 0:
                 rot_error = pin.log3(target_pose.rotation.T @ current_pose.rotation)
                 rot_cost = orientation_weight * np.sum(rot_error ** 2)
             else:
                 rot_cost = 0.0
-            
+
             return pos_cost + rot_cost
-        
+
         # Joint limits (bounds)
-        bounds = []
-        for q_idx in self.joint_q_indices:
-            # Get joint limits from model
-            lower = self.model.lowerPositionLimit[q_idx]
-            upper = self.model.upperPositionLimit[q_idx]
-            # If limits are infinite, use reasonable defaults
-            if not np.isfinite(lower):
-                lower = -np.pi
-            if not np.isfinite(upper):
-                upper = np.pi
-            bounds.append((lower, upper))
-        
+        if joint_bounds_rad is not None:
+            bounds = list(joint_bounds_rad)
+        else:
+            bounds = []
+            for q_idx in self.joint_q_indices:
+                lower = self.model.lowerPositionLimit[q_idx]
+                upper = self.model.upperPositionLimit[q_idx]
+                # If limits are infinite, use reasonable defaults
+                if not np.isfinite(lower):
+                    lower = -np.pi
+                if not np.isfinite(upper):
+                    upper = np.pi
+                bounds.append((lower, upper))
+
         # Solve IK using optimization
         result = self._minimize(
             objective,
@@ -310,15 +338,52 @@ class RobotKinematics:
             bounds=bounds,
             options={'maxiter': 100, 'ftol': 1e-6}
         )
-        
+
         # Convert result to degrees
         joint_pos_deg = np.rad2deg(result.x)
-        
+
         # Preserve gripper position if present in current_joint_pos
         if len(current_joint_pos) > self.nq:
             result_full = np.zeros_like(current_joint_pos)
             result_full[: self.nq] = joint_pos_deg
             result_full[self.nq :] = current_joint_pos[self.nq :]
-            return result_full
+            out_joints = result_full
         else:
-            return joint_pos_deg
+            out_joints = joint_pos_deg
+
+        if not return_diagnostics:
+            return out_joints
+
+        # Post-solve residuals: run FK on the solved joints and measure how
+        # far off the achieved pose is from the target. L-BFGS-B does not
+        # raise on infeasible targets; it just returns the best feasible
+        # point in the bounded domain.  Callers use these residuals to
+        # detect silently-unreachable targets.
+        q_full = pin.neutral(self.model)
+        for i, q_idx in enumerate(self.joint_q_indices):
+            q_full[q_idx] = result.x[i]
+        pin.forwardKinematics(self.model, self.data, q_full)
+        pin.updateFramePlacements(self.model, self.data)
+        achieved = self.data.oMf[self.ee_frame_id]
+
+        pos_residual_m = float(np.linalg.norm(target_pose.translation - achieved.translation))
+        try:
+            rot_residual_rad = float(np.linalg.norm(pin.log3(target_pose.rotation.T @ achieved.rotation)))
+        except Exception:
+            rot_residual_rad = float("nan")
+
+        hit_bound = False
+        for q_val, (lo, hi) in zip(result.x, bounds):
+            if (q_val - lo) < 1e-3 or (hi - q_val) < 1e-3:
+                hit_bound = True
+                break
+
+        diag = {
+            "pos_residual_m": pos_residual_m,
+            "rot_residual_rad": rot_residual_rad,
+            "cost": float(result.fun),
+            "converged": bool(getattr(result, "success", False)),
+            "hit_bound": hit_bound,
+            "nit": int(getattr(result, "nit", 0) or 0),
+        }
+        return out_joints, diag

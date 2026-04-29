@@ -1,40 +1,185 @@
 """Script to run EEF action processing for MimicGen recorded demos."""
 
-"""Launch Isaac Sim Simulator first."""
-import multiprocessing
-if multiprocessing.get_start_method() != "spawn":
-    multiprocessing.set_start_method("spawn", force=True)
 import argparse
+import json
+import os
+from collections.abc import Iterable
+from copy import deepcopy
 
-from isaaclab.app import AppLauncher
+import h5py
+import numpy as np
+import torch
+from tqdm import tqdm
 
-# add argparse arguments
 parser = argparse.ArgumentParser(description="[Support Tool] EEF action processing for MimicGen recorded demos.")
 parser.add_argument("--input_file", type=str, default="./datasets/mimic-lift-cube-example.hdf5", help="File path to load MimicGen recorded demos.")
 parser.add_argument("--output_file", type=str, default="./datasets/processed_mimic-lift-cube-example.hdf5", help="File path to save processed MimicGen recorded demos.")
 parser.add_argument("--to_ik", action="store_true", help="Whether to convert the action to ik action.")
 parser.add_argument("--to_joint", action="store_true", help="Whether to convert the action to joint action.")
 parser.add_argument("--gr00t_format", action="store_true", help="When converting to joint action, convert to GR00T format (degrees + sign flips for shoulder_lift and wrist_roll).")
-
-# append AppLauncher cli args
-AppLauncher.add_app_launcher_args(parser)
-# parse the arguments
+parser.add_argument("--device", type=str, default="cpu", help="Device to use for tensor operations (e.g. 'cpu', 'cuda:0').")
 args_cli = parser.parse_args()
 
-app_launcher_args = vars(args_cli)
 
-# launch omniverse app
-app_launcher = AppLauncher(app_launcher_args)
-simulation_app = app_launcher.app
+# ---------------------------------------------------------------------------
+# Minimal EpisodeData and HDF5DatasetFileHandler (no Isaac Sim dependency)
+# ---------------------------------------------------------------------------
 
-import os
-import torch
-import numpy as np
-from copy import deepcopy
-from tqdm import tqdm
+class EpisodeData:
+    """Lightweight container for a single episode."""
 
-from isaaclab.utils.datasets import HDF5DatasetFileHandler, EpisodeData
+    def __init__(self) -> None:
+        self._data = {}
+        self._seed = None
+        self._env_id = None
+        self._success = None
 
+    @property
+    def data(self):
+        return self._data
+
+    @data.setter
+    def data(self, data: dict):
+        self._data = data
+
+    @property
+    def seed(self):
+        return self._seed
+
+    @seed.setter
+    def seed(self, seed):
+        self._seed = seed
+
+    @property
+    def env_id(self):
+        return self._env_id
+
+    @env_id.setter
+    def env_id(self, env_id):
+        self._env_id = env_id
+
+    @property
+    def success(self):
+        return self._success
+
+    @success.setter
+    def success(self, success):
+        self._success = success
+
+    def is_empty(self) -> bool:
+        return not bool(self._data)
+
+
+class HDF5DatasetFileHandler:
+    """HDF5 dataset file handler (Isaac Sim-free)."""
+
+    def __init__(self):
+        self._hdf5_file_stream = None
+        self._hdf5_data_group = None
+        self._demo_count = 0
+        self._env_args = {}
+
+    def open(self, file_path: str, mode: str = "r"):
+        if self._hdf5_file_stream is not None:
+            raise RuntimeError("HDF5 dataset file stream is already in use")
+        self._hdf5_file_stream = h5py.File(file_path, mode)
+        self._hdf5_data_group = self._hdf5_file_stream["data"]
+        self._demo_count = len(self._hdf5_data_group)
+
+    def create(self, file_path: str, env_name: str = None):
+        if self._hdf5_file_stream is not None:
+            raise RuntimeError("HDF5 dataset file stream is already in use")
+        if not file_path.endswith(".hdf5"):
+            file_path += ".hdf5"
+        dir_path = os.path.dirname(file_path)
+        if dir_path and not os.path.isdir(dir_path):
+            os.makedirs(dir_path)
+        self._hdf5_file_stream = h5py.File(file_path, "w")
+        self._hdf5_data_group = self._hdf5_file_stream.create_group("data")
+        self._hdf5_data_group.attrs["total"] = 0
+        self._demo_count = 0
+        env_name = env_name if env_name is not None else ""
+        self._add_env_args({"env_name": env_name, "type": 2})
+
+    def __del__(self):
+        self.close()
+
+    def _add_env_args(self, env_args: dict):
+        self._env_args.update(env_args)
+        self._hdf5_data_group.attrs["env_args"] = json.dumps(self._env_args)
+
+    def get_env_name(self) -> str | None:
+        env_args = json.loads(self._hdf5_data_group.attrs.get("env_args", "{}"))
+        return env_args.get("env_name")
+
+    def get_episode_names(self) -> Iterable[str]:
+        return self._hdf5_data_group.keys()
+
+    def load_episode(self, episode_name: str, device: str) -> EpisodeData | None:
+        if episode_name not in self._hdf5_data_group:
+            return None
+        episode = EpisodeData()
+        h5_episode_group = self._hdf5_data_group[episode_name]
+
+        def _load(group):
+            data = {}
+            for key in group:
+                if isinstance(group[key], h5py.Group):
+                    data[key] = _load(group[key])
+                else:
+                    data[key] = torch.tensor(np.array(group[key]), device=device)
+            return data
+
+        episode.data = _load(h5_episode_group)
+        if "seed" in h5_episode_group.attrs:
+            episode.seed = h5_episode_group.attrs["seed"]
+        if "success" in h5_episode_group.attrs:
+            episode.success = h5_episode_group.attrs["success"]
+        episode.env_id = self.get_env_name()
+        return episode
+
+    def write_episode(self, episode: EpisodeData, demo_id: int | None = None):
+        if episode.is_empty():
+            return
+        episode_group_name = f"demo_{demo_id if demo_id is not None else self._demo_count}"
+        if episode_group_name in self._hdf5_data_group:
+            raise ValueError(f"Episode group '{episode_group_name}' already exists")
+        h5_episode_group = self._hdf5_data_group.create_group(episode_group_name)
+        h5_episode_group.attrs["num_samples"] = len(episode.data["actions"]) if "actions" in episode.data else 0
+        if episode.seed is not None:
+            h5_episode_group.attrs["seed"] = episode.seed
+        if episode.success is not None:
+            h5_episode_group.attrs["success"] = episode.success
+
+        def _write(group, key, value):
+            if isinstance(value, dict):
+                sub = group.create_group(key)
+                for k, v in value.items():
+                    _write(sub, k, v)
+            else:
+                arr = value.cpu().numpy() if isinstance(value, torch.Tensor) else np.asarray(value)
+                group.create_dataset(key, data=arr, compression="gzip")
+
+        for key, value in episode.data.items():
+            _write(h5_episode_group, key, value)
+
+        self._hdf5_data_group.attrs["total"] += h5_episode_group.attrs["num_samples"]
+        if demo_id is None:
+            self._demo_count += 1
+
+    def flush(self):
+        if self._hdf5_file_stream is not None:
+            self._hdf5_file_stream.flush()
+
+    def close(self):
+        if self._hdf5_file_stream is not None:
+            self._hdf5_file_stream.close()
+            self._hdf5_file_stream = None
+
+
+# ---------------------------------------------------------------------------
+# Processing helpers
+# ---------------------------------------------------------------------------
 
 def convert_usd_to_motor_degrees(usd_degrees: np.ndarray) -> np.ndarray:
     """Convert USD joint degrees to motor degrees with SO101 sign conventions."""
@@ -132,22 +277,16 @@ def joint_action_to_ik(episode_data: EpisodeData) -> EpisodeData:
 def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) -> EpisodeData:
     """
     Convert the action from IK format (EEF pose) to joint action.
-    
+
     Args:
         episode_data: Episode data containing observations and actions
         gr00t_format: If True, convert to GR00T format (degrees + sign flips)
     """
     obs = episode_data.data.get('obs', {})
 
-    # Check if actions are in IK format (EEF pose: pos + quat + gripper = 7 values)
-    # or already in joint format (6 values)
     actions = episode_data.data['actions']
-    
-    # Determine if actions are IK format (shape [T, 7] or [T, 8]) or joint format (shape [T, 6])
+
     if actions.shape[-1] >= 7:
-        # IK format: [pos_x, pos_y, pos_z, quat_w, quat_x, quat_y, quat_z, gripper] or [pos_x, pos_y, pos_z, quat_w, quat_x, quat_y, quat_z]
-        # Need to convert IK to joint positions
-        # Try to get joint positions from observations if available
         is_bimanual_joint_stream = _is_bimanual_obs(obs) or _has_bimanual_joint_obs(obs)
         if is_bimanual_joint_stream:
             joint_pos = _get_bimanual_joint_tensor_from_obs(obs)
@@ -169,40 +308,29 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
                 "Available observation keys: " + str(list(obs.keys()))
             )
     else:
-        # Already in joint format (shape [T, 6])
         joint_pos = actions
 
     if gr00t_format:
-        # Convert from radians (USD) to degrees (Motor) with sign flips
-        # joint_pos is in radians, shape [T, 6] where T is number of timesteps
         joint_pos_np = joint_pos.cpu().numpy() if isinstance(joint_pos, torch.Tensor) else np.asarray(joint_pos)
-        
-        # Ensure shape is [T, 6]
+
         if joint_pos_np.ndim == 1:
             joint_pos_np = joint_pos_np.reshape(1, -1)
-        
-        # Debug: print first frame before conversion
+
         if len(joint_pos_np) > 0:
             print(f"Before conversion (radians): {joint_pos_np[0]}")
             print(f"Before conversion (degrees): {np.degrees(joint_pos_np[0])}")
-        
-        # Convert radians to degrees (USD degrees)
+
         joint_pos_usd_degrees = np.degrees(joint_pos_np)
-        
-        # Convert USD degrees to Motor degrees (applies sign flips)
         joint_pos_motor_degrees = convert_usd_to_motor_degrees(joint_pos_usd_degrees)
-        
-        # Debug: print first frame after conversion
+
         if len(joint_pos_motor_degrees) > 0:
             print(f"After conversion (Motor degrees): {joint_pos_motor_degrees[0]}")
-        
-        # Convert back to tensor if needed
+
         if isinstance(joint_pos, torch.Tensor):
             new_actions = torch.from_numpy(joint_pos_motor_degrees).to(joint_pos.device).to(joint_pos.dtype)
         else:
             new_actions = joint_pos_motor_degrees
-        
-        # Also convert observations (joint_pos, joint_pos_target) to GR00T format
+
         for obs_key in [
             'joint_pos',
             'joint_pos_target',
@@ -214,34 +342,25 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
             'left_joint_vel',
             'right_joint_vel',
         ]:
-            if obs_key in obs:
-                obs_joint_data = obs[obs_key]
-                obs_joint_data_np = obs_joint_data.cpu().numpy() if isinstance(obs_joint_data, torch.Tensor) else np.asarray(obs_joint_data)
-                
-                # Ensure shape is [T, 6] or [T, 5] (for joint_vel which might not include gripper)
-                if obs_joint_data_np.ndim == 1:
-                    obs_joint_data_np = obs_joint_data_np.reshape(1, -1)
-                
-                # For joint_vel, only convert if it has 6 dimensions (includes gripper)
-                # Otherwise, it might be velocities which don't need conversion
-                if obs_key == 'joint_vel' and obs_joint_data_np.shape[-1] != 6:
-                    # Skip conversion for velocities that don't match joint format
-                    continue
-                
-                # Convert radians to degrees (USD degrees)
-                obs_joint_data_usd_degrees = np.degrees(obs_joint_data_np)
-                
-                # Convert USD degrees to Motor degrees (applies sign flips)
-                obs_joint_data_motor_degrees = convert_usd_to_motor_degrees(obs_joint_data_usd_degrees)
-                
-                # Convert back to tensor if needed
-                if isinstance(obs_joint_data, torch.Tensor):
-                    obs[obs_key] = torch.from_numpy(obs_joint_data_motor_degrees).to(obs_joint_data.device).to(obs_joint_data.dtype)
-                else:
-                    obs[obs_key] = obs_joint_data_motor_degrees
-        
-        # Convert specific known joint position paths (avoid converting root_velocity and other 6-element arrays)
-        # Convert initial_state/articulation/robot/joint_position
+            if obs_key not in obs:
+                continue
+            obs_joint_data = obs[obs_key]
+            obs_joint_data_np = obs_joint_data.cpu().numpy() if isinstance(obs_joint_data, torch.Tensor) else np.asarray(obs_joint_data)
+
+            if obs_joint_data_np.ndim == 1:
+                obs_joint_data_np = obs_joint_data_np.reshape(1, -1)
+
+            if obs_key == 'joint_vel' and obs_joint_data_np.shape[-1] != 6:
+                continue
+
+            obs_joint_data_usd_degrees = np.degrees(obs_joint_data_np)
+            obs_joint_data_motor_degrees = convert_usd_to_motor_degrees(obs_joint_data_usd_degrees)
+
+            if isinstance(obs_joint_data, torch.Tensor):
+                obs[obs_key] = torch.from_numpy(obs_joint_data_motor_degrees).to(obs_joint_data.device).to(obs_joint_data.dtype)
+            else:
+                obs[obs_key] = obs_joint_data_motor_degrees
+
         if 'initial_state' in episode_data.data:
             initial_state = episode_data.data['initial_state']
             if isinstance(initial_state, dict) and 'articulation' in initial_state:
@@ -253,8 +372,7 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
                             if isinstance(arm_data, dict) and 'joint_position' in arm_data:
                                 print(f"DEBUG: Converting initial_state/articulation/{arm_name}/joint_position")
                                 arm_data['joint_position'] = _convert_joint_data_to_gr00t(arm_data['joint_position'])
-        
-        # Convert states/articulation/robot/joint_position
+
         if 'states' in episode_data.data:
             states = episode_data.data['states']
             if isinstance(states, dict) and 'articulation' in states:
@@ -266,9 +384,8 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
                             if isinstance(arm_data, dict) and 'joint_position' in arm_data:
                                 print(f"DEBUG: Converting states/articulation/{arm_name}/joint_position")
                                 arm_data['joint_position'] = _convert_joint_data_to_gr00t(arm_data['joint_position'])
-        
+
     else:
-        # Standard conversion: keep in radians (USD format)
         new_actions = joint_pos
 
     if 'actions' in obs:
@@ -286,7 +403,6 @@ def ik_action_to_joint(episode_data: EpisodeData, gr00t_format: bool = False) ->
 
 def main():
     """Process the EEF action stream of MimicGen annotated recorded demos."""
-    # check arguments
     if args_cli.to_ik and args_cli.to_joint:
         raise ValueError("Cannot convert to both ik and joint action at the same time.")
     if not args_cli.to_ik and not args_cli.to_joint:
@@ -299,7 +415,6 @@ def main():
             "Create a new output HDF5 when converting actions."
         )
 
-    # Load dataset
     if not os.path.exists(args_cli.input_file):
         raise FileNotFoundError(f"The dataset file {args_cli.input_file} does not exist.")
     input_dataset_handler = HDF5DatasetFileHandler()
@@ -344,5 +459,4 @@ def main():
 
 
 if __name__ == "__main__":
-    # run the main function
     main()

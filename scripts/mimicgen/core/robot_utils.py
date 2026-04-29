@@ -12,8 +12,7 @@ import torch
 from isaaclab.envs import ManagerBasedRLMimicEnv
 import isaaclab.utils.math as PoseUtils
 
-from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
-from lehome.tasks.fold_cloth.mdp.terminations import is_so101_at_rest_pose
+from lehome.utils.robot_utils import is_so101_at_rest_pose
 
 try:
     from scripts.utils.annotate_utils import orthonormalize_rotations as _orthonormalize_rotations
@@ -151,7 +150,11 @@ def are_arms_at_rest(env: ManagerBasedRLMimicEnv) -> bool:
                 arm = env.scene[arm_name]
             except Exception:
                 continue
-            arm_rest = is_so101_at_rest_pose(arm.data.joint_pos, arm.data.joint_names)
+            arm_rest = is_so101_at_rest_pose(
+                arm.data.joint_pos,
+                arm.data.joint_names,
+                arm_name=arm_name,
+            )
             at_rest_flags.append(bool(arm_rest[0].item()))
         if not at_rest_flags:
             return False

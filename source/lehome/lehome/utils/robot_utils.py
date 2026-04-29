@@ -2,18 +2,22 @@ import torch
 import numpy as np
 
 from lehome.assets.robots.lerobot import (
-    SO101_FOLLOWER_REST_POSE_RANGE,
     SO101_FOLLOWER_MOTOR_LIMITS,
     SO101_FOLLOWER_USD_JOINT_LIMLITS,
+    get_so101_rest_pose_range,
 )
 
 
-def is_so101_at_rest_pose(joint_pos: torch.Tensor, joint_names: list[str]) -> torch.Tensor:
+def is_so101_at_rest_pose(
+    joint_pos: torch.Tensor,
+    joint_names: list[str],
+    arm_name: str | None = None,
+) -> torch.Tensor:
     """
     Check if the robot is in the rest pose.
     """
     is_reset = torch.ones(joint_pos.shape[0], dtype=torch.bool, device=joint_pos.device)
-    reset_pose_range = SO101_FOLLOWER_REST_POSE_RANGE
+    reset_pose_range = get_so101_rest_pose_range(arm_name)
     joint_pos = joint_pos / torch.pi * 180.0  # change to degree
     for joint_name, (min_pos, max_pos) in reset_pose_range.items():
         joint_idx = joint_names.index(joint_name)

@@ -11,7 +11,11 @@ import torch
 
 from isaaclab.envs import DirectRLEnv
 
-from lehome.devices import BiKeyboard, BiSO101Leader, SO101Leader, Se3Keyboard
+# Note: lehome.devices imports (Se3Keyboard, BiKeyboard, SO101Leader, BiSO101Leader)
+# are deferred into create_teleop_interface() because each one transitively imports
+# pynput, which requires an X display. Generation runs headless on Brev/CI and only
+# needs _build_pose_sequence from this module's neighbour, so a top-level import
+# crashes those runs with "this platform is not supported".
 from lehome.utils.logger import get_logger
 from lehome.utils.record import RateLimiter, get_next_experiment_path_with_gap
 
@@ -135,6 +139,8 @@ def _get_or_build_maintain_action(
 
 def create_teleop_interface(env: DirectRLEnv, args: argparse.Namespace) -> Any:
     """Create teleoperation interface based on device type."""
+    from lehome.devices import BiKeyboard, BiSO101Leader, SO101Leader, Se3Keyboard
+
     if args.teleop_device == "keyboard":
         return Se3Keyboard(env, sensitivity=0.25 * args.sensitivity)
     if args.teleop_device == "so101leader":

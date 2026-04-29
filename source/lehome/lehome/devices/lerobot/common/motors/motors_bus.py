@@ -449,6 +449,42 @@ class MotorsBus(abc.ABC):
                 "\nTry running `python lerobot/find_port.py`\n"
             ) from e
 
+    def _recover_from_transport_error(self, exc: Exception, *, operation: str, attempt: int, total_attempts: int) -> bool:
+        logger.warning(
+            "Serial transport error during %s on port '%s' (attempt %d/%d): %s",
+            operation,
+            self.port,
+            attempt,
+            total_attempts,
+            exc,
+        )
+
+        try:
+            clear_port = getattr(self.port_handler, "clearPort", None)
+            if callable(clear_port):
+                clear_port()
+        except Exception:
+            logger.debug("Failed clearing port '%s' before reconnect.", self.port, exc_info=True)
+
+        try:
+            self.port_handler.is_using = False
+        except Exception:
+            logger.debug("Failed resetting port usage flag for '%s'.", self.port, exc_info=True)
+
+        try:
+            if self.is_connected:
+                self.port_handler.closePort()
+        except Exception:
+            logger.debug("Failed closing port '%s' before reconnect.", self.port, exc_info=True)
+
+        try:
+            self._connect(handshake=False)
+            self.set_timeout()
+            return True
+        except Exception:
+            logger.warning("Failed reconnecting port '%s' after serial transport error.", self.port, exc_info=True)
+            return False
+
     @abc.abstractmethod
     def _handshake(self) -> None:
         pass
@@ -970,8 +1006,25 @@ class MotorsBus(abc.ABC):
         else:
             raise ValueError(length)
 
+        value = 0
+        comm = None
+        error = self._no_error
+        last_transport_error: Exception | None = None
         for n_try in range(1 + num_retry):
-            value, comm, error = read_fn(self.port_handler, motor_id, address)
+            try:
+                value, comm, error = read_fn(self.port_handler, motor_id, address)
+            except (serial.SerialException, OSError) as exc:
+                last_transport_error = exc
+                if n_try >= num_retry or not self._recover_from_transport_error(
+                    exc,
+                    operation=f"read @{address} ({length=}) on id={motor_id}",
+                    attempt=n_try + 1,
+                    total_attempts=num_retry + 1,
+                ):
+                    break
+                continue
+
+            last_transport_error = None
             if self._is_comm_success(comm):
                 break
             logger.debug(
@@ -979,7 +1032,9 @@ class MotorsBus(abc.ABC):
                 + self.packet_handler.getTxRxResult(comm)
             )
 
-        if not self._is_comm_success(comm) and raise_on_error:
+        if last_transport_error is not None and raise_on_error:
+            raise ConnectionError(f"{err_msg} Serial transport error: {last_transport_error}") from last_transport_error
+        if comm is not None and not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
         elif self._is_error(error) and raise_on_error:
             raise RuntimeError(f"{err_msg} {self.packet_handler.getRxPacketError(error)}")
@@ -1033,8 +1088,24 @@ class MotorsBus(abc.ABC):
         err_msg: str = "",
     ) -> tuple[int, int]:
         data = self._serialize_data(value, length)
+        comm = None
+        error = self._no_error
+        last_transport_error: Exception | None = None
         for n_try in range(1 + num_retry):
-            comm, error = self.packet_handler.writeTxRx(self.port_handler, motor_id, addr, length, data)
+            try:
+                comm, error = self.packet_handler.writeTxRx(self.port_handler, motor_id, addr, length, data)
+            except (serial.SerialException, OSError) as exc:
+                last_transport_error = exc
+                if n_try >= num_retry or not self._recover_from_transport_error(
+                    exc,
+                    operation=f"sync write @{addr} ({length=}) on id={motor_id}",
+                    attempt=n_try + 1,
+                    total_attempts=num_retry + 1,
+                ):
+                    break
+                continue
+
+            last_transport_error = None
             if self._is_comm_success(comm):
                 break
             logger.debug(
@@ -1042,7 +1113,9 @@ class MotorsBus(abc.ABC):
                 + self.packet_handler.getTxRxResult(comm)
             )
 
-        if not self._is_comm_success(comm) and raise_on_error:
+        if last_transport_error is not None and raise_on_error:
+            raise ConnectionError(f"{err_msg} Serial transport error: {last_transport_error}") from last_transport_error
+        if comm is not None and not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
         elif self._is_error(error) and raise_on_error:
             raise RuntimeError(f"{err_msg} {self.packet_handler.getRxPacketError(error)}")
@@ -1108,8 +1181,24 @@ class MotorsBus(abc.ABC):
         err_msg: str = "",
     ) -> tuple[dict[int, int], int]:
         self._setup_sync_reader(motor_ids, addr, length)
+        comm = None
+        last_transport_error: Exception | None = None
         for n_try in range(1 + num_retry):
-            comm = self.sync_reader.txRxPacket()
+            try:
+                comm = self.sync_reader.txRxPacket()
+            except (serial.SerialException, OSError) as exc:
+                last_transport_error = exc
+                if n_try >= num_retry or not self._recover_from_transport_error(
+                    exc,
+                    operation=f"sync read @{addr} ({length=}) on ids={motor_ids}",
+                    attempt=n_try + 1,
+                    total_attempts=num_retry + 1,
+                ):
+                    break
+                self._setup_sync_reader(motor_ids, addr, length)
+                continue
+
+            last_transport_error = None
             if self._is_comm_success(comm):
                 break
             logger.debug(
@@ -1117,7 +1206,9 @@ class MotorsBus(abc.ABC):
                 + self.packet_handler.getTxRxResult(comm)
             )
 
-        if not self._is_comm_success(comm) and raise_on_error:
+        if last_transport_error is not None and raise_on_error:
+            raise ConnectionError(f"{err_msg} Serial transport error: {last_transport_error}") from last_transport_error
+        if comm is not None and not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
 
         values = {id_: self.sync_reader.getData(id_, addr, length) for id_ in motor_ids}
@@ -1196,8 +1287,24 @@ class MotorsBus(abc.ABC):
         err_msg: str = "",
     ) -> int:
         self._setup_sync_writer(ids_values, addr, length)
+        comm = None
+        last_transport_error: Exception | None = None
         for n_try in range(1 + num_retry):
-            comm = self.sync_writer.txPacket()
+            try:
+                comm = self.sync_writer.txPacket()
+            except (serial.SerialException, OSError) as exc:
+                last_transport_error = exc
+                if n_try >= num_retry or not self._recover_from_transport_error(
+                    exc,
+                    operation=f"sync write @{addr} ({length=})",
+                    attempt=n_try + 1,
+                    total_attempts=num_retry + 1,
+                ):
+                    break
+                self._setup_sync_writer(ids_values, addr, length)
+                continue
+
+            last_transport_error = None
             if self._is_comm_success(comm):
                 break
             logger.debug(
@@ -1205,7 +1312,9 @@ class MotorsBus(abc.ABC):
                 + self.packet_handler.getTxRxResult(comm)
             )
 
-        if not self._is_comm_success(comm) and raise_on_error:
+        if last_transport_error is not None and raise_on_error:
+            raise ConnectionError(f"{err_msg} Serial transport error: {last_transport_error}") from last_transport_error
+        if comm is not None and not self._is_comm_success(comm) and raise_on_error:
             raise ConnectionError(f"{err_msg} {self.packet_handler.getTxRxResult(comm)}")
 
         return comm

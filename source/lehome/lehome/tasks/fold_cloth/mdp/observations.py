@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import logging
+import os
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -25,11 +28,68 @@ if TYPE_CHECKING:
 
 
 _DEFAULT_GRIPPER_JOINT_IDX = 5
-_DEFAULT_GRIPPER_CLOSE_THRESHOLD = 0.35
+_DEFAULT_GRIPPER_CLOSE_THRESHOLD = 0.20
 _DEFAULT_GRASP_EEF_TO_KEYPOINT_THRESHOLD_M = 0.05
 _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M = 0.10
+_DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M = 0.53
 _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M = 0.12
+# ``prepare_for_grasp_*`` fires when the arm has descended into grasp
+# attitude with the gripper still open, above a specific target keypoint.
+# Z threshold is the user-facing "eef_z < 0.53" cutoff; the per-keypoint
+# XY proximity gate keeps the two prep subtasks per arm (middle vs lower)
+# distinguishable in the annotation timeline — without it, the first
+# descent transition would claim both prep subtasks' boundaries.
+_DEFAULT_PREP_FOR_GRASP_EEF_Z_M = 0.53
+_DEFAULT_PREP_FOR_GRASP_XY_THRESHOLD_M = 0.15
+# Narrow release-zone geometry (in the garment's own in-plane frame).
+# The "big square" is the quad formed by the 4 corner keypoints
+# (garment_{left,right}_{lower,upper}).  Inside that square we carve out a
+# narrow rectangle centered on the left<->right midline, covering the lower
+# half along the upper<->lower axis and 60% of the span along the
+# left<->right axis.
+_DEFAULT_RELEASE_ZONE_WIDTH_FRACTION = 0.60
+_DEFAULT_RELEASE_ZONE_LOWER_FRACTION = 0.50
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
+
+_RELEASE_ZONE_LOG = logging.getLogger("lehome.fold_cloth.release_zone")
+_RELEASE_ZONE_DEBUG_ENV_VAR = "LEHOME_DEBUG_RELEASE_ZONE"
+# One log block per second at most; set to 0 via the env var to log every call.
+_RELEASE_ZONE_DEBUG_MIN_INTERVAL_S = 1.0
+_release_zone_debug_last_ts: list[float] = [0.0]
+_release_zone_debug_handler_installed: list[bool] = [False]
+
+
+def _release_zone_debug_enabled() -> bool:
+    raw = os.environ.get(_RELEASE_ZONE_DEBUG_ENV_VAR, "").strip().lower()
+    enabled = raw not in ("", "0", "false", "no", "off")
+    if enabled and not _release_zone_debug_handler_installed[0]:
+        # Self-configure so users can just ``export LEHOME_DEBUG_RELEASE_ZONE=1``
+        # without also tweaking the root logger level.
+        if not _RELEASE_ZONE_LOG.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+            )
+            _RELEASE_ZONE_LOG.addHandler(handler)
+            _RELEASE_ZONE_LOG.propagate = False
+        _RELEASE_ZONE_LOG.setLevel(logging.INFO)
+        _release_zone_debug_handler_installed[0] = True
+    return enabled
+
+
+def _release_zone_debug_should_log() -> bool:
+    if not _release_zone_debug_enabled():
+        return False
+    min_interval = _RELEASE_ZONE_DEBUG_MIN_INTERVAL_S
+    try:
+        min_interval = float(os.environ.get("LEHOME_DEBUG_RELEASE_ZONE_INTERVAL_S", min_interval))
+    except Exception:
+        pass
+    now = time.monotonic()
+    if now - _release_zone_debug_last_ts[0] < max(0.0, min_interval):
+        return False
+    _release_zone_debug_last_ts[0] = now
+    return True
 
 
 @dataclass
@@ -42,9 +102,18 @@ class FoldClothSubtaskObservationContext:
     eef_world_positions: dict[str, torch.Tensor]
     gripper_closed_by_arm: dict[str, torch.Tensor]
     arm_at_rest_by_arm: dict[str, torch.Tensor]
+    arm_at_waiting_pos_by_arm: dict[str, torch.Tensor]
     grasp_eef_to_keypoint_threshold_m: float
     middle_to_lower_threshold_m: float
+    middle_to_lower_middle_keypoint_max_z_m: float
     lower_to_upper_threshold_m: float
+    prep_for_grasp_eef_z_m: float
+    prep_for_grasp_xy_threshold_m: float
+    # Per-arm ``(num_envs, 1)`` bool tensor: EEF's world XY is inside the narrow
+    # release zone built from the 4 garment corner keypoints.  Empty dict when
+    # the corners are not available (degenerate cloth state), in which case the
+    # signals depending on this fall back to False.
+    eef_in_release_zone_by_arm: dict[str, torch.Tensor] | None = None
     fold_success: torch.Tensor | None = None
 
 
@@ -66,10 +135,9 @@ def _resolve_arm_name(arm: str | SceneEntityCfg) -> str:
 
 def _resolve_checkpoint_name(checkpoint_name: str) -> str:
     checkpoint_name = str(checkpoint_name)
-    if checkpoint_name not in CHECKPOINT_LABELS:
-        raise KeyError(
+    raise KeyError(
             f"Unsupported garment checkpoint name {checkpoint_name!r}. "
-            f"Expected one of {CHECKPOINT_LABELS}."
+
         )
     return checkpoint_name
 
@@ -225,6 +293,164 @@ def _normalize_optional_bool_column(
     return tensor[:num_envs].reshape(num_envs, 1)
 
 
+def _compute_eef_in_release_zone(
+    env: ManagerBasedEnv,
+    num_envs: int,
+    semantic_points: dict[str, torch.Tensor],
+    eef_positions: dict[str, torch.Tensor],
+    width_fraction: float,
+    lower_fraction: float,
+    upper_fraction: float | None = None,
+) -> dict[str, torch.Tensor]:
+    """Return per-arm ``(num_envs, 1)`` bool: EEF XY in the narrow release zone.
+
+    The zone is built in the garment's own in-plane frame:
+
+    * ``u`` is the unit vector along the left->right corner axis, taken as the
+      mean of (left_lower -> right_lower) and (left_upper -> right_upper).
+    * ``v_perp`` is Gram-Schmidt orthogonalized from ``v`` (upper->lower axis)
+      against ``u``, so ``(u, v_perp)`` is a right-handed orthonormal basis
+      lying in the world XY plane.  ``v_hat`` points toward the LOWER edge.
+    * ``W`` / ``H`` are the full spans between the corner midpoints along
+      ``u`` / ``v`` respectively.
+
+    The narrow zone is the central ``width_fraction`` along ``u`` intersected
+    with one of two ranges along ``v_hat`` (measured from center):
+
+    * ``[0, lower_fraction * ||v_orth||]`` — lower half (default).
+    * ``[-upper_fraction * ||v_orth||, 0]`` — upper half, selected by
+      passing a non-None ``upper_fraction``.  ``lower_fraction`` is ignored
+      in this mode.
+
+    If any corner keypoint is missing or the span collapses, every arm's
+    membership is reported as False (safe / conservative).
+    """
+    device = next(
+        (t.device for t in list(semantic_points.values()) + list(eef_positions.values())),
+        env.device,
+    )
+
+    def _false_zone() -> dict[str, torch.Tensor]:
+        return {
+            arm_name: torch.zeros((num_envs, 1), dtype=torch.bool, device=device)
+            for arm_name in eef_positions
+        }
+
+    corners = (
+        "garment_left_lower",
+        "garment_left_upper",
+        "garment_right_lower",
+        "garment_right_upper",
+    )
+    missing = [name for name in corners if name not in semantic_points]
+    if missing:
+        if _release_zone_debug_should_log():
+            _RELEASE_ZONE_LOG.info(
+                "[release_zone] corners missing -> zone=False for all arms. missing=%s available=%s",
+                missing,
+                sorted(semantic_points.keys()),
+            )
+        return _false_zone()
+
+    # (num_envs, 2) tensors in world XY.
+    kp_ll = semantic_points["garment_left_lower"][..., :2]
+    kp_lu = semantic_points["garment_left_upper"][..., :2]
+    kp_rl = semantic_points["garment_right_lower"][..., :2]
+    kp_ru = semantic_points["garment_right_upper"][..., :2]
+
+    left_mid = 0.5 * (kp_ll + kp_lu)
+    right_mid = 0.5 * (kp_rl + kp_ru)
+    upper_mid = 0.5 * (kp_lu + kp_ru)
+    lower_mid = 0.5 * (kp_ll + kp_rl)
+    center = 0.25 * (kp_ll + kp_lu + kp_rl + kp_ru)
+
+    u_vec = right_mid - left_mid
+    v_vec = lower_mid - upper_mid
+
+    eps = 1e-6
+    w_full = torch.linalg.norm(u_vec, dim=-1, keepdim=True)
+    h_full = torch.linalg.norm(v_vec, dim=-1, keepdim=True)
+    valid_span = (w_full > eps) & (h_full > eps)
+    if not bool(valid_span.all()):
+        # Any env with a degenerate span falls back to False; we still compute
+        # the rest for the valid envs below.  Mask is applied at the end.
+        pass
+
+    u_hat = u_vec / torch.clamp(w_full, min=eps)
+    # Gram-Schmidt: v_perp = normalize(v - (v . u) u).  ``v_norm`` is therefore
+    # the orthogonal component of the upper->lower vector projected against
+    # ``u_hat``; this is the correct span to use for the lower-half bound
+    # when the quad isn't perfectly rectangular.  For a rectangle it equals
+    # ``h_full`` exactly.
+    v_dot_u = (v_vec * u_hat).sum(dim=-1, keepdim=True)
+    v_orth = v_vec - v_dot_u * u_hat
+    v_norm = torch.linalg.norm(v_orth, dim=-1, keepdim=True)
+    valid_span = valid_span & (v_norm > eps)
+    v_hat = v_orth / torch.clamp(v_norm, min=eps)
+
+    # ``half_*`` describes half-spans in the orthonormal (u_hat, v_hat) basis.
+    half_u = 0.5 * w_full
+    half_v = 0.5 * v_norm
+    width_half = half_u * float(width_fraction)
+    # v_hat points toward the LOWER edge, so s_v > 0 is lower-half and
+    # s_v < 0 is upper-half.  With ``lower_fraction=0.5`` the default zone
+    # is exactly the lower half; passing ``upper_fraction=0.5`` flips it to
+    # the upper half.  Only one mode is active at a time.
+    if upper_fraction is not None:
+        v_upper_bound = torch.zeros_like(v_norm)
+        v_lower_bound = -float(upper_fraction) * v_norm
+    else:
+        v_upper_bound = float(lower_fraction) * v_norm
+        v_lower_bound = torch.zeros_like(v_upper_bound)
+
+    result: dict[str, torch.Tensor] = {}
+    per_arm_diag: dict[str, dict[str, float]] = {}
+    for arm_name, eef_xyz in eef_positions.items():
+        eef_xy = eef_xyz[..., :2]
+        d = eef_xy - center
+        s_u = (d * u_hat).sum(dim=-1, keepdim=True)
+        s_v = (d * v_hat).sum(dim=-1, keepdim=True)
+        inside_width = s_u.abs() <= width_half
+        inside_lower = (s_v >= v_lower_bound) & (s_v <= v_upper_bound)
+        inside = inside_width & inside_lower & valid_span
+        result[arm_name] = inside.reshape(num_envs, 1)
+
+        if _release_zone_debug_enabled():
+            per_arm_diag[arm_name] = {
+                "eef_x": float(eef_xy[0, 0].item()),
+                "eef_y": float(eef_xy[0, 1].item()),
+                "s_u": float(s_u[0, 0].item()),
+                "s_v": float(s_v[0, 0].item()),
+                "s_u_abs_le_width_half": bool(inside_width[0, 0].item()),
+                "s_v_in_lower": bool(inside_lower[0, 0].item()),
+                "valid_span": bool(valid_span[0, 0].item()),
+                "inside": bool(inside[0, 0].item()),
+            }
+
+    if _release_zone_debug_enabled() and _release_zone_debug_should_log():
+        try:
+            corners_xy = {name: semantic_points[name][0, :2].tolist() for name in corners}
+            u_hat_vec = u_hat[0].tolist()
+            v_hat_vec = v_hat[0].tolist()
+            _RELEASE_ZONE_LOG.info(
+                "[release_zone] corners=%s center=%s u_hat=%s v_hat=%s W=%.4f ||v_orth||=%.4f "
+                "width_half=%.4f v_upper_bound=%.4f | %s",
+                corners_xy,
+                center[0].tolist(),
+                u_hat_vec,
+                v_hat_vec,
+                float(w_full[0, 0].item()),
+                float(v_norm[0, 0].item()),
+                float(width_half[0, 0].item()),
+                float(v_upper_bound[0, 0].item()),
+                per_arm_diag,
+            )
+        except Exception as exc:
+            _RELEASE_ZONE_LOG.debug("release-zone diagnostic formatting failed: %s", exc)
+
+    return result
+
+
 def build_subtask_observation_context(
     env: ManagerBasedEnv,
     env_ids: Sequence[int] | None = None,
@@ -258,6 +484,10 @@ def build_subtask_observation_context(
         "left_arm": arm_at_rest(env, "left_arm", env_ids=env_ids),
         "right_arm": arm_at_rest(env, "right_arm", env_ids=env_ids),
     }
+    arm_waiting_map = {
+        "left_arm": arm_at_waiting_pos(env, "left_arm", env_ids=env_ids),
+        "right_arm": arm_at_waiting_pos(env, "right_arm", env_ids=env_ids),
+    }
 
     fold_success_column = _normalize_optional_bool_column(
         env,
@@ -271,6 +501,27 @@ def build_subtask_observation_context(
             else _false_bool_column(env, num_envs)
         )
 
+    zone_width_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_width_fraction",
+        _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
+    )
+    zone_lower_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_lower_fraction",
+        _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+    )
+    zone_upper_fraction = getattr(env.cfg, "subtask_release_zone_upper_fraction", None)
+    eef_in_release_zone_map = _compute_eef_in_release_zone(
+        env,
+        num_envs,
+        semantic_points,
+        eef_positions,
+        width_fraction=zone_width_fraction,
+        lower_fraction=zone_lower_fraction,
+        upper_fraction=zone_upper_fraction,
+    )
+
     return FoldClothSubtaskObservationContext(
         device=env.device,
         num_envs=num_envs,
@@ -278,6 +529,7 @@ def build_subtask_observation_context(
         eef_world_positions=eef_positions,
         gripper_closed_by_arm=gripper_closed_map,
         arm_at_rest_by_arm=arm_rest_map,
+        arm_at_waiting_pos_by_arm=arm_waiting_map,
         grasp_eef_to_keypoint_threshold_m=_cfg_float(
             env,
             "subtask_grasp_eef_to_keypoint_threshold_m",
@@ -288,11 +540,27 @@ def build_subtask_observation_context(
             "subtask_middle_to_lower_threshold_m",
             _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
         ),
+        middle_to_lower_middle_keypoint_max_z_m=_cfg_float(
+            env,
+            "subtask_middle_to_lower_middle_keypoint_max_z_m",
+            _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
+        ),
         lower_to_upper_threshold_m=_cfg_float(
             env,
             "subtask_lower_to_upper_threshold_m",
             _DEFAULT_LOWER_TO_UPPER_THRESHOLD_M,
         ),
+        prep_for_grasp_eef_z_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_eef_z_m",
+            _DEFAULT_PREP_FOR_GRASP_EEF_Z_M,
+        ),
+        prep_for_grasp_xy_threshold_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_xy_threshold_m",
+            _DEFAULT_PREP_FOR_GRASP_XY_THRESHOLD_M,
+        ),
+        eef_in_release_zone_by_arm=eef_in_release_zone_map,
         fold_success=fold_success_column,
     )
 
@@ -309,6 +577,16 @@ def _context_keypoint_pair_distance(
     return torch.linalg.norm(pos_a - pos_b, dim=-1, keepdim=True)
 
 
+def _context_keypoint_z(
+    context: FoldClothSubtaskObservationContext,
+    checkpoint_name: str,
+) -> torch.Tensor:
+    kp_pos = context.semantic_keypoints_world.get(checkpoint_name)
+    if kp_pos is None:
+        return _context_full_float_column(context, float("inf"))
+    return kp_pos[..., 2:3]
+
+
 def _context_eef_to_keypoint_distance(
     context: FoldClothSubtaskObservationContext,
     arm_name: str,
@@ -321,12 +599,53 @@ def _context_eef_to_keypoint_distance(
     return torch.linalg.norm(eef_pos - kp_pos, dim=-1, keepdim=True)
 
 
+def _context_eef_z(
+    context: FoldClothSubtaskObservationContext,
+    arm_name: str,
+) -> torch.Tensor:
+    eef_pos = context.eef_world_positions.get(arm_name)
+    if eef_pos is None:
+        return _context_full_float_column(context, float("inf"))
+    return eef_pos[..., 2:3]
+
+
+def _context_prep_for_grasp(
+    context: FoldClothSubtaskObservationContext,
+    arm_name: str,
+    target_keypoint: str,
+) -> torch.Tensor:
+    """``prepare_for_grasp_*`` predicate for one arm/keypoint pair.
+
+    True when: gripper is still open, EEF has descended below the z cutoff,
+    and the EEF is already horizontally close to the target keypoint (so
+    the signal fires in the final approach to *that* grasp, not to the
+    other one).
+    """
+    gripper_open = ~context.gripper_closed_by_arm.get(
+        arm_name, _context_false_bool_column(context)
+    )
+    eef_z_below = _context_eef_z(context, arm_name) < context.prep_for_grasp_eef_z_m
+    near_target = (
+        _context_eef_to_keypoint_distance(context, arm_name, target_keypoint)
+        <= context.prep_for_grasp_xy_threshold_m
+    )
+    return gripper_open & eef_z_below & near_target
+
+
 def get_subtask_signal_observation_from_context(
     context: FoldClothSubtaskObservationContext,
     signal_name: str,
 ) -> torch.Tensor:
     """Evaluate a single instantaneous subtask predicate from precomputed state."""
     signal_name = str(signal_name)
+    if signal_name == "prepare_for_grasp_left_middle":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_middle")
+    if signal_name == "prepare_for_grasp_right_middle":
+        return _context_prep_for_grasp(context, "right_arm", "garment_right_middle")
+    if signal_name == "prepare_for_grasp_left_lower":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_lower")
+    if signal_name == "prepare_for_grasp_right_lower":
+        return _context_prep_for_grasp(context, "right_arm", "garment_right_lower")
     if signal_name == "grasp_left_middle":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
             _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_middle")
@@ -338,24 +657,39 @@ def get_subtask_signal_observation_from_context(
             <= context.grasp_eef_to_keypoint_threshold_m
         )
     if signal_name == "left_middle_to_lower":
-        return (
-            ~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context))
-        ) & (
-            _context_keypoint_pair_distance(
-                context,
-                "garment_left_middle",
-                "garment_left_lower",
-            ) <= context.middle_to_lower_threshold_m
-        )
+        # Arm still holding the middle keypoint and has moved its EEF into the
+        # narrow drop zone above the lower-corner half of the garment.
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("left_arm", _context_false_bool_column(context))
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & in_zone
     if signal_name == "right_middle_to_lower":
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("right_arm", _context_false_bool_column(context))
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & in_zone
+    if signal_name == "release_left_middle":
+        # Arm's EEF is inside the zone, gripper has opened, and the tracked
+        # middle keypoint has dropped below the configured max Z (i.e. the
+        # cloth actually detached and is resting on the lower garment half).
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("left_arm", _context_false_bool_column(context))
         return (
-            ~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context))
-        ) & (
-            _context_keypoint_pair_distance(
-                context,
-                "garment_right_middle",
-                "garment_right_lower",
-            ) <= context.middle_to_lower_threshold_m
+            in_zone
+            & (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_z(context, "garment_left_middle")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_middle":
+        in_zone_map = context.eef_in_release_zone_by_arm or {}
+        in_zone = in_zone_map.get("right_arm", _context_false_bool_column(context))
+        return (
+            in_zone
+            & (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_z(context, "garment_right_middle")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
         )
     if signal_name == "grasp_left_lower":
         return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
@@ -387,6 +721,110 @@ def get_subtask_signal_observation_from_context(
                 "garment_right_upper",
             ) <= context.lower_to_upper_threshold_m
         )
+    # --- Pant-fold signals (lateral edge-to-edge folds) ---
+    # The helpers below support both left->right and right->left variants.
+    # The low-level predicates are the same building blocks as the other
+    # garment subtasks: arm-specific prep-for-grasp, EEF-to-keypoint grasp
+    # checks, keypoint-pair distance checks during transport, and release
+    # checks that also require the carried keypoint to settle low.
+    if signal_name == "prepare_for_grasp_left_upper":
+        return _context_prep_for_grasp(context, "left_arm", "garment_left_upper")
+    if signal_name == "prepare_for_grasp_left_on_right_upper":
+        return _context_prep_for_grasp(context, "left_arm", "garment_right_upper")
+    if signal_name == "prepare_for_grasp_right_on_left_lower":
+        return _context_prep_for_grasp(context, "right_arm", "garment_left_lower")
+    if signal_name == "grasp_left_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_left_upper")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_left_on_right_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "left_arm", "garment_right_upper")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "grasp_right_on_left_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_eef_to_keypoint_distance(context, "right_arm", "garment_left_lower")
+            <= context.grasp_eef_to_keypoint_threshold_m
+        )
+    if signal_name == "left_upper_to_right_upper":
+        # Left arm still holding left_upper and the two waistband corners
+        # have been brought close together.
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_left_upper", "garment_right_upper")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "left_lower_to_right_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_left_lower", "garment_right_lower")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "right_upper_to_left_upper":
+        return context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_right_upper", "garment_left_upper")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "right_lower_to_left_lower":
+        return context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)) & (
+            _context_keypoint_pair_distance(context, "garment_right_lower", "garment_left_lower")
+            <= context.lower_to_upper_threshold_m
+        )
+    if signal_name == "release_left_upper_at_right_upper":
+        # Gripper open, waistband corners aligned, carried corner has settled
+        # back down onto the cloth (z below the same cutoff used for the
+        # top-fold release).
+        return (
+            (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_left_upper", "garment_right_upper")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_left_upper")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_upper_at_left_upper":
+        return (
+            (~context.gripper_closed_by_arm.get("left_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_right_upper", "garment_left_upper")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_right_upper")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_left_lower_at_right_lower":
+        return (
+            (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_left_lower", "garment_right_lower")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_left_lower")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "release_right_lower_at_left_lower":
+        return (
+            (~context.gripper_closed_by_arm.get("right_arm", _context_false_bool_column(context)))
+            & (
+                _context_keypoint_pair_distance(context, "garment_right_lower", "garment_left_lower")
+                <= context.lower_to_upper_threshold_m
+            )
+            & (
+                _context_keypoint_z(context, "garment_right_lower")
+                < context.middle_to_lower_middle_keypoint_max_z_m
+            )
+        )
+    if signal_name == "left_at_waiting_pos":
+        return context.arm_at_waiting_pos_by_arm.get("left_arm", _context_false_bool_column(context))
+    if signal_name == "right_at_waiting_pos":
+        return context.arm_at_waiting_pos_by_arm.get("right_arm", _context_false_bool_column(context))
     if signal_name == "left_return_home":
         fold_success_value = context.fold_success
         if fold_success_value is None:
@@ -434,8 +872,16 @@ def robot_rest_pose(
     left_arm = env.scene[left_arm_cfg.name]
     right_arm = env.scene[right_arm_cfg.name]
 
-    left_at_rest = is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names)
-    right_at_rest = is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names)
+    left_at_rest = is_so101_at_rest_pose(
+        left_arm.data.joint_pos,
+        left_arm.data.joint_names,
+        arm_name=left_arm_cfg.name,
+    )
+    right_at_rest = is_so101_at_rest_pose(
+        right_arm.data.joint_pos,
+        right_arm.data.joint_names,
+        arm_name=right_arm_cfg.name,
+    )
 
     return torch.stack(
         (
@@ -467,12 +913,35 @@ def arm_at_rest(
 ) -> torch.Tensor:
     """Return whether the given arm is at the rest pose."""
     env_ids, num_envs = _resolve_env_ids(env, env_ids)
-    _, arm_entity = _get_scene_arm(env, arm)
+    arm_name, arm_entity = _get_scene_arm(env, arm)
     at_rest = is_so101_at_rest_pose(
         arm_entity.data.joint_pos[env_ids],
         arm_entity.data.joint_names,
+        arm_name=arm_name,
     )
     return at_rest.reshape(num_envs, 1)
+
+
+_WAITING_POS_EEF_X_THRESHOLD = 0.20
+
+
+def arm_at_waiting_pos(
+    env: ManagerBasedEnv,
+    arm: str | SceneEntityCfg,
+    env_ids: Sequence[int] | None = None,
+) -> torch.Tensor:
+    """Return whether the arm EEF has retracted past the X threshold.
+
+    Left arm: eef_x < -0.20.  Right arm: eef_x > 0.20.
+    """
+    env_ids, num_envs = _resolve_env_ids(env, env_ids)
+    arm_name, _ = _get_scene_arm(env, arm)
+    eef_pos = _get_eef_world_position(env, arm_name, env_ids=env_ids)
+    eef_x = eef_pos[..., 0:1]  # (num_envs, 1)
+    normalized = str(arm_name).strip().lower()
+    if "left" in normalized:
+        return eef_x < -_WAITING_POS_EEF_X_THRESHOLD
+    return eef_x > _WAITING_POS_EEF_X_THRESHOLD
 
 
 def fold_success(
@@ -523,6 +992,38 @@ def keypoint_pair_distance(
     return torch.linalg.norm(pos_a - pos_b, dim=-1, keepdim=True)
 
 
+def prepare_for_grasp_left_middle(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_middle", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_middle(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_middle", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_lower", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_lower", env_ids=env_ids
+    )
+
+
 def grasp_left_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     threshold = _cfg_float(
         env,
@@ -545,36 +1046,78 @@ def grasp_right_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = Non
     )
 
 
-def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    threshold = _cfg_float(
+def _release_zone_signal(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None,
+    arm_name: str,
+) -> torch.Tensor:
+    """Compute ``(num_envs, 1)`` bool: ``arm_name`` EEF XY in the narrow release zone."""
+    _, num_envs = _resolve_env_ids(env, env_ids)
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    if semantic_points is None:
+        return _false_bool_column(env, num_envs)
+    eef_positions = {arm_name: _get_eef_world_position(env, arm_name, env_ids=env_ids)}
+    width_fraction = _cfg_float(
         env,
-        "subtask_middle_to_lower_threshold_m",
-        _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
+        "subtask_release_zone_width_fraction",
+        _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
     )
-    return (~gripper_closed(env, "left_arm", env_ids=env_ids)) & (
-        keypoint_pair_distance(
-            env,
-            "garment_left_middle",
-            "garment_left_lower",
-            env_ids=env_ids,
-        ) <= threshold
+    lower_fraction = _cfg_float(
+        env,
+        "subtask_release_zone_lower_fraction",
+        _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
     )
+    upper_fraction = getattr(env.cfg, "subtask_release_zone_upper_fraction", None)
+    in_zone = _compute_eef_in_release_zone(
+        env,
+        num_envs,
+        semantic_points,
+        eef_positions,
+        width_fraction=width_fraction,
+        lower_fraction=lower_fraction,
+        upper_fraction=upper_fraction,
+    )
+    return in_zone.get(arm_name, _false_bool_column(env, num_envs))
+
+
+def left_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    # New semantics: gripper still CLOSED (holding the middle keypoint) and
+    # the EEF has moved into the narrow drop zone derived from the 4 corner
+    # keypoints.  The release itself is handled by ``release_left_middle``.
+    return gripper_closed(env, "left_arm", env_ids=env_ids) & _release_zone_signal(env, env_ids, "left_arm")
 
 
 def right_middle_to_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
-    threshold = _cfg_float(
+    return gripper_closed(env, "right_arm", env_ids=env_ids) & _release_zone_signal(env, env_ids, "right_arm")
+
+
+def _release_middle_signal(
+    env: ManagerBasedEnv,
+    env_ids: Sequence[int] | None,
+    arm_name: str,
+    middle_keypoint: str,
+) -> torch.Tensor:
+    _, num_envs = _resolve_env_ids(env, env_ids)
+    threshold_z = _cfg_float(
         env,
-        "subtask_middle_to_lower_threshold_m",
-        _DEFAULT_MIDDLE_TO_LOWER_THRESHOLD_M,
+        "subtask_middle_to_lower_middle_keypoint_max_z_m",
+        _DEFAULT_MIDDLE_TO_LOWER_MIDDLE_KEYPOINT_MAX_Z_M,
     )
-    return (~gripper_closed(env, "right_arm", env_ids=env_ids)) & (
-        keypoint_pair_distance(
-            env,
-            "garment_right_middle",
-            "garment_right_lower",
-            env_ids=env_ids,
-        ) <= threshold
-    )
+    semantic_points = _get_semantic_keypoint_positions_world(env, env_ids=env_ids)
+    if semantic_points is None or middle_keypoint not in semantic_points:
+        return _false_bool_column(env, num_envs)
+    in_zone = _release_zone_signal(env, env_ids, arm_name)
+    gripper_open = ~gripper_closed(env, arm_name, env_ids=env_ids)
+    kp_z_below = semantic_points[middle_keypoint][..., 2:3] < threshold_z
+    return in_zone & gripper_open & kp_z_below
+
+
+def release_left_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return _release_middle_signal(env, env_ids, "left_arm", "garment_left_middle")
+
+
+def release_right_middle(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return _release_middle_signal(env, env_ids, "right_arm", "garment_right_middle")
 
 
 def grasp_left_lower(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
@@ -631,6 +1174,114 @@ def right_lower_to_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = N
     )
 
 
+# --- Pant-fold public signal wrappers ---------------------------------------
+# The bodies live in ``get_subtask_signal_observation_from_context``; these
+# thin wrappers exist so each signal has an entry in ``SUBTASK_SIGNAL_OBSERVATION_FNS``
+# and can be invoked directly by the mimic env's signal lookup.
+
+
+def prepare_for_grasp_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "prepare_for_grasp_left_upper", env_ids=env_ids)
+
+
+def prepare_for_grasp_left_on_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_left_on_right_upper", env_ids=env_ids
+    )
+
+
+def prepare_for_grasp_right_on_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "prepare_for_grasp_right_on_left_lower", env_ids=env_ids
+    )
+
+
+def grasp_left_upper(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_left_upper", env_ids=env_ids)
+
+
+def grasp_left_on_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_left_on_right_upper", env_ids=env_ids)
+
+
+def grasp_right_on_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "grasp_right_on_left_lower", env_ids=env_ids)
+
+
+def left_upper_to_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "left_upper_to_right_upper", env_ids=env_ids)
+
+
+def left_lower_to_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "left_lower_to_right_lower", env_ids=env_ids)
+
+
+def right_upper_to_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "right_upper_to_left_upper", env_ids=env_ids)
+
+
+def right_lower_to_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(env, "right_lower_to_left_lower", env_ids=env_ids)
+
+
+def release_left_upper_at_right_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_left_upper_at_right_upper", env_ids=env_ids
+    )
+
+
+def release_left_lower_at_right_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_left_lower_at_right_lower", env_ids=env_ids
+    )
+
+
+def release_right_upper_at_left_upper(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_right_upper_at_left_upper", env_ids=env_ids
+    )
+
+
+def release_right_lower_at_left_lower(
+    env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
+) -> torch.Tensor:
+    return get_subtask_signal_observation(
+        env, "release_right_lower_at_left_lower", env_ids=env_ids
+    )
+
+
+def left_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return arm_at_waiting_pos(env, "left_arm", env_ids=env_ids)
+
+
+def right_at_waiting_pos(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
+    return arm_at_waiting_pos(env, "right_arm", env_ids=env_ids)
+
+
 def left_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None) -> torch.Tensor:
     return fold_success(env, env_ids=env_ids) & arm_at_rest(env, "left_arm", env_ids=env_ids)
 
@@ -640,14 +1291,37 @@ def right_return_home(env: ManagerBasedEnv, env_ids: Sequence[int] | None = None
 
 
 SUBTASK_SIGNAL_OBSERVATION_FNS = {
+    "prepare_for_grasp_left_middle": prepare_for_grasp_left_middle,
+    "prepare_for_grasp_right_middle": prepare_for_grasp_right_middle,
     "grasp_left_middle": grasp_left_middle,
     "grasp_right_middle": grasp_right_middle,
     "left_middle_to_lower": left_middle_to_lower,
     "right_middle_to_lower": right_middle_to_lower,
+    "release_left_middle": release_left_middle,
+    "release_right_middle": release_right_middle,
+    "left_at_waiting_pos": left_at_waiting_pos,
+    "right_at_waiting_pos": right_at_waiting_pos,
+    "prepare_for_grasp_left_lower": prepare_for_grasp_left_lower,
+    "prepare_for_grasp_right_lower": prepare_for_grasp_right_lower,
     "grasp_left_lower": grasp_left_lower,
     "grasp_right_lower": grasp_right_lower,
     "left_lower_to_upper": left_lower_to_upper,
     "right_lower_to_upper": right_lower_to_upper,
+    # Pant-fold (lateral left->right) signals
+    "prepare_for_grasp_left_upper": prepare_for_grasp_left_upper,
+    "prepare_for_grasp_left_on_right_upper": prepare_for_grasp_left_on_right_upper,
+    "prepare_for_grasp_right_on_left_lower": prepare_for_grasp_right_on_left_lower,
+    "grasp_left_upper": grasp_left_upper,
+    "grasp_left_on_right_upper": grasp_left_on_right_upper,
+    "grasp_right_on_left_lower": grasp_right_on_left_lower,
+    "left_upper_to_right_upper": left_upper_to_right_upper,
+    "left_lower_to_right_lower": left_lower_to_right_lower,
+    "right_upper_to_left_upper": right_upper_to_left_upper,
+    "right_lower_to_left_lower": right_lower_to_left_lower,
+    "release_left_upper_at_right_upper": release_left_upper_at_right_upper,
+    "release_left_lower_at_right_lower": release_left_lower_at_right_lower,
+    "release_right_upper_at_left_upper": release_right_upper_at_left_upper,
+    "release_right_lower_at_left_lower": release_right_lower_at_left_lower,
     "left_return_home": left_return_home,
     "right_return_home": right_return_home,
 }
@@ -696,11 +1370,20 @@ __all__ = [
     "grasp_left_middle",
     "grasp_right_lower",
     "grasp_right_middle",
+    "prepare_for_grasp_left_lower",
+    "prepare_for_grasp_left_middle",
+    "prepare_for_grasp_right_lower",
+    "prepare_for_grasp_right_middle",
+    "arm_at_waiting_pos",
     "gripper_closed",
     "keypoint_pair_distance",
+    "left_at_waiting_pos",
     "left_lower_to_upper",
     "left_middle_to_lower",
     "left_return_home",
+    "release_left_middle",
+    "release_right_middle",
+    "right_at_waiting_pos",
     "right_lower_to_upper",
     "right_middle_to_lower",
     "right_return_home",
