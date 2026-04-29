@@ -37,13 +37,13 @@
     },
     "video": {
         "observation.images.top": {
-            "original_key": "observation.images.top_rgb"
+            "original_key": "observation.images.top"
         },
         "observation.images.left_wrist": {
-            "original_key": "observation.images.left_rgb"
+            "original_key": "observation.images.left_wrist"
         },
         "observation.images.right_wrist": {
-            "original_key": "observation.images.right_rgb"
+            "original_key": "observation.images.right_wrist"
         }
     },
     "annotation": {

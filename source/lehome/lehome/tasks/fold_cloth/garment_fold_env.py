@@ -1474,33 +1474,35 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
     # Subtask verification hook (used by MimicGen DataGenerator)
     # ------------------------------------------------------------------
 
-    # Only these subtasks carry information that, if missed, guarantees the
-    # final fold will fail.  Other subtasks (``*_at_waiting_pos``,
-    # ``*_lower_to_upper``, ``*_return_home``) either don't gate success
-    # (waiting / home) or are re-checked by the final success term
-    # (``*_lower_to_upper`` -> fold success).  Verifying them here would
-    # discard otherwise-recoverable episodes because, for example, a brief
-    # joint excursion leaves ``*_at_waiting_pos`` False at the exact moment
-    # the offset range elapses, yet the eventual fold still lands.
-    # Subtask numbering (prepare_for_grasp_* inserted before both grasps):
-    #   0 -> prepare_for_grasp_*_middle
-    #   1 -> grasp_*_middle
-    #   2 -> *_middle_to_lower        (carry, gripper still closed)
-    #   3 -> release_*_middle         (open, drop zone, middle kp low)
-    #   4 -> *_at_waiting_pos
-    #   5 -> prepare_for_grasp_*_lower
-    #   6 -> grasp_*_lower
-    #   7 -> *_lower_to_upper
-    #   8 -> *_return_home
+    # Only ``grasp_*`` subtasks are verified here. Other signals
+    # (``*_at_waiting_pos``, ``*_lower_to_upper``, ``*_return_home``,
+    # carries, releases) either don't gate success or are sensitive to
+    # DataGenerator's subtask_term_offset padding — they evaluate False at
+    # the verify moment on otherwise-recoverable trajectories because the
+    # arm has moved on, the gripper has re-opened/closed, or the keypoint
+    # geometry has drifted before the eventual fold lands. The grasps are
+    # stable end-of-window checkpoints and are enough to catch
+    # fundamentally broken rollouts; the rest is re-validated by the final
+    # fold-success check.
     #
-    # Verified subtasks: only the two grasps.  The other critical signals
-    # (carry, release) are sensitive to DataGenerator's subtask_term_offset
-    # padding — they evaluate False at the verify moment even on correct
-    # trajectories because the arm has usually moved on or the gripper has
-    # opened/closed again by then.  The grasps are stable end-of-window
-    # checkpoints and are enough to catch fundamentally broken rollouts;
-    # the rest is re-validated by the final fold-success check.
-    _VERIFIED_SUBTASK_INDICES: tuple[int, ...] = (1, 6)
+    # Indices are computed per-arm from ``cfg.subtask_configs`` rather than
+    # hardcoded, because asymmetric decompositions (e.g. pant_long's right
+    # arm: 0=prep, 1=grasp_lower, 2=carry, 3=release, 4=prep_stacked,
+    # 5=grasp_stacked, 6=lower_to_upper, 7=home) don't share the standard
+    # top/pant_short layout where the two grasps land at indices 1 and 6.
+    _VERIFIED_SUBTASK_SIGNAL_PREFIX: str = "grasp_"
+
+    def _verified_subtask_indices(self, arm_name: str) -> frozenset[int]:
+        """Return the indices of ``grasp_*`` subtasks for ``arm_name``."""
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(str(arm_name))
+        if not arm_cfgs:
+            return frozenset()
+        return frozenset(
+            i
+            for i, sc in enumerate(arm_cfgs)
+            if isinstance(getattr(sc, "subtask_term_signal", None), str)
+            and sc.subtask_term_signal.startswith(self._VERIFIED_SUBTASK_SIGNAL_PREFIX)
+        )
 
     def _fold_completion_subtask_index(self, arm_name: str) -> int | None:
         """Return the per-arm subtask index that gates final success checks.
@@ -1533,16 +1535,13 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         returning a non-empty string aborts the current trial with that string
         as the ``fail_reason`` written to the failed-episode dataset.
 
-        Only the subtasks in ``_VERIFIED_SUBTASK_INDICES`` are verified — by
-        default the two grasp subtasks (``grasp_*_middle``, ``grasp_*_lower``),
-        the pre-release transfer (``*_middle_to_lower``), and the release
-        itself (``release_*_middle``).  Failing any of these means the arm
-        either never picked up the cloth, never reached the drop zone, or
-        failed to actually detach the cloth in the zone — none of which the
-        fold can recover from.  Other subtasks (``*_at_waiting_pos``,
-        ``*_lower_to_upper``, ``*_return_home``) are left to the final
-        success term so we don't discard trials for transient joint-range
-        excursions that the episode recovers from.
+        Only the ``grasp_*`` subtasks (computed per-arm via
+        ``_verified_subtask_indices``) are verified. Failing a grasp means
+        the arm never picked up the cloth, which the fold cannot recover
+        from. Other subtasks (``*_at_waiting_pos``, ``*_lower_to_upper``,
+        carries, releases, ``*_return_home``) are left to the final
+        success term so we don't discard trials for transient excursions
+        that the episode recovers from.
 
         For the verified indices, the implementation reads the
         ``subtask_term_signal`` declared on the matching :class:`SubTaskConfig`
@@ -1561,7 +1560,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             subtask_index=int(subtask_index),
         )
 
-        if int(subtask_index) not in self._VERIFIED_SUBTASK_INDICES:
+        if int(subtask_index) not in self._verified_subtask_indices(arm_name):
             return None
 
         arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(arm_name)
