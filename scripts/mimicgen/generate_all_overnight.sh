@@ -28,36 +28,14 @@ garment_category() {
 
 # Ordered garment list drives execution order.
 GARMENTS=(
-    Top_Short_Seen_0
-    Top_Short_Seen_1
-    Top_Short_Seen_2
-    Pant_Short_Seen_0
-    Pant_Short_Seen_1
-    Pant_Short_Seen_2
-    Pant_Short_Seen_3
-    Pant_Short_Seen_4
-    Pant_Short_Seen_5
-    Pant_Short_Seen_6
-    Pant_Short_Seen_7
-    Pant_Short_Seen_8
-    Pant_Short_Seen_9
+    Pant_Long_Seen_0
+    Pant_Long_Seen_2
 )
 
 # Per-garment source teleop file (basename relative to $INPUT_DIR).
 declare -A GARMENT_INPUTS=(
-    [Top_Short_Seen_0]="Top_Short_Seen_0-HALTON_64.hdf5"
-    [Top_Short_Seen_1]="Top_Short_Seen_0-HALTON_64.hdf5"
-    [Top_Short_Seen_2]="Top_Short_Seen_0-HALTON_64.hdf5"
-    [Pant_Short_Seen_0]="Pant_Short_Seen_0-HALTON_64.hdf5"
-    [Pant_Short_Seen_1]="Pant_Short_Seen_0-HALTON_64.hdf5"
-    [Pant_Short_Seen_2]="Pant_Short_Seen_0-HALTON_64.hdf5"
-    [Pant_Short_Seen_3]="Pant_Short_Seen_3-HALTON_64.hdf5"
-    [Pant_Short_Seen_4]="Pant_Short_Seen_3-HALTON_64.hdf5"
-    [Pant_Short_Seen_5]="Pant_Short_Seen_3-HALTON_64.hdf5"
-    [Pant_Short_Seen_6]="Pant_Short_Seen_6-HALTON_64.hdf5"
-    [Pant_Short_Seen_7]="Pant_Short_Seen_6-HALTON_64.hdf5"
-    [Pant_Short_Seen_8]="Pant_Short_Seen_8-HALTON_64.hdf5"
-    [Pant_Short_Seen_9]="Pant_Short_Seen_8-HALTON_64.hdf5"
+    [Pant_Long_Seen_0]="Pant_Long_Seen_0-HALTON_64.hdf5"
+    [Pant_Long_Seen_2]="Pant_Long_Seen_0-HALTON_64.hdf5"
 )
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
