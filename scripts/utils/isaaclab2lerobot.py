@@ -498,6 +498,7 @@ def convert(
     output_root: Path,
     modality_json: Path | None,
     skip_failed: bool,
+    max_episodes: int | None = None,
 ) -> None:
     if output_root.exists() and any(output_root.iterdir()):
         raise FileExistsError(f"Output {output_root} exists and is non-empty — remove it first.")
@@ -512,6 +513,8 @@ def convert(
     for task_idx, task in enumerate(task_strings):
         n = sum(1 for _, t, _ in sources if t == task_idx)
         print(f"  [task_index={task_idx}] {n:3d} files — {task}")
+    if max_episodes is not None:
+        print(f"Limiting conversion to first {max_episodes} episode(s).")
 
     ep_idx = 0
     global_start = 0
@@ -526,8 +529,11 @@ def convert(
     SENTINEL = None
 
     def reader() -> None:
+        queued_episodes = 0
         try:
             for garment_key, task_idx, hdf5_path in sources:
+                if max_episodes is not None and queued_episodes >= max_episodes:
+                    return
                 print(f"\n=== [{garment_key}] {hdf5_path.name} ===")
                 try:
                     fh = h5py.File(hdf5_path, "r")
@@ -549,6 +555,9 @@ def convert(
                             continue
                         queue.put((task_idx, hdf5_path.name, demo_name,
                                    action, state, images, T))
+                        queued_episodes += 1
+                        if max_episodes is not None and queued_episodes >= max_episodes:
+                            return
                 finally:
                     fh.close()
         finally:
@@ -559,6 +568,8 @@ def convert(
 
     # Rough demo-count estimate for the progress bar (most MimicGen files emit ~64-100 demos).
     total_demos_estimate = len(sources) * 100
+    if max_episodes is not None:
+        total_demos_estimate = min(total_demos_estimate, max_episodes)
 
     with ThreadPoolExecutor(max_workers=len(CAM_KEYS), thread_name_prefix="nvenc") as cam_pool, \
          tqdm(total=total_demos_estimate, desc="Encoding episodes", unit="ep") as pbar:
@@ -687,6 +698,12 @@ def main():
         default="/workspace/IsaacTools/ROBOTICS-lehome-challenge/configs/gr00t/modality.json",
     )
     parser.add_argument("--skip_failed", action="store_true", help="Skip demos where attrs['success'] is False")
+    parser.add_argument(
+        "--max_episodes",
+        type=int,
+        default=None,
+        help="Convert at most this many valid episodes, useful for smoke tests (e.g. 1).",
+    )
     upload_group = parser.add_mutually_exclusive_group()
     upload_group.add_argument(
         "--upload_to_databricks",
@@ -715,12 +732,15 @@ def main():
         help="Path to the Databricks upload helper script.",
     )
     args = parser.parse_args()
+    if args.max_episodes is not None and args.max_episodes < 1:
+        parser.error("--max_episodes must be >= 1")
 
     output_root = Path(args.output_root)
     convert(
         output_root=output_root,
         modality_json=Path(args.modality_json) if args.modality_json else None,
         skip_failed=args.skip_failed,
+        max_episodes=args.max_episodes,
     )
     if args.upload_to_databricks:
         upload_dataset_to_databricks(
