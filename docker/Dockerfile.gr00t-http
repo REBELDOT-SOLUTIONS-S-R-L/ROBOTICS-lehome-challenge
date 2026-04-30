@@ -1,0 +1,91 @@
+# Single-image GR00T 1.7 policy server for the LeHome Challenge.
+#
+# Loads the trained checkpoint in-process and exposes the upstream
+# DockerPolicy HTTP contract (POST /reset, POST /infer) on $BRIDGE_HTTP_PORT.
+#
+# Build:
+#   docker build \
+#       --build-context model=/abs/path/to/checkpoint \
+#       --build-arg HF_TOKEN="$HF_TOKEN" \
+#       -f docker/Dockerfile.gr00t-http \
+#       -t lehome-gr00t:v1 .
+#
+# HF_TOKEN must have read access to the gated nvidia/Cosmos-Reason2-2B repo;
+# it is consumed at build time to pre-download the backbone so the runtime
+# image is fully offline. NOTE: the token is recorded in `docker history`
+# of the resulting image — do NOT push or share images built this way.
+# Each user should build with their own token.
+
+FROM nvidia/cuda:12.8.0-devel-ubuntu22.04
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG ISAAC_GROOT_REF=main
+ARG GR00T_EMBODIMENT_TAG=new_embodiment
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        git curl wget \
+        build-essential \
+        python3.10 python3.10-venv python3.10-dev python3-pip \
+        ffmpeg \
+        libegl1 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.10 1 \
+ && update-alternatives --install /usr/bin/python  python  /usr/bin/python3.10 1
+
+RUN python3 -m pip install --upgrade pip setuptools wheel \
+ && pip install uv==0.8.14
+
+RUN git clone --depth 1 --branch ${ISAAC_GROOT_REF} \
+        https://github.com/NVIDIA/Isaac-GR00T.git /workspace
+
+WORKDIR /workspace
+
+RUN python3 -m venv /workspace/.venv
+ENV PATH="/workspace/.venv/bin:$PATH"
+
+RUN --mount=type=cache,target=/root/.cache/uv \
+    uv sync --frozen --no-install-project
+
+RUN uv pip install -e .
+
+# Pre-bake the gated Cosmos-Reason2-2B backbone so the runtime image is offline.
+# HF_TOKEN is supplied via --build-arg and ends up in `docker history`; do not
+# distribute the resulting image.
+ARG HF_TOKEN
+ENV HF_HOME=/opt/hf_cache
+RUN test -n "${HF_TOKEN}" || (echo 'ERROR: HF_TOKEN build-arg is required' >&2; exit 1) \
+ && HUGGING_FACE_HUB_TOKEN="${HF_TOKEN}" \
+    huggingface-cli download nvidia/Cosmos-Reason2-2B \
+        --cache-dir /opt/hf_cache
+
+# Trained checkpoint baked at /model.
+COPY --from=model . /model
+
+# Bridge code.
+COPY scripts/gr00t_http_bridge.py /workspace/gr00t_http_bridge.py
+
+# GPU / rendering env.
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV EGL_VENDOR_LIBRARY="libEGL_nvidia.so.0"
+ENV LD_LIBRARY_PATH="/usr/lib/x86_64-linux-gnu:/usr/local/cuda/lib64"
+ENV MUJOCO_GL=egl
+ENV PYOPENGL_PLATFORM=egl
+
+# Server defaults.
+ENV GR00T_MODEL_PATH="/model"
+ENV GR00T_EMBODIMENT_TAG="${GR00T_EMBODIMENT_TAG}"
+ENV GR00T_DEVICE="cuda"
+ENV BRIDGE_HTTP_PORT="8080"
+ENV BRIDGE_TASK_DESCRIPTION="fold the garment"
+
+EXPOSE 8080
+
+COPY docker/gr00t_http_entrypoint.sh /gr00t_http_entrypoint.sh
+RUN chmod +x /gr00t_http_entrypoint.sh
+
+LABEL org.opencontainers.image.title="GR00T 1.7 HTTP policy server (bi-SO101)" \
+      org.opencontainers.image.description="In-process GR00T policy server. Speaks the lehome DockerPolicy HTTP contract on :8080."
+
+ENTRYPOINT ["/gr00t_http_entrypoint.sh"]
