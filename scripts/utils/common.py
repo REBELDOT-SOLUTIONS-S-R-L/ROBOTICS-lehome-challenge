@@ -80,7 +80,7 @@ def close_app(simulation_app: SimulationApp) -> None:
 def stabilize_garment_after_reset(
     env: "DirectRLEnv",
     args: argparse.Namespace,
-    num_steps: int = 20,
+    num_steps: int = 60,
 ) -> None:
     """Stabilize garment after environment reset by running physics steps.
 

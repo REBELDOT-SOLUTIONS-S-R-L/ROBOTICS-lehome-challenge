@@ -73,3 +73,11 @@ tests/
 
 # Docker history
 .isaac-lab-docker-history
+
+#CLAUDE.md
+CLAUDE.md
+
+#CODEX
+.codex
+
+nohup.*
