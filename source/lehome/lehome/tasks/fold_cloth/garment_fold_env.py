@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import os
 import random
+from contextlib import contextmanager
 from pathlib import Path
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Dict
 
 import numpy as np
@@ -34,6 +35,7 @@ from lehome.utils.success_checker_chanllege import success_checker_garment_fold
 from lehome.utils.depth_to_pointcloud import generate_pointcloud_from_data
 from lehome.devices.action_process import preprocess_device_action
 from lehome.utils import RobotKinematics, compute_joints_from_ee_pose, mat_to_quat
+from lehome.assets.robots.lerobot import ACTION_NAMES, SO101_FOLLOWER_USD_JOINT_LIMLITS
 from lehome.utils.logger import get_logger
 
 from .checkpoint_mappings import (
@@ -68,6 +70,29 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         self._eef_body_idx_cache: dict[str, int] = {}
         self._ik_solver: RobotKinematics | None = None
         self._ik_solver_init_failed = False
+        self._last_ik_input_eef_pose: dict[str, torch.Tensor] | None = None
+
+        # IK telemetry: counters per arm, reset on each episode.  Used to
+        # surface silent Pinocchio IK failures (L-BFGS-B returns the closest
+        # reachable point without raising when the target is infeasible).
+        self._ik_stats: dict[str, dict[str, float]] = {}
+        self._ik_warn_cooldown: dict[str, int] = {}
+        # Position/rotation residual thresholds above which a solve is
+        # considered "bad" (reportable).  Calibrated for SO101 + cloth:
+        # 1 cm is enough to miss the particle-attachment radius,
+        # 15 deg is enough to misalign the gripper jaws with the cloth ridge.
+        self._ik_pos_warn_m = 0.01
+        self._ik_rot_warn_rad = float(np.deg2rad(15.0))
+        # Hard-failure thresholds — treated as "unreachable" in logs.
+        self._ik_pos_fail_m = 0.03
+        self._ik_rot_fail_rad = float(np.deg2rad(30.0))
+
+        # Per-env tracking of which subtasks each arm has completed so far.
+        # Used to gate the (expensive) fold-success check to the final
+        # subtask window — see ``is_final_fold_complete``.  Populated by
+        # ``verify_subtask_completion`` every time a subtask trajectory
+        # finishes and cleared on episode reset.
+        self._completed_subtasks: dict[int, dict[str, set[int]]] = {}
 
         # Initialize garment loader and config
         self.garment_loader = ChallengeGarmentLoader(cfg.garment_cfg_base_path)
@@ -82,6 +107,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             self.garment_rng = np.random.RandomState(cfg.random_seed)
 
         super().__init__(cfg, render_mode, **kwargs)
+        self._disable_gripper_capsule_collisions()
         self._filter_inter_arm_collisions()
 
         # Create garment object AFTER super().__init__() which sets up the scene.
@@ -255,6 +281,51 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                 if target_sdf_path not in existing_targets:
                     rel.AddTarget(target_sdf_path)
 
+    def _disable_gripper_capsule_collisions(self) -> None:
+        """Disable collisions on capsule prims used only as gripper/jaw visuals."""
+        stage = self.scene.stage
+        robot_root_paths = (
+            "/World/Robot/Left_Robot",
+            "/World/Robot/Right_Robot",
+        )
+        disabled_paths: list[str] = []
+
+        for root_path in robot_root_paths:
+            root_prim = stage.GetPrimAtPath(root_path)
+            if not root_prim.IsValid():
+                logger.warning(
+                    "[Collision Filter] Robot root prim not found while disabling gripper capsules: %s",
+                    root_path,
+                )
+                continue
+
+            stack = [root_prim]
+            while stack:
+                prim = stack.pop()
+                prim_path = prim.GetPath().pathString
+                normalized_path = prim_path.lower()
+                if (
+                    prim.GetTypeName() == "Capsule"
+                    and ("gripper" in normalized_path or "jaw" in normalized_path)
+                ):
+                    collision_api = UsdPhysics.CollisionAPI.Apply(prim)
+                    collision_enabled_attr = collision_api.GetCollisionEnabledAttr()
+                    if not collision_enabled_attr.IsValid():
+                        collision_enabled_attr = collision_api.CreateCollisionEnabledAttr()
+                    collision_enabled_attr.Set(False)
+                    disabled_paths.append(prim_path)
+                stack.extend(reversed(list(prim.GetChildren())))
+
+        if disabled_paths:
+            logger.info(
+                "[Collision Filter] Disabled collisions on %d gripper/jaw capsule prims.",
+                len(disabled_paths),
+            )
+        else:
+            logger.warning(
+                "[Collision Filter] No gripper/jaw capsule prims were found to disable collisions."
+            )
+
     def _filter_inter_arm_collisions(self) -> None:
         """Disable collisions between left and right robot rigid bodies."""
         left_root_path = "/World/Robot/Left_Robot"
@@ -282,6 +353,12 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
     def _reset_idx(self, env_ids: Sequence[int] | None):
         """Reset environments — resets arms to default and resets garment."""
+        # Flush IK telemetry from the previous episode before super() wipes state.
+        self._flush_ik_stats()
+
+        # Reset per-env subtask-completion tracking for the success-check gate.
+        self._clear_completed_subtasks(env_ids)
+
         super()._reset_idx(env_ids)
 
         # Reset cached reward
@@ -296,6 +373,105 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             self._randomize_table038_texture()
         if hasattr(self, "light_cfg") and self.light_cfg.get("enable", False):
             self._randomize_light()
+
+    # ------------------------------------------------------------------
+    # IK telemetry helpers
+    # ------------------------------------------------------------------
+
+    def _ik_stats_entry(self, arm_name: str) -> dict[str, float]:
+        """Lazily create the per-arm IK stats accumulator."""
+        entry = self._ik_stats.get(arm_name)
+        if entry is None:
+            entry = {
+                "n_calls": 0,
+                "n_warn": 0,        # residual > warn thresholds
+                "n_fail": 0,        # residual > fail thresholds (unreachable)
+                "n_hit_bound": 0,   # solved joints pinned to a URDF bound
+                "n_no_solve": 0,    # compute_joints_from_ee_pose returned None
+                "pos_res_sum": 0.0,
+                "pos_res_max": 0.0,
+                "rot_res_sum": 0.0,
+                "rot_res_max": 0.0,
+            }
+            self._ik_stats[arm_name] = entry
+        return entry
+
+    def _record_ik_diagnostics(self, arm_name: str, diag: dict | None) -> None:
+        """Update per-arm IK counters and emit rate-limited warnings."""
+        if diag is None:
+            entry = self._ik_stats_entry(arm_name)
+            entry["n_calls"] += 1
+            entry["n_no_solve"] += 1
+            # Warn once per cooldown window — IK code-path exceptions are
+            # always noteworthy, unlike routine residual spikes.
+            cooldown = self._ik_warn_cooldown.get(arm_name, 0)
+            if cooldown <= 0:
+                logger.warning(f"[IK][{arm_name}] compute_joints_from_ee_pose returned None (exception path)")
+                self._ik_warn_cooldown[arm_name] = 90  # ~1 s @ 90 Hz
+            else:
+                self._ik_warn_cooldown[arm_name] = cooldown - 1
+            return
+
+        entry = self._ik_stats_entry(arm_name)
+        entry["n_calls"] += 1
+        pos_res = float(diag.get("pos_residual_m", 0.0))
+        rot_res = float(diag.get("rot_residual_rad", 0.0))
+        if not np.isfinite(pos_res):
+            pos_res = 0.0
+        if not np.isfinite(rot_res):
+            rot_res = 0.0
+
+        entry["pos_res_sum"] += pos_res
+        entry["rot_res_sum"] += rot_res
+        if pos_res > entry["pos_res_max"]:
+            entry["pos_res_max"] = pos_res
+        if rot_res > entry["rot_res_max"]:
+            entry["rot_res_max"] = rot_res
+
+        if bool(diag.get("hit_bound", False)):
+            entry["n_hit_bound"] += 1
+
+        is_warn = (pos_res > self._ik_pos_warn_m) or (rot_res > self._ik_rot_warn_rad)
+        is_fail = (pos_res > self._ik_pos_fail_m) or (rot_res > self._ik_rot_fail_rad)
+        if is_fail:
+            entry["n_fail"] += 1
+        elif is_warn:
+            entry["n_warn"] += 1
+
+        if is_fail:
+            cooldown = self._ik_warn_cooldown.get(arm_name, 0)
+            if cooldown <= 0:
+                logger.warning(
+                    f"[IK][{arm_name}] unreachable target: "
+                    f"pos_residual={pos_res * 1000:.1f} mm  "
+                    f"rot_residual={np.degrees(rot_res):.1f} deg  "
+                    f"cost={float(diag.get('cost', 0.0)):.4g}  "
+                    f"hit_bound={bool(diag.get('hit_bound', False))}"
+                )
+                self._ik_warn_cooldown[arm_name] = 90  # ~1 s @ 90 Hz
+            else:
+                self._ik_warn_cooldown[arm_name] = cooldown - 1
+
+    def _flush_ik_stats(self) -> None:
+        """Emit a per-arm summary of IK health for the episode that just ended."""
+        if not self._ik_stats:
+            return
+        for arm_name, entry in self._ik_stats.items():
+            n = int(entry.get("n_calls", 0))
+            if n <= 0:
+                continue
+            pos_mean = entry["pos_res_sum"] / n
+            rot_mean = entry["rot_res_sum"] / n
+            logger.info(
+                f"[IK][{arm_name}][episode end] "
+                f"n={n}  "
+                f"warn={int(entry['n_warn'])}  fail={int(entry['n_fail'])}  "
+                f"bound_hits={int(entry['n_hit_bound'])}  no_solve={int(entry['n_no_solve'])}  "
+                f"pos_res mean={pos_mean * 1000:.2f} mm max={entry['pos_res_max'] * 1000:.2f} mm  "
+                f"rot_res mean={np.degrees(rot_mean):.2f} deg max={np.degrees(entry['rot_res_max']):.2f} deg"
+            )
+        self._ik_stats.clear()
+        self._ik_warn_cooldown.clear()
 
     # ------------------------------------------------------------------
     # Observations (for compatibility with direct env record/replay)
@@ -736,6 +912,27 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             pass
         return False
 
+    def _use_pinocchio_generation(self) -> bool:
+        """Return True when generation should force the 12D Pinocchio path."""
+        return bool(getattr(self.cfg, "force_pinocchio_generation", False))
+
+    @staticmethod
+    def _sim_joints_to_pinocchio_convention(joint_pos: np.ndarray) -> np.ndarray:
+        """Convert Isaac joint positions to the SO101 URDF convention.
+
+        The so101_new_calib URDF and the Isaac USD share the same joint
+        conventions, so no offset is needed — this is an identity copy.
+        """
+        return np.asarray(joint_pos, dtype=np.float64).copy()
+
+    @staticmethod
+    def _pinocchio_joints_to_sim_convention(joint_pos: np.ndarray) -> np.ndarray:
+        """Convert SO101 URDF joint positions back to Isaac joint convention.
+
+        Identity copy — see ``_sim_joints_to_pinocchio_convention``.
+        """
+        return np.asarray(joint_pos, dtype=np.float64).copy()
+
     def _get_arm_world_base_transform_np(self, arm_name: str, env_i: int) -> np.ndarray:
         """Get world<-base transform for one arm and env as a 4x4 matrix."""
         arm = self.scene[arm_name]
@@ -758,6 +955,167 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
         T_world_base = self._get_arm_world_base_transform_np(arm_name, env_i)
         return T_world_base @ T_base_pose
 
+    def _ensure_ik_input_eef_pose_cache(self) -> dict[str, torch.Tensor]:
+        """Allocate the cached base-frame IK input pose buffer on first use."""
+        if self._last_ik_input_eef_pose is None:
+            identity_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(self.num_envs, 1, 1)
+            self._last_ik_input_eef_pose = {
+                "left_arm": identity_pose.clone(),
+                "right_arm": identity_pose.clone(),
+            }
+        return self._last_ik_input_eef_pose
+
+    def _cache_ik_input_eef_pose(self, arm_name: str, env_i: int, T_base_pose: torch.Tensor | np.ndarray) -> None:
+        """Cache the exact base-frame pose that is sent into IK / native IK actions."""
+        cache = self._ensure_ik_input_eef_pose_cache()
+        pose = torch.as_tensor(T_base_pose, device=self.device, dtype=torch.float32)
+        if pose.shape != (4, 4):
+            raise ValueError(f"Expected IK input pose with shape (4, 4), got {tuple(pose.shape)}")
+        cache[arm_name][env_i] = pose
+
+    def get_last_ik_input_eef_pose(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Return the last cached per-arm base-frame IK input pose."""
+        if self._last_ik_input_eef_pose is None:
+            return None
+        env_ids, _ = self._resolve_env_ids(env_ids)
+        return {
+            arm_name: pose[env_ids].clone()
+            for arm_name, pose in self._last_ik_input_eef_pose.items()
+        }
+
+    def get_last_ik_input_eef_pose_world(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> dict[str, torch.Tensor] | None:
+        """Return the last cached per-arm IK input pose in world frame."""
+        base_pose_dict = self.get_last_ik_input_eef_pose(env_ids=env_ids)
+        if base_pose_dict is None:
+            return None
+
+        env_ids_resolved, num_envs = self._resolve_env_ids(env_ids)
+        if isinstance(env_ids_resolved, slice):
+            env_index_list = list(range(self.num_envs))[env_ids_resolved]
+        else:
+            env_index_list = [int(idx) for idx in env_ids_resolved]
+
+        world_pose_dict: dict[str, torch.Tensor] = {}
+        for arm_name, base_pose in base_pose_dict.items():
+            world_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            for local_i, env_i in enumerate(env_index_list):
+                T_world_pose = self._base_pose_to_world_pose_np(
+                    arm_name,
+                    env_i,
+                    base_pose[local_i].detach().cpu().numpy(),
+                )
+                world_pose[local_i] = torch.as_tensor(T_world_pose, device=self.device, dtype=torch.float32)
+            world_pose_dict[arm_name] = world_pose
+        return world_pose_dict
+
+    def get_generation_export_actions(
+        self,
+        env_ids: Sequence[int] | None = None,
+    ) -> torch.Tensor | None:
+        """Return the action tensor that should be exported into generated HDF5."""
+        if not hasattr(self, "action_manager") or not hasattr(self.action_manager, "action"):
+            return None
+
+        runtime_action = self.action_manager.action
+        if runtime_action.ndim == 1:
+            runtime_action = runtime_action.unsqueeze(0)
+
+        env_ids_resolved, num_envs = self._resolve_env_ids(env_ids)
+        runtime_action = runtime_action[env_ids_resolved]
+        if int(runtime_action.shape[-1]) == 16:
+            return runtime_action.clone()
+        if int(runtime_action.shape[-1]) != 12:
+            return None
+
+        base_pose_dict = self.get_last_ik_input_eef_pose(env_ids=env_ids)
+        if base_pose_dict is None:
+            base_pose_dict = {}
+            target_pose_world = self.action_to_target_eef_pose(runtime_action)
+            if isinstance(env_ids_resolved, slice):
+                env_index_list = list(range(self.num_envs))[env_ids_resolved]
+            else:
+                env_index_list = [int(idx) for idx in env_ids_resolved]
+            for arm_name, world_pose in target_pose_world.items():
+                base_pose = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+                for local_i, env_i in enumerate(env_index_list):
+                    T_base_pose = self._world_pose_to_base_pose_np(
+                        arm_name,
+                        env_i,
+                        world_pose[local_i].detach().cpu().numpy(),
+                    )
+                    base_pose[local_i] = torch.as_tensor(T_base_pose, device=self.device, dtype=torch.float32)
+                base_pose_dict[arm_name] = base_pose
+
+        export_action = torch.zeros((num_envs, 16), device=self.device, dtype=torch.float32)
+        gripper_action = self.actions_to_gripper_actions(runtime_action)
+        for arm_name, action_col_offset in (("left_arm", 0), ("right_arm", 8)):
+            base_pose = base_pose_dict[arm_name]
+            export_action[:, action_col_offset : action_col_offset + 3] = base_pose[:, :3, 3]
+            export_action[:, action_col_offset + 3 : action_col_offset + 7] = PoseUtils.quat_from_matrix(
+                base_pose[:, :3, :3]
+            )
+            export_action[:, action_col_offset + 7 : action_col_offset + 8] = gripper_action[arm_name]
+        return export_action.clone()
+
+    def action_to_ik_input_eef_pose(self, action: torch.Tensor) -> dict[str, torch.Tensor] | None:
+        """Decode native 16D IK actions into per-arm base-frame 4x4 poses."""
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        num_envs = int(action.shape[0])
+        if int(action.shape[-1]) != 16:
+            return None
+
+        def _decode_arm(action_col_offset: int) -> torch.Tensor:
+            decoded = torch.eye(4, device=self.device, dtype=torch.float32).unsqueeze(0).repeat(num_envs, 1, 1)
+            for i in range(num_envs):
+                pos_base = action[i, action_col_offset : action_col_offset + 3]
+                quat_base_wxyz = action[i, action_col_offset + 3 : action_col_offset + 7]
+                decoded[i, :3, 3] = pos_base
+                decoded[i, :3, :3] = PoseUtils.matrix_from_quat(quat_base_wxyz.unsqueeze(0))[0]
+            return decoded
+
+        return {
+            "left_arm": _decode_arm(0),
+            "right_arm": _decode_arm(8),
+        }
+
+    def action_to_ik_input_joint_pos(self, action: torch.Tensor) -> dict[str, torch.Tensor] | None:
+        """Return per-arm joint targets sent to the robot for both action contracts."""
+        if action.ndim == 1:
+            action = action.unsqueeze(0)
+        num_envs = int(action.shape[0])
+        action_dim = int(action.shape[-1])
+        if action_dim == 12:
+            return {
+                "left_arm": action[:, :6].clone(),
+                "right_arm": action[:, 6:12].clone(),
+            }
+        if action_dim != 16:
+            return None
+
+        try:
+            left_arm_term = self.action_manager.get_term("left_arm_action")
+            right_arm_term = self.action_manager.get_term("right_arm_action")
+            left_gripper_term = self.action_manager.get_term("left_gripper_action")
+            right_gripper_term = self.action_manager.get_term("right_gripper_action")
+            left_joint_targets = left_arm_term.compute_joint_position_target()[:num_envs]
+            right_joint_targets = right_arm_term.compute_joint_position_target()[:num_envs]
+            left_gripper = left_gripper_term.processed_actions[:num_envs]
+            right_gripper = right_gripper_term.processed_actions[:num_envs]
+        except Exception:
+            return None
+
+        return {
+            "left_arm": torch.cat((left_joint_targets, left_gripper), dim=-1).clone(),
+            "right_arm": torch.cat((right_joint_targets, right_gripper), dim=-1).clone(),
+        }
+
     def _compute_target_pose_from_joint_targets(self, arm_name: str, joint_targets: torch.Tensor) -> torch.Tensor:
         if not self._init_ik_solver_if_needed() or self._ik_solver is None:
             return self.get_robot_eef_pose(arm_name)
@@ -768,6 +1126,7 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
         for i in range(num_envs):
             joints_np = joint_targets[i].detach().cpu().numpy()
+            joints_np = self._sim_joints_to_pinocchio_convention(joints_np)
             # FK helper expects full 6D joint vector and returns [pos(xyz), quat(xyzw), gripper].
             ee_pose_base = np.asarray(self._ik_solver.forward_kinematics(np.rad2deg(joints_np)))
             pos_base = ee_pose_base[:3, 3]
@@ -886,6 +1245,11 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
                         quat = pose_action[3:7]
                         pose_action[3:7] = quat / torch.linalg.norm(quat).clamp_min(1e-12)
 
+                    T_base_action = torch.eye(4, device=self.device, dtype=torch.float32)
+                    T_base_action[:3, 3] = pose_action[:3]
+                    T_base_action[:3, :3] = PoseUtils.matrix_from_quat(pose_action[3:7].unsqueeze(0))[0]
+                    self._cache_ik_input_eef_pose(arm_name, env_i, T_base_action)
+
                     action[i, action_col_offset : action_col_offset + 7] = pose_action
                     action[i, action_col_offset + 7] = grip_val
 
@@ -935,23 +1299,32 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
 
             for i in range(num_envs):
                 env_i = env_id if num_envs == 1 else min(i, self.num_envs - 1)
-                current_joints = arm.data.joint_pos[env_i].detach().cpu().numpy()
+                current_joints_sim = arm.data.joint_pos[env_i].detach().cpu().numpy()
+                current_joints = self._sim_joints_to_pinocchio_convention(current_joints_sim)
                 T_world_target = target_pose[i].detach().cpu().numpy()
                 T_base_target = self._world_pose_to_base_pose_np(arm_name, env_i, T_world_target)
+                self._cache_ik_input_eef_pose(arm_name, env_i, T_base_target)
                 quat_base_xyzw = mat_to_quat(T_base_target[:3, :3])
                 gripper_val = float(gripper[i].item()) if gripper is not None else float(current_joints[5])
                 ee_pose = np.concatenate([T_base_target[:3, 3], quat_base_xyzw, [gripper_val]], axis=0)
 
-                joint_targets = compute_joints_from_ee_pose(
+                joint_targets, ik_diag = compute_joints_from_ee_pose(
                     self._ik_solver,
                     current_joints=current_joints,
                     ee_pose=ee_pose,
                     state_unit="rad",
                     orientation_weight=ik_orientation_weight,
+                    return_diagnostics=True,
                 )
+                self._record_ik_diagnostics(arm_name, ik_diag if joint_targets is not None else None)
                 if joint_targets is None:
                     joint_targets = current_joints.copy()
                     joint_targets[5] = gripper_val
+                joint_targets = self._pinocchio_joints_to_sim_convention(joint_targets)
+                # Clamp to USD joint limits to prevent physics instability at hard stops
+                for j, name in enumerate(ACTION_NAMES[:6]):
+                    lo_deg, hi_deg = SO101_FOLLOWER_USD_JOINT_LIMLITS[name]
+                    joint_targets[j] = np.clip(joint_targets[j], np.radians(lo_deg), np.radians(hi_deg))
                 action[i, action_col_offset:action_col_offset + 6] = torch.as_tensor(
                     joint_targets[:6], device=self.device, dtype=torch.float32
                 )
@@ -1097,14 +1470,334 @@ class GarmentFoldEnv(ManagerBasedRLMimicEnv):
             for signal_name, signal in signal_map.items()
         }
 
+    # ------------------------------------------------------------------
+    # Subtask verification hook (used by MimicGen DataGenerator)
+    # ------------------------------------------------------------------
+
+    # Only ``grasp_*`` subtasks are verified here. Other signals
+    # (``*_at_waiting_pos``, ``*_lower_to_upper``, ``*_return_home``,
+    # carries, releases) either don't gate success or are sensitive to
+    # DataGenerator's subtask_term_offset padding — they evaluate False at
+    # the verify moment on otherwise-recoverable trajectories because the
+    # arm has moved on, the gripper has re-opened/closed, or the keypoint
+    # geometry has drifted before the eventual fold lands. The grasps are
+    # stable end-of-window checkpoints and are enough to catch
+    # fundamentally broken rollouts; the rest is re-validated by the final
+    # fold-success check.
+    #
+    # Indices are computed per-arm from ``cfg.subtask_configs`` rather than
+    # hardcoded, because asymmetric decompositions (e.g. pant_long's right
+    # arm: 0=prep, 1=grasp_lower, 2=carry, 3=release, 4=prep_stacked,
+    # 5=grasp_stacked, 6=lower_to_upper, 7=home) don't share the standard
+    # top/pant_short layout where the two grasps land at indices 1 and 6.
+    _VERIFIED_SUBTASK_SIGNAL_PREFIX: str = "grasp_"
+
+    def _verified_subtask_indices(self, arm_name: str) -> frozenset[int]:
+        """Return the indices of ``grasp_*`` subtasks for ``arm_name``."""
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(str(arm_name))
+        if not arm_cfgs:
+            return frozenset()
+        return frozenset(
+            i
+            for i, sc in enumerate(arm_cfgs)
+            if isinstance(getattr(sc, "subtask_term_signal", None), str)
+            and sc.subtask_term_signal.startswith(self._VERIFIED_SUBTASK_SIGNAL_PREFIX)
+        )
+
+    def _fold_completion_subtask_index(self, arm_name: str) -> int | None:
+        """Return the per-arm subtask index that gates final success checks.
+
+        Most garments expose a ``*_lower_to_upper`` subtask, which is the
+        first point where the final geometry check becomes meaningful.
+        Some asymmetric decompositions do not; in that case we fall back to
+        the arm's last configured subtask.
+        """
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(str(arm_name))
+        if not arm_cfgs:
+            return None
+        for index in range(len(arm_cfgs) - 1, -1, -1):
+            signal_name = getattr(arm_cfgs[index], "subtask_term_signal", None)
+            if isinstance(signal_name, str) and signal_name.endswith("_lower_to_upper"):
+                return int(index)
+        return int(len(arm_cfgs) - 1)
+
+    def verify_subtask_completion(
+        self,
+        *,
+        arm_name: str,
+        subtask_index: int,
+        env_id: int,
+    ) -> str | None:
+        """Check whether a just-finished subtask achieved its semantic goal.
+
+        The MimicGen data generator calls this after a subtask trajectory has
+        fully run. Returning ``None`` means "ok, proceed to the next subtask";
+        returning a non-empty string aborts the current trial with that string
+        as the ``fail_reason`` written to the failed-episode dataset.
+
+        Only the ``grasp_*`` subtasks (computed per-arm via
+        ``_verified_subtask_indices``) are verified. Failing a grasp means
+        the arm never picked up the cloth, which the fold cannot recover
+        from. Other subtasks (``*_at_waiting_pos``, ``*_lower_to_upper``,
+        carries, releases, ``*_return_home``) are left to the final
+        success term so we don't discard trials for transient excursions
+        that the episode recovers from.
+
+        For the verified indices, the implementation reads the
+        ``subtask_term_signal`` declared on the matching :class:`SubTaskConfig`
+        and fails the trial when the signal is not True for ``env_id`` at
+        trajectory end.
+
+        Subclasses may override with richer checks (e.g. explicit EEF-to-
+        keypoint distance, contact flags, per-arm joint tolerances).
+        """
+        # Bookkeeping runs for every subtask completion, even when the
+        # signal check is skipped — it feeds ``is_final_fold_complete``
+        # so the generation success term only fires after the fold.
+        self._mark_subtask_completed(
+            env_id=int(env_id),
+            arm_name=arm_name,
+            subtask_index=int(subtask_index),
+        )
+
+        if int(subtask_index) not in self._verified_subtask_indices(arm_name):
+            return None
+
+        arm_cfgs = getattr(self.cfg, "subtask_configs", {}).get(arm_name)
+        if not arm_cfgs or subtask_index < 0 or subtask_index >= len(arm_cfgs):
+            return None
+        signal_name = getattr(arm_cfgs[subtask_index], "subtask_term_signal", None)
+        if not signal_name:
+            return None
+
+        env_id_tensor = torch.tensor([int(env_id)], dtype=torch.int64, device=self.device)
+        try:
+            with self._verify_subtask_threshold_overrides():
+                signals = self.get_subtask_term_signals(env_ids=env_id_tensor)
+        except Exception as exc:
+            logger.debug(
+                "verify_subtask_completion: signal eval failed for %s[%d]: %s",
+                arm_name,
+                int(subtask_index),
+                exc,
+            )
+            return None
+
+        tensor = signals.get(signal_name)
+        if tensor is None:
+            return None
+        try:
+            value = float(tensor.reshape(-1)[0].item())
+        except Exception:
+            return None
+        if value > 0.5:
+            return None
+        return (
+            f"subtask_term_signal '{signal_name}' was False at subtask "
+            f"{subtask_index} completion ({arm_name})"
+        )
+
+    # Map of cfg attributes that ``verify_subtask_completion`` may loosen.
+    # Each entry points to the optional ``verify_*`` attribute whose value,
+    # when not None, temporarily overrides the strict online threshold.
+    _VERIFY_SUBTASK_THRESHOLD_ATTR_MAP: tuple[tuple[str, str], ...] = (
+        (
+            "subtask_grasp_eef_to_keypoint_threshold_m",
+            "verify_subtask_grasp_eef_to_keypoint_threshold_m",
+        ),
+        (
+            "subtask_release_zone_width_fraction",
+            "verify_subtask_release_zone_width_fraction",
+        ),
+        (
+            "subtask_release_zone_lower_fraction",
+            "verify_subtask_release_zone_lower_fraction",
+        ),
+        (
+            "subtask_release_zone_upper_fraction",
+            "verify_subtask_release_zone_upper_fraction",
+        ),
+    )
+
+    @contextmanager
+    def _verify_subtask_threshold_overrides(self):
+        """Temporarily swap strict online thresholds for looser verify values.
+
+        The subtask-termination signals are driven by a handful of cfg floats
+        (grasp radius, release-zone width/lower fractions).  During normal
+        online evaluation we want the tight thresholds that define clean
+        annotation boundaries; during MimicGen subtask verification we want
+        the grace-margin values so the end-of-window snapshot still evaluates
+        True after DataGenerator's offset padding.
+        """
+        previous: dict[str, Any] = {}
+        try:
+            for strict_attr, verify_attr in self._VERIFY_SUBTASK_THRESHOLD_ATTR_MAP:
+                override = getattr(self.cfg, verify_attr, None)
+                if override is None:
+                    continue
+                strict_value = getattr(self.cfg, strict_attr)
+                # If the strict knob is itself None (e.g. the upper-fraction
+                # mode is off for this garment type), don't enable it via the
+                # verify override — that would silently flip release-zone mode
+                # mid-episode.  Only widen knobs that are already active.
+                if strict_value is None:
+                    continue
+                previous[strict_attr] = strict_value
+                setattr(self.cfg, strict_attr, override)
+            yield
+        finally:
+            for strict_attr, original in previous.items():
+                setattr(self.cfg, strict_attr, original)
+
+    # ------------------------------------------------------------------
+    # Subtask-completion bookkeeping (drives the success-check gate)
+    # ------------------------------------------------------------------
+
+    def _mark_subtask_completed(
+        self,
+        *,
+        env_id: int,
+        arm_name: str,
+        subtask_index: int,
+    ) -> None:
+        """Record that ``arm_name`` has finished ``subtask_index`` for ``env_id``."""
+        per_env = self._completed_subtasks.setdefault(int(env_id), {})
+        per_arm = per_env.setdefault(str(arm_name), set())
+        per_arm.add(int(subtask_index))
+
+    def _clear_completed_subtasks(self, env_ids: Sequence[int] | None) -> None:
+        """Drop subtask-completion state for the given env ids (all if None)."""
+        if env_ids is None:
+            self._completed_subtasks.clear()
+            return
+        for eid in env_ids:
+            try:
+                self._completed_subtasks.pop(int(eid), None)
+            except (TypeError, ValueError):
+                continue
+
+    def is_final_fold_complete(self, env_id: int) -> bool:
+        """Return True when every configured arm has finished its fold step.
+
+        The MimicGen success term (``recording_style_success_tensor``) uses
+        this gate to skip the expensive garment-geometry checker until the
+        fold motion itself is done.  Before that point the cloth is mid-flight
+        and the success signal is meaningless; after that point, each step
+        inside ``*_return_home`` is a legitimate opportunity for the fold to
+        settle into a passing configuration.
+        """
+        completed = self._completed_subtasks.get(int(env_id))
+        if not completed:
+            return False
+        arm_names = getattr(self.cfg, "subtask_configs", {}).keys()
+        if not arm_names:
+            return False
+        for arm_name in arm_names:
+            target_index = self._fold_completion_subtask_index(str(arm_name))
+            if target_index is None:
+                return False
+            if target_index not in completed.get(str(arm_name), set()):
+                return False
+        return True
+
+    def record_failed_episode_minimal(
+        self,
+        *,
+        env_id: int,
+        source_demo_selections: Mapping[str, Sequence[int]] | None,
+        fail_reason: str,
+    ) -> None:
+        """Overwrite the current episode buffer with a minimal failed record.
+
+        Only the fields needed to re-try generation from the same initial
+        conditions are kept:
+
+        - ``initial_state/garment_initial_pose`` — garment pose at reset.
+        - ``source_demo_indices/<arm>`` — source demo indices actually
+          selected per arm, up to the failing subtask (inclusive).
+        - ``fail_reason`` — utf-8 byte encoding of the reason string.
+
+        All accumulated per-step observations, actions, and scene states from
+        the aborted trajectory are discarded. The episode is marked as
+        ``success=False`` and exported immediately via the recorder manager
+        (which routes failed rows to the failed-episode handler when the
+        ``EXPORT_SUCCEEDED_FAILED_IN_SEPARATE_FILES`` mode is active).
+        """
+        from isaaclab.utils.datasets import EpisodeData
+
+        recorder = getattr(self, "recorder_manager", None)
+        if recorder is None or not getattr(recorder, "active_terms", []):
+            return
+
+        minimal = EpisodeData()
+        minimal.env_id = int(env_id)
+        minimal.success = False
+
+        new_data: Dict[str, Any] = {}
+
+        garment_obj = getattr(self, "object", None)
+        garment_reset_pose = (
+            getattr(garment_obj, "reset_pose", None) if garment_obj is not None else None
+        )
+        if garment_reset_pose is not None:
+            # Match the normal-path shape (1, 7) written by DataGenerator so
+            # downstream readers don't have to special-case failed rows.
+            pose_tensor = torch.as_tensor(
+                garment_reset_pose, dtype=torch.float32, device=self.device,
+            ).detach().clone().reshape(-1).unsqueeze(0)
+            new_data["initial_state"] = {"garment_initial_pose": pose_tensor}
+
+        src_group: Dict[str, torch.Tensor] = {}
+        for arm_name, selections in (source_demo_selections or {}).items():
+            selections_list = [int(v) for v in selections] if selections else []
+            if not selections_list:
+                continue
+            # Match the normal-path shape (1, N) for consistency.
+            src_group[str(arm_name)] = torch.tensor(
+                [selections_list], dtype=torch.int64, device=self.device,
+            )
+        if src_group:
+            new_data["source_demo_indices"] = src_group
+
+        reason_str = str(fail_reason) if fail_reason else "unknown"
+        reason_bytes = reason_str.encode("utf-8")
+        if not reason_bytes:
+            reason_bytes = b"unknown"
+        new_data["fail_reason"] = torch.tensor(
+            list(reason_bytes), dtype=torch.uint8, device=self.device,
+        )
+
+        minimal.data = new_data
+
+        recorder._episodes[int(env_id)] = minimal
+        try:
+            recorder.export_episodes(env_ids=[int(env_id)])
+        except Exception as exc:
+            logger.error(
+                "record_failed_episode_minimal: export_episodes failed for env %d: %s",
+                int(env_id),
+                exc,
+            )
+
 
 class GarmentFoldMimicEnv(GarmentFoldEnv):
-    """Garment fold env variant that enables native mimic IK action contract."""
+    """Garment fold env variant that enables native mimic IK unless Pinocchio is forced."""
 
     def __init__(self, cfg: GarmentFoldEnvCfg, render_mode: str | None = None, **kwargs):
         task_type = str(getattr(cfg, "task_type", "bi-so101leader"))
-        mimic_task_type = task_type if task_type.startswith("mimic_") else f"mimic_{task_type}"
-        cfg.use_teleop_device(mimic_task_type)
+        base_task_type = task_type[len("mimic_"):] if task_type.startswith("mimic_") else task_type
+        if bool(getattr(cfg, "force_pinocchio_generation", False)):
+            cfg.use_teleop_device(base_task_type)
+        else:
+            mimic_task_type = task_type if task_type.startswith("mimic_") else f"mimic_{task_type}"
+            cfg.use_teleop_device(mimic_task_type)
         # Keep runtime task type for utility helpers that expect non-mimic labels.
-        cfg.task_type = task_type
+        cfg.task_type = base_task_type
+        # Resolve garment-type-specific subtask decomposition now that the
+        # script has finished populating ``cfg.garment_name``.  See
+        # :meth:`GarmentFoldMimicEnvCfg.configure_subtasks_from_garment`.
+        configure = getattr(cfg, "configure_subtasks_from_garment", None)
+        if callable(configure):
+            configure()
         super().__init__(cfg, render_mode=render_mode, **kwargs)

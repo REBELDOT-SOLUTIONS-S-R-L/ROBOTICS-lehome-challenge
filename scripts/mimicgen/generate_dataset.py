@@ -58,7 +58,7 @@ def build_parser() -> argparse.ArgumentParser:
     core_group.add_argument(
         "--garment_settle_steps",
         type=int,
-        default=20,
+        default=60,
         help=(
             "Number of post-reset hold-action steps used to let garment cloth settle before "
             "Mimic samples runtime object poses."
@@ -80,17 +80,43 @@ def build_parser() -> argparse.ArgumentParser:
     garment_group = parser.add_argument_group("garment and environment overrides")
     add_garment_override_arguments(garment_group)
 
+    pose_group = parser.add_argument_group("pose sequence")
+    pose_group.add_argument(
+        "--pose_sequence",
+        type=int,
+        default=None,
+        help=(
+            "Number of deterministic garment reset poses drawn from a Halton "
+            "low-discrepancy sequence over (pos_x, pos_y, rot_x, rot_y). "
+            "Each successful episode consumes one pose; sequence advances "
+            "only on success. Overrides --generation_num_trials. If omitted, "
+            "falls back to the env's default random garment reset."
+        ),
+    )
+    pose_group.add_argument(
+        "--pose_sequence_max_failures",
+        type=int,
+        default=3,
+        help=(
+            "Max consecutive failed attempts per Halton index before skipping "
+            "to the next pose. Set to 0 to retry forever."
+        ),
+    )
+
     runtime_group = parser.add_argument_group("runtime and debugging")
     runtime_group.add_argument(
         "--pause_subtask",
         action="store_true",
         help="Pause after every subtask during generation for debugging; only useful with rendering.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--enable_pinocchio",
         action="store_true",
         default=False,
-        help=argparse.SUPPRESS,
+        help=(
+            "Force Pinocchio pose-to-joint conversion during generation while preserving "
+            "16D ee-pose action export in the generated HDF5."
+        ),
     )
     parser.add_argument(
         "--pose_output_interval",
@@ -110,6 +136,17 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Write a pose-trace CSV alongside generation for offline debugging.",
+    )
+    runtime_group.add_argument(
+        "--save_failed",
+        action="store_true",
+        default=False,
+        help=(
+            "Save failed generated episodes with the full recorded trajectory "
+            "(observations, actions, states) — the pre-minimal-save behavior. "
+            "When omitted, failed episodes are collapsed to the minimal record "
+            "(initial_state/garment_initial_pose, source_demo_indices, fail_reason)."
+        ),
     )
     runtime_group.add_argument(
         "--pose_output_file",
@@ -217,9 +254,6 @@ def main(argv: list[str] | None = None) -> None:
             ),
             "--disable_object_pose_alignment": (
                 "`--disable_object_pose_alignment` is deprecated and kept only for compatibility."
-            ),
-            "--enable_pinocchio": (
-                "`--enable_pinocchio` is deprecated and kept only for compatibility."
             ),
             "--print_poses": "`--print_poses` is deprecated and no longer has any effect.",
         },

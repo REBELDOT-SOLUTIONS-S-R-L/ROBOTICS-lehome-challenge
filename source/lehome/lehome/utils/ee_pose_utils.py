@@ -354,15 +354,17 @@ def compute_joints_from_world_point_detailed(
 
 
 def compute_joints_from_ee_pose(
-    solver, 
-    current_joints: np.ndarray, 
-    ee_pose: np.ndarray, 
+    solver,
+    current_joints: np.ndarray,
+    ee_pose: np.ndarray,
     state_unit: str,
-    orientation_weight: float = 1.0
-) -> np.ndarray | None:
+    orientation_weight: float = 1.0,
+    joint_bounds_rad: list[tuple[float, float]] | None = None,
+    return_diagnostics: bool = False,
+):
     """
     Compute joint angles from end-effector pose via IK (inverse of compute_ee_pose_single_arm).
-    
+
     Args:
         solver: RobotKinematics instance
         current_joints: 6D current joint angles (as initial guess for IK)
@@ -371,43 +373,64 @@ def compute_joints_from_ee_pose(
         orientation_weight: Weight for orientation constraint (default: 1.0)
                            - 1.0: position and orientation equally important
                            - 0.01: position 100x more important (for position-only tasks)
-    
+        joint_bounds_rad: Optional per-joint (lower, upper) bounds in radians
+                         passed to the IK solver, overriding the URDF joint
+                         limits when provided.
+        return_diagnostics: When True, return ``(joints, diag)`` where
+            ``diag`` is the dict described in ``RobotKinematics.inverse_kinematics``
+            (or ``None`` if IK raised an exception before solving).
+
     Returns:
-        6D joint angles, or None if IK fails
+        If ``return_diagnostics`` is False (default): 6D joint angles, or
+        ``None`` if IK fails.
+
+        If ``return_diagnostics`` is True: tuple ``(joints_or_None, diag_or_None)``.
     """
     try:
         # Extract pose components
         pos = ee_pose[:3]
         quat = ee_pose[3:7]  # [qx, qy, qz, qw]
         gripper = ee_pose[7]
-        
+
         # Construct 4x4 transformation matrix
         T = np.eye(4)
         T[:3, :3] = quat_to_mat(quat)
         T[:3, 3] = pos
-        
+
         # Unit conversion for IK (solver expects degrees)
         if state_unit == "rad":
             current_deg = np.rad2deg(current_joints)
         else:
             current_deg = current_joints
-        
+
         # IK solving (first 5 joints)
-        ik_result_deg = solver.inverse_kinematics(
-            current_deg, T, position_weight=1.0, orientation_weight=orientation_weight
+        ik_out = solver.inverse_kinematics(
+            current_deg, T, position_weight=1.0, orientation_weight=orientation_weight,
+            joint_bounds_rad=joint_bounds_rad,
+            return_diagnostics=return_diagnostics,
         )
-        
+        if return_diagnostics:
+            ik_result_deg, diag = ik_out
+        else:
+            ik_result_deg = ik_out
+            diag = None
+
         # Convert back to original unit
         if state_unit == "rad":
             ik_joints = np.deg2rad(ik_result_deg)
         else:
             ik_joints = ik_result_deg
-        
+
         # Combine: first 5 from IK, gripper from ee_pose
         result = ik_joints.copy()
         result[5] = gripper
-        
-        return result[:6]
-        
+        result = result[:6]
+
+        if return_diagnostics:
+            return result, diag
+        return result
+
     except Exception:
+        if return_diagnostics:
+            return None, None
         return None

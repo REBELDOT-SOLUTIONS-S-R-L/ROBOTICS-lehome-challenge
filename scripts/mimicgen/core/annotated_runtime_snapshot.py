@@ -7,15 +7,19 @@ from typing import Any
 
 import torch
 
-from lehome.assets.robots.lerobot import SO101_FOLLOWER_REST_POSE_RANGE
+from lehome.assets.robots.lerobot import get_so101_rest_pose_range
 from lehome.tasks.fold_cloth.checkpoint_mappings import CHECKPOINT_LABELS
 from lehome.tasks.fold_cloth.mdp.observations import (
+    _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+    _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
     FoldClothSubtaskObservationContext,
+    _compute_eef_in_release_zone,
+    arm_at_waiting_pos as _arm_at_waiting_pos,
     fold_success as fold_success_observation,
 )
 
 _RETURN_HOME_SIGNALS = {"left_return_home", "right_return_home"}
-_REST_POSE_SPEC_CACHE: dict[tuple[str, ...], tuple[tuple[int, float, float], ...]] = {}
+_REST_POSE_SPEC_CACHE: dict[tuple[str, tuple[str, ...]], tuple[tuple[int, float, float], ...]] = {}
 
 
 @dataclass
@@ -68,14 +72,19 @@ def _normalize_optional_bool_column(
     return tensor[:1].reshape(1, 1)
 
 
-def _get_rest_pose_specs(joint_names: list[str]) -> tuple[tuple[int, float, float], ...]:
-    cache_key = tuple(joint_names)
+def _get_rest_pose_specs(
+    arm_name: str | None,
+    joint_names: list[str],
+) -> tuple[tuple[int, float, float], ...]:
+    normalized_arm_name = str(arm_name or "")
+    cache_key = (normalized_arm_name, tuple(joint_names))
     cached = _REST_POSE_SPEC_CACHE.get(cache_key)
     if cached is not None:
         return cached
+    rest_pose_range = get_so101_rest_pose_range(arm_name)
     specs = tuple(
         (int(joint_names.index(joint_name)), float(min_pos), float(max_pos))
-        for joint_name, (min_pos, max_pos) in SO101_FOLLOWER_REST_POSE_RANGE.items()
+        for joint_name, (min_pos, max_pos) in rest_pose_range.items()
     )
     _REST_POSE_SPEC_CACHE[cache_key] = specs
     return specs
@@ -84,10 +93,11 @@ def _get_rest_pose_specs(joint_names: list[str]) -> tuple[tuple[int, float, floa
 def _is_so101_at_rest_pose_fast(
     joint_pos: torch.Tensor,
     joint_names: list[str],
+    arm_name: str | None = None,
 ) -> torch.Tensor:
     joint_pos_deg = joint_pos[:, :].to(dtype=torch.float32) / torch.pi * 180.0
     is_reset = torch.ones((joint_pos_deg.shape[0], 1), dtype=torch.bool, device=joint_pos_deg.device)
-    for joint_idx, min_pos, max_pos in _get_rest_pose_specs(joint_names):
+    for joint_idx, min_pos, max_pos in _get_rest_pose_specs(arm_name, joint_names):
         joint_ok = torch.logical_and(joint_pos_deg[:, joint_idx : joint_idx + 1] > min_pos, joint_pos_deg[:, joint_idx : joint_idx + 1] < max_pos)
         is_reset = torch.logical_and(is_reset, joint_ok)
     return is_reset
@@ -125,6 +135,15 @@ def _extract_gripper_actions(reference_action: Any, device: torch.device | str) 
     }
 
 
+def _effective_gripper_closed(
+    actual_closed: torch.Tensor,
+    commanded_closed: torch.Tensor,
+) -> torch.Tensor:
+    # For annotation, an explicit open command should count as released even if
+    # the simulated gripper joint lags behind for a few frames.
+    return actual_closed & commanded_closed
+
+
 def capture_annotated_runtime_snapshot(
     env: Any,
     reference_action: torch.Tensor,
@@ -152,6 +171,7 @@ def capture_annotated_runtime_snapshot(
         name: torch.as_tensor(checkpoint_positions[idx], device=env.device, dtype=torch.float32).reshape(1, 3)
         for idx, name in enumerate(CHECKPOINT_LABELS)
     }
+    
     checkpoint_positions = torch.stack(
         [semantic_keypoints_world[name].reshape(3) for name in CHECKPOINT_LABELS],
         dim=0,
@@ -179,7 +199,7 @@ def capture_annotated_runtime_snapshot(
 
     joint_pos: dict[str, torch.Tensor] = {}
 
-    close_threshold = float(getattr(getattr(env, "cfg", None), "subtask_gripper_close_threshold", 0.5))
+    close_threshold = float(getattr(getattr(env, "cfg", None), "subtask_gripper_close_threshold", 0.20))
     gripper_closed_by_arm: dict[str, torch.Tensor] = {}
     arm_at_rest_by_arm: dict[str, torch.Tensor] = {}
     rest_pose_arm_names = set(rest_pose_arms)
@@ -187,18 +207,57 @@ def capture_annotated_runtime_snapshot(
         arm = env.scene[arm_name]
         joint_pos[arm_name] = _slice_joint_tensor(arm.data.joint_pos)
         gripper_joint_idx = _get_gripper_joint_index(arm)
-        gripper_closed_by_arm[arm_name] = (
+        actual_closed = (
             arm.data.joint_pos[:1, gripper_joint_idx : gripper_joint_idx + 1] < close_threshold
+        )
+        commanded_closed = (
+            gripper_actions.get(
+                arm_name,
+                torch.zeros((1, 1), device=env.device, dtype=torch.float32),
+            )
+            < close_threshold
+        )
+        gripper_closed_by_arm[arm_name] = _effective_gripper_closed(
+            actual_closed,
+            commanded_closed,
         )
         if arm_name in rest_pose_arm_names:
             arm_at_rest_by_arm[arm_name] = _is_so101_at_rest_pose_fast(
                 joint_pos[arm_name],
                 arm.data.joint_names,
+                arm_name=arm_name,
             )
 
     fold_success_value = None
     if include_fold_success:
         fold_success_value = fold_success_observation(env, env_ids=[0])
+
+    # Per-arm "EEF in narrow release zone" bool, computed from the 4 corner
+    # garment keypoints.  Needed by the ``*_middle_to_lower`` and
+    # ``release_*_middle`` signals; without this field they evaluate to False
+    # unconditionally because the hot-path snapshot bypasses
+    # ``build_subtask_observation_context``.
+    eef_in_release_zone_by_arm = _compute_eef_in_release_zone(
+        env,
+        num_envs=1,
+        semantic_points=semantic_keypoints_world,
+        eef_positions=eef_world_positions,
+        width_fraction=_cfg_float(
+            env,
+            "subtask_release_zone_width_fraction",
+            _DEFAULT_RELEASE_ZONE_WIDTH_FRACTION,
+        ),
+        lower_fraction=_cfg_float(
+            env,
+            "subtask_release_zone_lower_fraction",
+            _DEFAULT_RELEASE_ZONE_LOWER_FRACTION,
+        ),
+        # Top-short tops drop the middle keypoint near the collar, so the
+        # release zone must flip to the upper half.  Without this the
+        # ``*_middle_to_lower`` signals during annotation only fire when the
+        # EEF is dragged into the lower half — wrong target for short-sleeve.
+        upper_fraction=getattr(env.cfg, "subtask_release_zone_upper_fraction", None),
+    )
 
     observation_context = FoldClothSubtaskObservationContext(
         device=env.device,
@@ -207,6 +266,10 @@ def capture_annotated_runtime_snapshot(
         eef_world_positions=eef_world_positions,
         gripper_closed_by_arm=gripper_closed_by_arm,
         arm_at_rest_by_arm=arm_at_rest_by_arm,
+        arm_at_waiting_pos_by_arm={
+            arm_name: _arm_at_waiting_pos(env, arm_name, env_ids=[0])
+            for arm_name in ("left_arm", "right_arm")
+        },
         grasp_eef_to_keypoint_threshold_m=_cfg_float(
             env,
             "subtask_grasp_eef_to_keypoint_threshold_m",
@@ -217,11 +280,27 @@ def capture_annotated_runtime_snapshot(
             "subtask_middle_to_lower_threshold_m",
             0.10,
         ),
+        middle_to_lower_middle_keypoint_max_z_m=_cfg_float(
+            env,
+            "subtask_middle_to_lower_middle_keypoint_max_z_m",
+            0.53,
+        ),
         lower_to_upper_threshold_m=_cfg_float(
             env,
             "subtask_lower_to_upper_threshold_m",
             0.12,
         ),
+        prep_for_grasp_eef_z_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_eef_z_m",
+            0.53,
+        ),
+        prep_for_grasp_xy_threshold_m=_cfg_float(
+            env,
+            "subtask_prep_for_grasp_xy_threshold_m",
+            0.15,
+        ),
+        eef_in_release_zone_by_arm=eef_in_release_zone_by_arm,
         fold_success=_normalize_optional_bool_column(env.device, fold_success_value),
     )
 
@@ -250,6 +329,7 @@ def ensure_return_home_snapshot_fields(
         snapshot.observation_context.arm_at_rest_by_arm[arm_name] = _is_so101_at_rest_pose_fast(
             snapshot.joint_pos[arm_name],
             arm.data.joint_names,
+            arm_name=arm_name,
         )
     if include_fold_success and snapshot.observation_context.fold_success is None:
         snapshot.observation_context.fold_success = _normalize_optional_bool_column(

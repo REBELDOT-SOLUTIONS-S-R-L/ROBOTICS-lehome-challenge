@@ -41,6 +41,7 @@ from .env_setup import assign_env_garment_metadata
 from .env_setup import normalize_last_subtask_offsets_for_generation as _normalize_last_subtask_offsets_for_generation
 from .env_setup import resolve_env_garment_metadata
 from .env_setup import resolve_task_type as _resolve_task_type
+from .annotated_record_service import _build_pose_sequence
 from .generation_runtime import (
     env_loop_with_pose_output,
     recording_style_success_tensor,
@@ -73,6 +74,8 @@ DUAL_ARM_SETTLE_ACTION = np.concatenate(
     ]
 ).astype(np.float32)
 
+MIN_GENERATION_GARMENT_SETTLE_STEPS = 60
+
 
 class PreStepCameraObservationsRecorder(RecorderTerm):
     """Record camera observations into the generated HDF5 obs group."""
@@ -103,11 +106,34 @@ class PreStepCameraObservationsRecorder(RecorderTerm):
         return "obs", camera_obs
 
 
+class PreStepGenerationActionsRecorder(RecorderTerm):
+    """Record generated top-level actions, preserving 16D ee-pose export in Pinocchio mode."""
+
+    def record_pre_step(self):
+        env = self._env
+        export_actions = None
+        with contextlib.suppress(Exception):
+            if hasattr(env, "get_generation_export_actions"):
+                export_actions = env.get_generation_export_actions()
+        if export_actions is None:
+            export_actions = env.action_manager.action
+        if export_actions is None:
+            return None, None
+        return "actions", export_actions.clone()
+
+
 @configclass
 class PreStepCameraObservationsRecorderCfg(RecorderTermCfg):
     """Configuration for camera observation recording during generation export."""
 
     class_type: type[RecorderTerm] = PreStepCameraObservationsRecorder
+
+
+@configclass
+class PreStepGenerationActionsRecorderCfg(RecorderTermCfg):
+    """Configuration for generation action export during HDF5 recording."""
+
+    class_type: type[RecorderTerm] = PreStepGenerationActionsRecorder
 
 
 @configclass
@@ -121,8 +147,21 @@ class PreStepGenerationPoseRecorderCfg(RecorderTermCfg):
 class GenerationRecorderManagerCfg(ActionStateRecorderManagerCfg):
     """Default action/state recorder plus generated pose and camera observations."""
 
+    record_pre_step_actions = PreStepGenerationActionsRecorderCfg()
     record_pre_step_generation_pose = PreStepGenerationPoseRecorderCfg()
     record_pre_step_camera_observations = PreStepCameraObservationsRecorderCfg()
+
+
+def _set_generated_actions_mode(env: ManagerBasedRLMimicEnv, actions_mode: str) -> None:
+    """Stamp generated HDF5 outputs with an explicit action representation mode."""
+    recorder_manager = getattr(env, "recorder_manager", None)
+    if recorder_manager is None:
+        return
+    for attr_name in ("_dataset_file_handler", "_failed_episode_dataset_file_handler"):
+        handler = getattr(recorder_manager, attr_name, None)
+        data_group = getattr(handler, "_hdf5_data_group", None)
+        if data_group is not None:
+            data_group.attrs["actions_mode"] = actions_mode
 
 
 def _build_post_reset_hold_action(env: ManagerBasedRLMimicEnv) -> torch.Tensor:
@@ -154,6 +193,18 @@ def _stabilize_after_initial_reset(
     batched_action = hold_action.reshape(1, -1).repeat(env.num_envs, 1)
     for _ in range(int(num_steps)):
         env.step(batched_action)
+
+
+def _resolve_generation_garment_settle_steps(requested_steps: int) -> int:
+    """Clamp generation settle steps to a cloth-safe minimum."""
+    requested_steps = int(requested_steps)
+    effective_steps = max(requested_steps, MIN_GENERATION_GARMENT_SETTLE_STEPS)
+    if effective_steps != requested_steps:
+        print(
+            "Increasing garment_settle_steps from "
+            f"{requested_steps} to {effective_steps} for generation cloth stability."
+        )
+    return effective_steps
 
 
 def _validate_source_dataset_contract(
@@ -331,6 +382,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
 
     task_id = task_name or env_name
     setattr(env_cfg, "task_type", _resolve_task_type(task_id, parsed_args.task_type))
+    setattr(env_cfg, "force_pinocchio_generation", bool(parsed_args.enable_pinocchio))
     apply_common_mimic_env_overrides(env_cfg, parsed_args)
     _normalize_last_subtask_offsets_for_generation(env_cfg)
     print(f"Using mimic IK orientation_weight={float(parsed_args.mimic_ik_orientation_weight):.4f}")
@@ -357,6 +409,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         )
 
     env = gym.make(env_name, cfg=env_cfg).unwrapped
+    _set_generated_actions_mode(env, "ee_pose")
 
     if not isinstance(env, ManagerBasedRLMimicEnv):
         raise ValueError("The environment should be derived from ManagerBasedRLMimicEnv")
@@ -365,9 +418,11 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         success_term = TerminationTermCfg(func=recording_style_success_tensor, params={}, time_out=False)
         print("Using recording-style garment success checker for generation.")
 
-    requires_env_ik_solver = True
+    force_pinocchio_generation = bool(parsed_args.enable_pinocchio)
+    requires_env_ik_solver = force_pinocchio_generation
     if (
-        hasattr(env, "_is_native_mimic_ik_action_contract")
+        not force_pinocchio_generation
+        and hasattr(env, "_is_native_mimic_ik_action_contract")
         and hasattr(env, "action_manager")
         and hasattr(env.action_manager, "total_action_dim")
     ):
@@ -393,6 +448,8 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
                 "Generation requires a working IK solver in the environment, "
                 f"but initialization failed: {exc}"
             ) from exc
+        if force_pinocchio_generation:
+            print("Using Pinocchio pose->joint conversion for generation.")
     else:
         print("Using native env IK action contract for generation (no Pinocchio pose->joint conversion).")
 
@@ -406,17 +463,28 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
     np.random.seed(env.cfg.datagen_config.seed)
     torch.manual_seed(env.cfg.datagen_config.seed)
 
+    # If --pose_sequence is set, monkey-patch the garment's _sample_reset_pose
+    # so every reset pulls the current Halton pose.  Advance happens once per
+    # successful episode (see run_data_generator_with_object_pose_failures).
+    pose_sequence = _build_pose_sequence(parsed_args, env)
+    if pose_sequence is not None:
+        # The Halton sequence is authoritative over the trial count: generate
+        # exactly as many successful demos as there are poses in the sequence.
+        env.cfg.datagen_config.generation_num_trials = pose_sequence.total
+        pose_sequence.log_status()
+
     env.reset()
     if hasattr(env, "initialize_obs"):
         try:
             env.initialize_obs()
         except Exception as exc:
             print(f"Warning: initialize_obs failed during generation reset: {exc}")
+    garment_settle_steps = _resolve_generation_garment_settle_steps(parsed_args.garment_settle_steps)
     post_reset_hold_action = _build_post_reset_hold_action(env)
     _stabilize_after_initial_reset(
         env,
         hold_action=post_reset_hold_action,
-        num_steps=int(parsed_args.garment_settle_steps),
+        num_steps=garment_settle_steps,
     )
 
     if bool(parsed_args.strict_preflight):
@@ -473,8 +541,10 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         align_object_pose_mode=object_alignment_mode,
         pause_subtask=parsed_args.pause_subtask,
         log_success=bool(parsed_args.log_success),
-        post_reset_settle_steps=int(parsed_args.garment_settle_steps),
+        post_reset_settle_steps=garment_settle_steps,
         post_reset_hold_action=post_reset_hold_action,
+        save_failed_full=bool(getattr(parsed_args, "save_failed", False)),
+        pose_sequence=pose_sequence,
     )
 
     import isaaclab_mimic.datagen.generation as mimic_generation
@@ -494,6 +564,7 @@ def run_generation(parsed_args, simulation_app_instance) -> None:
         logging_interval=int(parsed_args.logging_interval),
         log_success=bool(parsed_args.log_success),
         worker_tasks=async_components["tasks"],
+        pose_sequence=pose_sequence,
     )
 
 

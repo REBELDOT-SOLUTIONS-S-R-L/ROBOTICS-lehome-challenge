@@ -12,6 +12,11 @@ from isaaclab_tasks.utils import parse_env_cfg
 from scripts.eval_policy import PolicyRegistry
 from scripts.eval_policy.base_policy import BasePolicy
 
+from scripts.mimicgen.core.cuda_visual_sync import (
+    apply_cuda_fabric_render_settings,
+    force_cuda_render_sync,
+    post_reset_cuda_visual_sync,
+)
 from scripts.utils.eval_utils import (
     convert_ee_pose_to_joints,
     save_videos_from_observations,
@@ -105,6 +110,7 @@ def run_evaluation_loop(
         # 1. Reset Environment & Policy
         env.reset()
         policy.reset()
+        post_reset_cuda_visual_sync(env)
         stabilize_garment_after_reset(env, args)
 
         # 2. Initial Observation (Numpy)
@@ -155,6 +161,10 @@ def run_evaluation_loop(
 
             # 6. Step Environment
             env.step(action)
+            # On CUDA: mirror articulation transforms to USD and force a
+            # render tick so camera tensors and the viewer don't go stale.
+            # No-op on CPU envs.
+            force_cuda_render_sync(env)
 
             # Check success first
             if not success_flag:
@@ -242,7 +252,11 @@ def eval(args: argparse.Namespace, simulation_app: Any) -> None:
     """
     # 1. Environment Configuration
     env_cfg = parse_env_cfg(args.task, device=args.device)
-    env_cfg.sim.use_fabric = False
+    # On CUDA the renderer/cameras need fabric-backed transform updates, or
+    # the viewer freezes and camera sensors return stale frames. On CPU the
+    # original use_fabric=False path is required.
+    if not apply_cuda_fabric_render_settings(env_cfg, args.device, context="eval"):
+        env_cfg.sim.use_fabric = False
     if args.use_random_seed:
         env_cfg.use_random_seed = True
     else:
@@ -286,6 +300,19 @@ def eval(args: argparse.Namespace, simulation_app: Any) -> None:
             {
                 "policy_path": args.policy_path,
                 "dataset_root": args.dataset_root,
+                "task_description": args.task_description,
+            }
+        )
+    elif args.policy_type == "gr00t":
+        policy_kwargs.update(
+            {
+                "host": args.gr00t_host,
+                "port": args.gr00t_port,
+                "action_horizon": args.gr00t_action_horizon,
+                "action_repeat": args.gr00t_action_repeat,
+                "modality_json_path": args.gr00t_modality_json,
+                "api_token": args.gr00t_api_token,
+                "timeout_ms": args.gr00t_timeout_ms,
                 "task_description": args.task_description,
             }
         )

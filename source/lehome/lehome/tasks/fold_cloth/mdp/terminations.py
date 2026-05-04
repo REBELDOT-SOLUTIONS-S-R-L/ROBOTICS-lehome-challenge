@@ -43,8 +43,16 @@ def garment_folded(
     right_arm = env.scene["right_arm"]
 
     is_rest = torch.logical_and(
-        is_so101_at_rest_pose(left_arm.data.joint_pos, left_arm.data.joint_names),
-        is_so101_at_rest_pose(right_arm.data.joint_pos, right_arm.data.joint_names),
+        is_so101_at_rest_pose(
+            left_arm.data.joint_pos,
+            left_arm.data.joint_names,
+            arm_name="left_arm",
+        ),
+        is_so101_at_rest_pose(
+            right_arm.data.joint_pos,
+            right_arm.data.joint_names,
+            arm_name="right_arm",
+        ),
     )
     done = torch.logical_and(done, is_rest)
 

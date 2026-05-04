@@ -267,6 +267,19 @@ def setup_record_annotated_parser(
         help="Path of the particle configuration.",
     )
 
+    pose_group = parser.add_argument_group("pose sequence")
+    pose_group.add_argument(
+        "--pose_sequence",
+        type=int,
+        default=None,
+        help=(
+            "Number of deterministic pose samples using a Halton "
+            "low-discrepancy sequence over (pos_x, pos_y, rot_x, rot_y). "
+            "Each episode uses a unique pose from the sequence. "
+            "Advances only on successful saves. Overrides --num_episode."
+        ),
+    )
+
     runtime_group = parser.add_argument_group("runtime and debugging")
     runtime_group.add_argument(
         "--use_random_seed",
@@ -289,11 +302,11 @@ def setup_record_annotated_parser(
         default=False,
         help="Print EEF and garment checkpoint positions during teleoperation.",
     )
-    parser.add_argument(
+    runtime_group.add_argument(
         "--debugging_markers",
         action="store_true",
         default=False,
-        help=argparse.SUPPRESS,
+        help="Show live garment semantic keypoint markers during annotated teleoperation.",
     )
     runtime_group.add_argument(
         "--step_hz", type=int, default=90, help="Environment stepping rate in Hz."
@@ -648,6 +661,54 @@ def setup_eval_parser() -> argparse.ArgumentParser:
         "--dataset_root",
         type=str,
         help="Path of the train dataset (for metadata).",
+    )
+
+    gr00t_group = parser.add_argument_group("gr00t policy (client)")
+    gr00t_group.add_argument(
+        "--gr00t_host",
+        type=str,
+        default="localhost",
+        help="Host of the running GR00T inference server.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_port",
+        type=int,
+        default=5555,
+        help="Port of the running GR00T inference server.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_action_horizon",
+        type=int,
+        default=8,
+        help="Number of actions consumed from each server-returned chunk before re-querying.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_action_repeat",
+        type=int,
+        default=3,
+        help=(
+            "How many env.step() calls each predicted action is held for. "
+            "Matches policy control rate (training fps) to sim rate (1/sim.dt). "
+            "Default 3 = training 30fps vs fold_cloth env 90Hz."
+        ),
+    )
+    gr00t_group.add_argument(
+        "--gr00t_modality_json",
+        type=str,
+        default="configs/gr00t/modality.json",
+        help="Path to the modality.json matching the deployed GR00T checkpoint.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_api_token",
+        type=str,
+        default=None,
+        help="Optional API token if the GR00T server was launched with one.",
+    )
+    gr00t_group.add_argument(
+        "--gr00t_timeout_ms",
+        type=int,
+        default=60000,
+        help="ZMQ send/recv timeout for GR00T client calls, in milliseconds.",
     )
 
     compatibility_group = parser.add_argument_group("compatibility and legacy")
